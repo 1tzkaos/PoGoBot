@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
  
 from ppadb.client import Client
-from PIL import Image
+from PIL import Image, ImageFile
 import numpy
 import time
 import random
 from os import system as terminal
 import ctypes
 from pypresence import Presence
- 
+from colorama import Fore, Back, Style
  
  
  
 terminal("cls")
 adb = Client(host='127.0.0.1', port=5037)
 devices = adb.devices()
+print(devices)
  
 if len(devices) == 0:
     print('no device attached')
@@ -22,11 +23,12 @@ if len(devices) == 0:
  
 device = devices[0]
  
- 
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 #
 # Reset Stats
 #
- 
+
+shinies=0
 pokestops=0
 caught=0
 thrown=0
@@ -44,10 +46,13 @@ thrown=0
 print("Starting bot!")
 while 1:
  
- 
- 
- 
-    image = device.screencap()
+    try: 
+        image = device.screencap()
+        print('Updating...')
+    except:
+        pass
+
+
  
  
  
@@ -72,7 +77,7 @@ while 1:
     randy = random.randint(1280,1683)
     device.shell(f'input tap {int(randx)} {int(randy)}')
 
-    pokestop = photo.getpixel((529, 2020))
+    pokestop = photo.getpixel((962, 273))
     gym = photo.getpixel((900,2100))
     rando = photo.getpixel((941,2051))
     pokemon = photo.getpixel((938, 1958))
@@ -80,8 +85,109 @@ while 1:
     newpokecaught = photo.getpixel((541, 1510))
     rando1 = photo.getpixel((886, 2156))
     teamrocket = photo.getpixel((743, 1652))
-    menubutton = photo.getpixel((923,2019))
+    menubutton = photo.getpixel((930,2000))
+    failsafe = photo.getpixel((479,1616))
+    homescreen = photo.getpixel((573,2059))
+    battlefailsafe = photo.getpixel((290, 229))
+    menufailsafe = photo.getpixel((544, 1865))
+    xp = (caught*1120)+(pokestops*100)
+    shop = photo.getpixel((546, 1175))
+    battle = photo.getpixel((705, 1427))
+    battleinfo = photo.getpixel((684, 1896))
+
+
     #print("Caught: " + str(pokecaught) + "     Pokestop: " + str(pokestop) + "     Found: " + str(pokemon) + "     Menu: " + str(menubutton))
+
+
+    if(battleinfo[0]==14 and battleinfo[1]==42 and battleinfo[2]==33):
+        print('Battle info screen')
+        device.shell(f'input tap 533 2061')
+        time.sleep(0.3)
+        device.shell(f'input tap 533 2061')
+        time.sleep(0.5)
+    if(battle[0]>230 and battle[0]<235 and battle[1]>125 and battle[1]<130 and battle[2]>180 and battle[2]<187):
+        print("Trying to battle in league")
+        print("Returning to map")
+        device.shell(f'input tap 543 2054') 
+        time.sleep(1)
+
+
+
+    if(shop[0]>220 and shop[0]<230 and shop[1]>195 and shop[1]<200 and shop[2]>62 and shop[2]<70):
+        print('In Shop Menu')
+        device.shell(f'input tap 547 2052') 
+        time.sleep(1)
+
+    if(menufailsafe[0]==105 and menufailsafe[1]==213 and menufailsafe[2]== 158):
+        print("In battle")
+        device.shell(f'input tap 547 2052') 
+        time.sleep(1)
+        device.shell(f'input tap 113 253') 
+        time.sleep(1)
+        device.shell(f'input tap 520 1116') 
+        time.sleep(1)
+
+
+    if(battlefailsafe[0]==236 and battlefailsafe[1]==240 and battlefailsafe[2]==236):
+        print("In battle")
+        device.shell(f'input tap 113 256') 
+        time.sleep(1)
+        device.shell(f'input tap 529 1144') 
+        time.sleep(1)
+    if(homescreen[0]==87 and homescreen[1]==66 and homescreen[2]>249):
+        print("Home Screen Identified. Starting failsafe.")
+        time.sleep(0.5)
+        device.shell(f'input tap 537 952')
+        time.sleep(60)
+        device.shell(f'input tap 537 1325')
+
+    if(failsafe[0]== 215 and failsafe[1]==139 and failsafe[2]==255):
+        print("Failsafe Triggered!")
+        time.sleep(0.5)
+        device.shell(f'input tap 543 2064')
+        time.sleep(1)
+        image = device.screencap()
+        with open('./screenshots/screen.png', 'wb') as f:
+            f.write(image)
+        time.sleep(2)
+        shiny = photo.getpixel((704, 544))
+        if(shiny[0]>250 and shiny[1]>230 and shiny[2]<240 and shiny[2]<10):
+            print(Fore.YELLOW + 'SHINY!!!!' + Fore.RESET)
+            shinies = shinies+1
+            device.shell(f'input tap 536 2061')
+            time.sleep(0.5)
+        else:
+            print("Menu button")
+            device.shell(f'input tap 927 2021')
+            time.sleep(1)
+            device.shell(f'input tap 851 1651')
+            time.sleep(0.5)
+            device.shell(f'input tap 851 1651')
+            time.sleep(1.5)
+            image = device.screencap()
+            with open('./screenshots/screen.png', 'wb') as f:
+                f.write(image)
+            time.sleep(0.5)
+            star = photo.getpixel((232,1427))
+
+            if(star==(255,213,122)):
+                print(f"Good IV's")
+                time.sleep(1)
+                device.shell(f'input tap 851 1651')
+                time.sleep(1)
+                device.shell(f'input tap 525 2045')
+            else:
+                print(f"Bad IV's")
+                time.sleep(1)
+                device.shell(f'input tap 851 1651')
+                time.sleep(1)
+                device.shell(f'input tap 927 2021')
+                time.sleep(1)
+                device.shell(f'input tap 935 1848')
+                time.sleep(1)
+                device.shell(f'input tap 540 1250')
+                time.sleep(0.5)
+
 
     if(rando[0]==26 and rando[1]==128 and rando[2]==145):
         time.sleep(1)
@@ -100,40 +206,11 @@ while 1:
         time.sleep(1)
         device.shell(f'input tap 525 2045')
 
-    if(menubutton[0]>24 and menubutton[0]<32 and menubutton[1]>130 and menubutton[1]<140 and menubutton[2]>145 and menubutton[2]<155):
-        print("Menu button")
-        device.shell(f'input tap 927 2021')
-        time.sleep(1)
-        device.shell(f'input tap 851 1651')
-        time.sleep(0.5)
-        device.shell(f'input tap 851 1651')
-        time.sleep(1.5)
-        star = photo.getpixel((232,1427))
-
-        if(star==(255,213,122)):
-            print(f"Good IV's")
-            time.sleep(1)
-            device.shell(f'input tap 851 1651')
-            time.sleep(1)
-            device.shell(f'input tap 525 2045')
-        else:
-            print(f"Bad IV's")
-            time.sleep(1)
-            device.shell(f'input tap 851 1651')
-            time.sleep(1)
-            device.shell(f'input tap 927 2021')
-            time.sleep(1)
-            device.shell(f'input tap 935 1848')
-            time.sleep(1)
-            device.shell(f'input tap 540 1250')
-            time.sleep(0.5)
-    
-
-    if(pokemon[0]>205 and pokemon[0]<220 and pokemon[1]>50 and pokemon[1]<75 and pokemon[2]>25 and pokemon[2]<32):
+    if(pokemon[0]>205 and pokemon[0]<220 and pokemon[1]>50 and pokemon[1]<78 and pokemon[2]>20 and pokemon[2]<32):
         print("Pokemon Found!")
         throw = random.randint(10,150)
         thrown = thrown+1
-        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Pokeballs Thrown: {int(thrown)}")
+        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         time.sleep(1)        
         print(f'Throwing at {int(throw)} power!')   
@@ -145,76 +222,106 @@ while 1:
     if(pokecaught[0]==115 and pokecaught[1]==214 and pokecaught[2]==157):
         print('Pokemon Caught!')
         caught = caught+1
-        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Pokeballs Thrown: {int(thrown)}")
+        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         device.shell(f'input tap 540 1500')
         time.sleep(3)
-        print("Menu button")
-        device.shell(f'input tap 927 2021')
-        time.sleep(1)
-        device.shell(f'input tap 851 1651')
-        time.sleep(0.5)
-        device.shell(f'input tap 851 1651')
-        time.sleep(1.5)
-        star = photo.getpixel((232,1427))
-
-        if(star==(255,213,122)):
-            print(f"Good IV's")
-            time.sleep(1)
-            device.shell(f'input tap 851 1651')
-            time.sleep(1)
-            device.shell(f'input tap 525 2045')
+        image = device.screencap()
+        with open('./screenshots/screen.png', 'wb') as f:
+            f.write(image)
+        time.sleep(2)
+        shiny = photo.getpixel((704, 544))
+        if(shiny[0]>250 and shiny[1]>230 and shiny[2]<240 and shiny[2]<10):
+            print(Fore.YELLOW + 'SHINY!!!!' + Fore.RESET)
+            shinies = shinies+1
+            device.shell(f'input tap 536 2061')
+            time.sleep(0.5)
         else:
-            print(f"Bad IV's")
-            time.sleep(1)
-            device.shell(f'input tap 851 1651')
-            time.sleep(1)
+            print("Menu button")
             device.shell(f'input tap 927 2021')
             time.sleep(1)
-            device.shell(f'input tap 935 1848')
-            time.sleep(1)
-            device.shell(f'input tap 540 1250')
+            device.shell(f'input tap 851 1651')
             time.sleep(0.5)
+            device.shell(f'input tap 851 1651')
+            time.sleep(1.5)
+            image = device.screencap()
+            with open('./screenshots/screen.png', 'wb') as f:
+                f.write(image)
+            time.sleep(0.5)
+            star = photo.getpixel((232,1427))
+
+            if(star==(255,213,122)):
+                print(f"Good IV's")
+                time.sleep(1)
+                device.shell(f'input tap 851 1651')
+                time.sleep(1)
+                device.shell(f'input tap 525 2045')
+            else:
+                print(f"Bad IV's")
+                time.sleep(1)
+                device.shell(f'input tap 851 1651')
+                time.sleep(1)
+                device.shell(f'input tap 927 2021')
+                time.sleep(1)
+                device.shell(f'input tap 935 1848')
+                time.sleep(1)
+                device.shell(f'input tap 540 1250')
+                time.sleep(0.5)
 
 
 
     if(pokecaught[0]==176 and pokecaught[1]==234 and pokecaught[2]==197):
         print('Pokemon Caught!')
         caught = caught+1
-        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Pokeballs Thrown: {int(thrown)}")
+        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         device.shell(f'input tap 540 1500')
         time.sleep(3)
-        print("Menu button")
-        device.shell(f'input tap 927 2021')
-        time.sleep(1)
-        device.shell(f'input tap 851 1651')
-        time.sleep(0.5)
-        device.shell(f'input tap 851 1651')
-        time.sleep(1.5)
-        star = photo.getpixel((232,1427))
-
-        if(star==(255,213,122)):
-            print(f"Good IV's")
-            time.sleep(1)
-            device.shell(f'input tap 851 1651')
-            time.sleep(1)
-            device.shell(f'input tap 525 2045')
+        image = device.screencap()
+        with open('./screenshots/screen.png', 'wb') as f:
+            f.write(image)
+        time.sleep(2)
+        shiny = photo.getpixel((704, 544))
+        if(shiny[0]>250 and shiny[1]>230 and shiny[2]<240 and shiny[2]<10):
+            print(Fore.YELLOW + 'SHINY!!!!' + Fore.RESET)
+            shinies = shinies+1
+            device.shell(f'input tap 536 2061')
+            time.sleep(0.5)
         else:
-            print(f"Bad IV's")
-            time.sleep(1)
-            device.shell(f'input tap 851 1651')
-            time.sleep(1)
+            print("Menu button")
             device.shell(f'input tap 927 2021')
             time.sleep(1)
-            device.shell(f'input tap 935 1848')
-            time.sleep(1)
-            device.shell(f'input tap 540 1250')
-            time.sleep(1)
+            device.shell(f'input tap 851 1651')
+            time.sleep(0.5)
+            device.shell(f'input tap 851 1651')
+            time.sleep(1.5)
+            image = device.screencap()
+            with open('./screenshots/screen.png', 'wb') as f:
+                f.write(image)
+            time.sleep(0.5)
+            star = photo.getpixel((232,1427))
+
+            if(star==(255,213,122)):
+                print(f"Good IV's")
+                time.sleep(1)
+                device.shell(f'input tap 851 1651')
+                time.sleep(1)
+                device.shell(f'input tap 525 2045')
+            else:
+                print(f"Bad IV's")
+                time.sleep(1)
+                device.shell(f'input tap 851 1651')
+                time.sleep(1)
+                device.shell(f'input tap 927 2021')
+                time.sleep(1)
+                device.shell(f'input tap 935 1848')
+                time.sleep(1)
+                device.shell(f'input tap 540 1250')
+                time.sleep(0.5)
     if(newpokecaught[0]==114 and newpokecaught[1]==214 and newpokecaught[2]==157):
         print('Pokemon Caught! New Pokemon!')
         caught = caught+1
-        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Pokeballs Thrown: {int(thrown)}")
+        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         device.shell(f'input tap 540 1500')
         time.sleep(20)
@@ -225,9 +332,13 @@ while 1:
         time.sleep(2)
         device.shell(f'input tap 851 1651')
         time.sleep(1.5)
+        image = device.screencap()
+        with open('./screenshots/screen.png', 'wb') as f:
+            f.write(image)
+        time.sleep(0.5)
         star = photo.getpixel((232,1427))
 
-        if(star==(255,213,122)):
+        if(star[0]>250 and star[1]>205 and star[1]<220 and star[2]>118 and star[2]<128):
             print(f"Good IV's")
             time.sleep(1)
             device.shell(f'input tap 851 1651')
@@ -259,15 +370,29 @@ while 1:
         time.sleep(2)
 
 
-    if(pokestop[0]>218 and pokestop[1]>235 and pokestop[2]>225):
+    if(pokestop[0]>=240 and pokestop[1]>=245 and pokestop[2]>=240):
         print("Pokestop Found!")
-        pokestops = pokestops+1
-        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Pokeballs Thrown: {int(thrown)}")
-        #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
-        device.shell(f'input touchscreen swipe 200 1000 800 100 100')
-        time.sleep(0.2)
-        device.shell(f'input tap 525 2045')
-        time.sleep(1)
+        image = device.screencap()
+
+    
+    
+    
+    
+        with open('./screenshots/screen.png', 'wb') as f:
+            f.write(image)
+        fail = photo.getpixel((536, 1643))
+        if(fail[0]==28 and fail[1]==100 and fail[2]==203):
+            device.shell(f'input tap 538, 2045')
+            time.sleep(0.5)
+
+        else:
+            pokestops = pokestops+1
+            ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
+            #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
+            device.shell(f'input touchscreen swipe 200 1000 800 100 100')
+            time.sleep(0.2)
+            device.shell(f'input tap 525 2045')
+            time.sleep(1)
 
 
 
@@ -280,17 +405,5 @@ while 1:
         time.sleep(1)
 
  
- 
-    '''
-        elif(R==80 and G==255 and B==255):
-            time.sleep(1)
-            print(f"Pokestop Found at {int(x)} {int(y)}!")
-            device.shell(f'input tap {int(x)} {int(y-10)}')
-            time.sleep(1)
-            device.shell(f'input touchscreen swipe 200 1000 800 100 100')
-            time.sleep(1)
-            device.shell(f'input tap 525 2045')
-            time.sleep(5)
-            break
-    '''
+
 
