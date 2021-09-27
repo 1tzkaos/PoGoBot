@@ -94,10 +94,33 @@ while 1:
     shop = photo.getpixel((546, 1175))
     battle = photo.getpixel((705, 1427))
     battleinfo = photo.getpixel((684, 1896))
+    closet = photo.getpixel((977, 219))
+    pokedex = photo.getpixel((1023, 2073))
+    menu = photo.getpixel((965,412))
+    shopfailsafe = photo.getpixel((270,1284))
 
+    if(shopfailsafe[0]>250 and shopfailsafe[1]>119 and shopfailsafe[1]<125 and shopfailsafe[2]>145 and shopfailsafe[2]<153):
+        print("In Shop")
+        device.shell(f'input tap 550 2070')
+        time.sleep(0.5)
+        device.shell(f'input tap 550 2070')
+        time.sleep(0.5)
+
+    if(menu[0]>250 and menu[1]>90 and menu[1]<100 and menu[2]>20 and menu[2]<25):
+        print("In Menu")
+        device.shell(f'input tap 550 2070')
+        time.sleep(0.5)
 
     #print("Caught: " + str(pokecaught) + "     Pokestop: " + str(pokestop) + "     Found: " + str(pokemon) + "     Menu: " + str(menubutton))
+    if(pokedex[0]>145 and pokedex[0]<150 and pokedex[1]>115 and pokedex[1]<120 and pokedex[2]>250):
+        print("In Pokedex")
+        device.shell(f'input tap 550 2070')
+        time.sleep(0.5)
 
+    if(closet[0]>15 and closet[0]<25 and closet[1]>128 and closet[1]<136 and closet[2]>134 and closet[2]<142):
+        print("In Closet")
+        device.shell(f'input tap 539 2120')
+        time.sleep(0.5)
 
     if(battleinfo[0]==14 and battleinfo[1]==42 and battleinfo[2]==33):
         print('Battle info screen')
@@ -118,7 +141,7 @@ while 1:
         device.shell(f'input tap 547 2052') 
         time.sleep(1)
 
-    if(menufailsafe[0]==105 and menufailsafe[1]==213 and menufailsafe[2]== 158):
+    if(menufailsafe[0]>100 and menufailsafe[0]<110 and menufailsafe[1]>210 and menufailsafe[1]<220 and menufailsafe[2]>150 and menufailsafe[2]<160):
         print("In battle")
         device.shell(f'input tap 547 2052') 
         time.sleep(1)
@@ -128,12 +151,14 @@ while 1:
         time.sleep(1)
 
 
-    if(battlefailsafe[0]==236 and battlefailsafe[1]==240 and battlefailsafe[2]==236):
+    if(battlefailsafe[0]>230 and battlefailsafe[0]<240 and battlefailsafe[1]>238 and battlefailsafe[1]<242 and battlefailsafe[2]>230 and battlefailsafe[2]<240):
         print("In battle")
         device.shell(f'input tap 113 256') 
         time.sleep(1)
         device.shell(f'input tap 529 1144') 
         time.sleep(1)
+# leave: 111 277
+
     if(homescreen[0]==87 and homescreen[1]==66 and homescreen[2]>249):
         print("Home Screen Identified. Starting failsafe.")
         time.sleep(0.5)
@@ -214,7 +239,7 @@ while 1:
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         time.sleep(1)        
         print(f'Throwing at {int(throw)} power!')   
-        device.shell(f'input touchscreen swipe 555 1900 555 1200 {int(throw)}')
+        device.shell(f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
         time.sleep(14)
 
 
@@ -256,16 +281,19 @@ while 1:
                 device.shell(f'input tap 851 1651')
                 time.sleep(1)
                 device.shell(f'input tap 525 2045')
+
             else:
                 print(f"Bad IV's")
-                time.sleep(1)
+                time.sleep(0.6)
                 device.shell(f'input tap 851 1651')
-                time.sleep(1)
+                time.sleep(0.6)
                 device.shell(f'input tap 927 2021')
-                time.sleep(1)
+                time.sleep(0.6)
                 device.shell(f'input tap 935 1848')
-                time.sleep(1)
+                time.sleep(0.6)
                 device.shell(f'input tap 540 1250')
+                time.sleep(0.5)
+                device.shell(f'input tap 525 1170')
                 time.sleep(0.5)
 
 
@@ -276,7 +304,7 @@ while 1:
         ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         device.shell(f'input tap 540 1500')
-        time.sleep(3)
+        time.sleep(2)
         image = device.screencap()
         with open('./screenshots/screen.png', 'wb') as f:
             f.write(image)
@@ -318,6 +346,8 @@ while 1:
                 time.sleep(1)
                 device.shell(f'input tap 540 1250')
                 time.sleep(0.5)
+                device.shell(f'input tap 525 1170')
+                time.sleep(0.5)
     if(newpokecaught[0]==114 and newpokecaught[1]==214 and newpokecaught[2]==157):
         print('Pokemon Caught! New Pokemon!')
         caught = caught+1
@@ -327,9 +357,9 @@ while 1:
         time.sleep(20)
         print("Menu button")
         device.shell(f'input tap 927 2021')
-        time.sleep(2)
+        time.sleep(1)
         device.shell(f'input tap 851 1651')
-        time.sleep(2)
+        time.sleep(1)
         device.shell(f'input tap 851 1651')
         time.sleep(1.5)
         image = device.screencap()
@@ -340,21 +370,21 @@ while 1:
 
         if(star[0]>250 and star[1]>205 and star[1]<220 and star[2]>118 and star[2]<128):
             print(f"Good IV's")
-            time.sleep(1)
+            time.sleep(0.7)
             device.shell(f'input tap 851 1651')
-            time.sleep(1)
+            time.sleep(0.7)
             device.shell(f'input tap 525 2045')
         else:
             print(f"Bad IV's")
-            time.sleep(1)
+            time.sleep(0.7)
             device.shell(f'input tap 851 1651')
-            time.sleep(1)
+            time.sleep(0.7)
             device.shell(f'input tap 927 2021')
-            time.sleep(1)
+            time.sleep(0.7)
             device.shell(f'input tap 935 1848')
-            time.sleep(1)
+            time.sleep(0.7)
             device.shell(f'input tap 540 1250')
-            time.sleep(1)
+            time.sleep(0.7)
 
 
 
@@ -362,12 +392,12 @@ while 1:
         device.shell(f'input touchscreen swipe 200 1000 800 100 100')
         time.sleep(1)
         device.shell(f'input tap 525 2045')
-        time.sleep(2)
+        time.sleep(0.8)
     if(rando1[0]==31 and rando1[1]==143 and rando1[2]==249):
         device.shell(f'input touchscreen swipe 200 1000 800 100 100')
         time.sleep(1)
         device.shell(f'input tap 525 2045')
-        time.sleep(2)
+        time.sleep(0.8)
 
 
     if(pokestop[0]>=240 and pokestop[1]>=245 and pokestop[2]>=240):
@@ -392,17 +422,16 @@ while 1:
             device.shell(f'input touchscreen swipe 200 1000 800 100 100')
             time.sleep(0.2)
             device.shell(f'input tap 525 2045')
-            time.sleep(1)
+            time.sleep(0.4)
 
 
 
 
     
     if(teamrocket[0]==66 and teamrocket[1]==208 and teamrocket[2]==165):
-        time.sleep(1)
         print("Team Rocket, Fuck that")
         device.shell(f'input tap 525 2045')
-        time.sleep(1)
+        time.sleep(0.4)
 
  
 
