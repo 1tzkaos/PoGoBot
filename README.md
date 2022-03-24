@@ -8,4 +8,4 @@ The bot simply clicks randomly around the middle of the screen while constantly 
 When it has found one, it will automatically catch the pokemon, spin the pokestop, etc.
 
 Calculator for amount of XP gained included.
-Pretty rudimentary bot tbh
+Pretty rudimentary bot tbh. made this in about 4 hours or so
