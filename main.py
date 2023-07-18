@@ -45,7 +45,7 @@ thrown=0
  
 print("Starting bot!")
 while 1:
- 
+    print(devices)
     try: 
         image = device.screencap()
         print('Updating...')
