@@ -1,0 +1,3 @@
+Pillow
+pure-python-adb
+numpy
