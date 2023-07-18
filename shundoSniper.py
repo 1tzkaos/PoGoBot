@@ -42,9 +42,8 @@ RPC = Presence(client_id, pipe=0)  # Initialize the client class
 RPC.connect()  # Start the handshake loop
 start_time = time.time()
 RPC.update(large_image="pokeball",
-           large_text=f"Pokemon Bot\nShinies Caught: {shinies}", start=start_time)
-device.shell(f'input touchscreen swipe 555 300 555 500 100')
-device.shell(f'input touchscreen swipe 555 500 555 300 100')
+           large_text=f"Pokemon Bot", start=start_time)
+
 print("Starting bot!")
 while 1:
     attempts += 1
@@ -58,18 +57,22 @@ while 1:
         time.sleep(3)
 
     print("Teleporting to possible SHUNDO")
-    device.shell('input tap 1050 760')
+    device.shell('input tap 50 300')
     wait = 0
-    while wait < 40:
+    while wait < 15:
         try:
             image = device.screencap()
             print('Updating...')
-            device.shell('input tap 550 1400')
-            time.sleep(0.3)
-            device.shell('input tap 550 1425')
-            time.sleep(0.3)
-            device.shell('input tap 550 1450')
-            time.sleep(0.3)
+            device.shell('input tap 540 1350')
+            time.sleep(0.2)
+            device.shell('input tap 540 1400')
+            time.sleep(0.2)
+            device.shell('input tap 540 1450')
+            time.sleep(0.2)
+            device.shell('input tap 540 1600')
+            time.sleep(0.2)
+            device.shell('input tap 540 1650')
+            time.sleep(0.2)
 
         except:
             pass
@@ -99,7 +102,8 @@ while 1:
             thrown = thrown+1
             ctypes.windll.kernel32.SetConsoleTitleW(
                 f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
-            # RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
+            RPC.update(large_image="pokeball", large_text="Pokemon Bot",
+                       details=f"PogoBot\nShinies Caught: {int(shinies)}", start=start_time)
             time.sleep(1)
             print(f'Throwing at {int(throw)} power!')
             device.shell(
