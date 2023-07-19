@@ -9,3 +9,10 @@ When it has found one, it will automatically catch the pokemon, spin the pokesto
 
 Calculator for amount of XP gained included.
 Pretty rudimentary bot tbh. made this in about 4 hours or so
+
+
+## Installation
+
+1: Download your OS's Android SDK Platform Tools from: https://developer.android.com/tools/releases/platform-tools
+2: Extract the file and put the path of the "platform-tools" folder in your environment variables "path"
+3: Check to see if it worked by going to your 

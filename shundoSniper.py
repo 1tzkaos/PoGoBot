@@ -32,6 +32,7 @@ pokestops = 0
 caught = 0
 thrown = 0
 attempts = 0
+totalAttempts = 0
 
 #
 #
@@ -47,6 +48,7 @@ RPC.update(large_image="pokeball",
 print("Starting bot!")
 while 1:
     attempts += 1
+    totalAttempts += 1
     if (attempts >= 10):
         attempts = 0
         device.shell('input tap 800 2300')
@@ -58,11 +60,12 @@ while 1:
 
     print("Teleporting to possible SHUNDO")
     device.shell('input tap 50 300')
+    time.sleep(1)
     wait = 0
     while wait < 15:
         try:
             image = device.screencap()
-            print('Updating...')
+
             device.shell('input tap 540 1350')
             time.sleep(0.2)
             device.shell('input tap 540 1400')
@@ -89,8 +92,15 @@ while 1:
         pokestop = photo.getpixel((962, 273))
         homescreen = photo.getpixel((573, 2059))
         mainscreen = photo.getpixel((540, 2010))
-
-        print(homescreen)
+        xbutton = photo.getpixel((530, 2060))
+        if (xbutton[0] > 230 and xbutton[1] > 240 and xbutton[2] > 230):
+            print("In a gym")
+            device.shell(f'input tap 538 2045')
+            time.sleep(0.5)
+            device.shell(f'input tap 538 2045')
+            time.sleep(1)
+            device.shell('input tap 50 300')
+            break
         if (homescreen[0] == 245 and homescreen[1] == 245 and homescreen[2] == 245):
             print("Home Screen Identified. Starting failsafe.")
             time.sleep(0.5)
@@ -104,20 +114,24 @@ while 1:
                 f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
             RPC.update(large_image="pokeball", large_text="Pokemon Bot",
                        details=f"PogoBot\nShinies Caught: {int(shinies)}", start=start_time)
-            time.sleep(1)
-            print(f'Throwing at {int(throw)} power!')
-            device.shell(
-                f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
-            time.sleep(5)
-            if (mainscreen[0] >= 245 and mainscreen[1] > 45 and mainscreen[1] < 70 and mainscreen[2] > 55 and mainscreen[2] < 80):
-                shinies += 1
-                print("SHUNDO CAUGHT")
-                time.sleep(7200)
-                break
+            time.sleep(999999)
+            # print(f'Throwing at {int(throw)} power!')
+            # device.shell(
+            #     f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
+            # time.sleep(5)
+            # if (mainscreen[0] >= 245 and mainscreen[1] > 45 and mainscreen[1] < 70 and mainscreen[2] > 55 and mainscreen[2] < 80):
+            #     shinies += 1
+            #     print("SHUNDO CAUGHT")
+            #     time.sleep(7200)
+            #     break
 
         if (pokestop[0] >= 230 and pokestop[1] >= 240 and pokestop[2] >= 230):
             print("Pokestop Found :( Exiting)")
             device.shell(f'input tap 538 2045')
             time.sleep(0.5)
+            device.shell(f'input tap 538 2045')
+            time.sleep(0.5)
+        ctypes.windll.kernel32.SetConsoleTitleW(
+            f"PogoBot | Shinies Caught: {int(shinies)} | Total Attempts: {int(totalAttempts)} | Wait: {int(wait)} | Attempts: {int(attempts)}")
+
         wait += 1
-        print(wait)
