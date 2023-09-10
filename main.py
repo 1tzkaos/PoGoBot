@@ -45,7 +45,7 @@ thrown=0
  
 print("Starting bot!")
 while 1:
-    print(devices)
+    # print(devices)
     try: 
         image = device.screencap()
         print('Updating...')
@@ -72,7 +72,6 @@ while 1:
     #print("OK: " + str(photo.getpixel(((540, 1450)))))
  
 
-
     randx = random.randint(320,770)
     randy = random.randint(1280,1683)
     device.shell(f'input tap {int(randx)} {int(randy)}')
@@ -98,6 +97,14 @@ while 1:
     pokedex = photo.getpixel((1023, 2073))
     menu = photo.getpixel((965,412))
     shopfailsafe = photo.getpixel((270,1284))
+
+    battlefail = photo.getpixel((695,1630))
+
+
+
+    if(battlefail[0]>225  and battlefail[1]>120 and battlefail[1]<150 and battlefail[2]>170 and battlefail[2]<190 ):
+        print("In battle screen")
+        device.shell(f'input tap 550 2070')
 
     if(shopfailsafe[0]>250 and shopfailsafe[1]>119 and shopfailsafe[1]<125 and shopfailsafe[2]>145 and shopfailsafe[2]<153):
         print("In Shop")
@@ -159,7 +166,7 @@ while 1:
         time.sleep(1)
 # leave: 111 277
 
-    if(homescreen[0]==87 and homescreen[1]==66 and homescreen[2]>249):
+    if(homescreen[0]==245 and homescreen[1]==245 and homescreen[2]>=245):
         print("Home Screen Identified. Starting failsafe.")
         time.sleep(0.5)
         device.shell(f'input tap 537 952')
@@ -231,16 +238,33 @@ while 1:
         time.sleep(1)
         device.shell(f'input tap 525 2045')
 
-    if(pokemon[0]>205 and pokemon[0]<220 and pokemon[1]>50 and pokemon[1]<78 and pokemon[2]>20 and pokemon[2]<32):
+    if(pokemon[0]>205 and pokemon[0]<250 and pokemon[1]>50 and pokemon[1]<90 and pokemon[2]>20 and pokemon[2]<65):
         print("Pokemon Found!")
         throw = random.randint(10,150)
         thrown = thrown+1
+        caught = caught+1
+
         ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
         #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
         time.sleep(1)        
         print(f'Throwing at {int(throw)} power!')   
         device.shell(f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
-        time.sleep(14)
+        time.sleep(1)
+    
+
+
+    if(pokemon[0]>210 and pokemon[0]<235 and pokemon[1]>220 and pokemon[1]<250 and pokemon[2]>230 and pokemon[2]<240):
+        print("Pokemon Found!")
+        throw = random.randint(10,150)
+        thrown = thrown+1
+        caught = caught+1
+
+        ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
+        #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
+        time.sleep(1)        
+        print(f'Throwing at {int(throw)} power!')   
+        device.shell(f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
+        time.sleep(1)
 
 
 
@@ -400,7 +424,7 @@ while 1:
         time.sleep(0.8)
 
 
-    if(pokestop[0]>=240 and pokestop[1]>=245 and pokestop[2]>=240):
+    if(pokestop[0]>=230 and pokestop[1]>=240 and pokestop[2]>=230):
         print("Pokestop Found!")
         image = device.screencap()
 
@@ -428,7 +452,7 @@ while 1:
 
 
     
-    if(teamrocket[0]==66 and teamrocket[1]==208 and teamrocket[2]==165):
+    if(teamrocket[0]>=60 and teamrocket[0]<=80 and teamrocket[1]>=190 and teamrocket[1]<=220  and teamrocket[2]>=150 and teamrocket[2]<=180 ):
         print("Team Rocket, Fuck that")
         device.shell(f'input tap 525 2045')
         time.sleep(0.4)
