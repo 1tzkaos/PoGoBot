@@ -10,8 +10,10 @@ import ctypes
 from pypresence import Presence
 from colorama import Fore, Back, Style
  
- 
- 
+# adb tcpip 5555
+# adb shell ip addr show wlan0
+# 141.219.212.177:5555
+# 141.219.212.249:5555
 terminal("cls")
 adb = Client(host='127.0.0.1', port=5037)
 devices = adb.devices()
@@ -99,13 +101,12 @@ while 1:
         shopfailsafe = photo.getpixel((270,1284))
 
         battlefail = photo.getpixel((695,1630))
-
         pokePickFailsafe = photo.getpixel((900,2100))
-
 
     except:
         pass
 # (75, 210, 163)
+
     if(pokePickFailsafe[0]>70 and pokePickFailsafe[0]<80 and pokePickFailsafe[1]>200 and pokePickFailsafe[1]<215 and pokePickFailsafe[2]>160 and pokePickFailsafe[2]<170):
         print('Fighting Team Rocket')
         device.shell(f'input tap 900 2100')
