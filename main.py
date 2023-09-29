@@ -51,7 +51,7 @@ print("Starting bot!")
 while 1:
     # print(devices)
     try: 
-        image = device.screencap()
+       
         print('Updating...')
 
 
@@ -60,52 +60,60 @@ while 1:
     
     
         with open('./screenshots/screen.png', 'wb') as f:
-            f.write(image)
+            f.write(device.screencap())
     
         screenshot = Image.open('./screenshots/screen.png')
         photo = screenshot.convert('RGB')
         width = photo.size[0]
         height = photo.size[1]
-    
+    except:
+        pass
         #print("Pokestop: " + str(photo.getpixel((525, 2045))))
         #print("Team Rocket: " +  str(photo.getpixel((743, 1652))))    
         #print("Pokeball: " + str(photo.getpixel(((938, 1958)))))
         #print("OK: " + str(photo.getpixel(((540, 1450)))))
     
 
-        randx = random.randint(320,770)
-        randy = random.randint(1280,1683)
+    randx = random.randint(320,770)
+    randy = random.randint(1280,1683)
+    
+    device.shell(f'input tap {int(randx)} {int(randy)}')
        
-        device.shell(f'input tap {int(randx)} {int(randy)}')
-        
-        pokestop = photo.getpixel((962, 273))
-        gym = photo.getpixel((900,2100))
-        rando = photo.getpixel((941,2051))
-        pokemon = photo.getpixel((938, 1958))
-        pokecaught = photo.getpixel((540, 1450))
-        newpokecaught = photo.getpixel((541, 1510))
-        rando1 = photo.getpixel((886, 2156))
-        teamrocket = photo.getpixel((743, 1652))
-        menubutton = photo.getpixel((930,2000))
-        failsafe = photo.getpixel((479,1616))
-        homescreen = photo.getpixel((573,2059))
-        battlefailsafe = photo.getpixel((290, 229))
-        menufailsafe = photo.getpixel((544, 1865))
-        xp = (caught*1120)+(pokestops*100)
-        shop = photo.getpixel((546, 1175))
-        battle = photo.getpixel((705, 1427))
-        battleinfo = photo.getpixel((684, 1896))
-        closet = photo.getpixel((977, 219))
-        pokedex = photo.getpixel((1023, 2073))
-        menu = photo.getpixel((965,412))
-        shopfailsafe = photo.getpixel((270,1284))
+  
 
-        battlefail = photo.getpixel((695,1630))
-        pokePickFailsafe = photo.getpixel((900,2100))
+    pokestop = photo.getpixel((962, 273))
+    gym = photo.getpixel((900,2100))
+    rando = photo.getpixel((941,2051))
+    pokemon = photo.getpixel((938, 1958))
+    pokecaught = photo.getpixel((540, 1450))
+    newpokecaught = photo.getpixel((541, 1510))
+    rando1 = photo.getpixel((886, 2156))
+    teamrocket = photo.getpixel((743, 1652))
+    menubutton = photo.getpixel((930,2000))
+    failsafe = photo.getpixel((479,1616))
+    homescreen = photo.getpixel((573,2059))
+    battlefailsafe = photo.getpixel((290, 229))
+    menufailsafe = photo.getpixel((544, 1865))
+    xp = (caught*1120)+(pokestops*100)
+    shop = photo.getpixel((546, 1175))
+    battle = photo.getpixel((705, 1427))
+    battleinfo = photo.getpixel((684, 1896))
+    closet = photo.getpixel((977, 219))
+    pokedex = photo.getpixel((1023, 2073))
+    menu = photo.getpixel((965,412))
+    shopfailsafe = photo.getpixel((270,1284))
 
-    except:
-        pass
+    battlefail = photo.getpixel((695,1630))
+    pokePickFailsafe = photo.getpixel((900,2100))
+    trainerwin = photo.getpixel((900,2100))
+
+    
 # (75, 210, 163)
+
+    if(trainerwin[0]>240 and trainerwin[1]>240 and trainerwin[2]>240):
+        print('Beat Team Rocket Trainer')
+        device.shell(f'input tap 540 2000')
+        time.sleep(0.5)
 
     if(pokePickFailsafe[0]>70 and pokePickFailsafe[0]<80 and pokePickFailsafe[1]>200 and pokePickFailsafe[1]<215 and pokePickFailsafe[2]>160 and pokePickFailsafe[2]<170):
         print('Fighting Team Rocket')
@@ -256,11 +264,10 @@ while 1:
         caught = caught+1
 
         ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
-        #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
-        time.sleep(1)        
+        #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)      
         print(f'Throwing at {int(throw)} power!')   
         device.shell(f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
-        time.sleep(1)
+        time.sleep(0.5)
     
 
 
@@ -271,8 +278,7 @@ while 1:
         caught = caught+1
 
         ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
-        #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
-        time.sleep(1)        
+        #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)      
         print(f'Throwing at {int(throw)} power!')   
         device.shell(f'input touchscreen swipe 555 2100 555 1200 {int(throw)}')
         time.sleep(1)
@@ -447,7 +453,7 @@ while 1:
             f.write(image)
         fail = photo.getpixel((536, 1643))
         if(fail[0]==28 and fail[1]==100 and fail[2]==203):
-            device.shell(f'input tap 538, 2045')
+            device.shell(f'input tap 538 2045')
             time.sleep(0.5)
 
         else:
@@ -455,8 +461,8 @@ while 1:
             ctypes.windll.kernel32.SetConsoleTitleW(f"PogoBot | Caught: {int(caught)} | Pokestops: {int(pokestops)} | Shinies: {int(shinies)} | Pokeballs Thrown: {int(thrown)} | XP Gained: {int(xp)} ")
             #RPC.update(large_image="pokeball", large_text="Pokemon Bot", details=f"PogoBot\nCaught: {int(caught)}\nPokestops: {int(pokestops)}\nPokeballs Thrown: {int(thrown)}", start=start_time)
             device.shell(f'input touchscreen swipe 200 1000 800 100 100')
-            time.sleep(0.2)
-            device.shell(f'input tap 525 2045')
+            time.sleep(0.3)
+            device.shell(f'input tap 545 2075')
             time.sleep(0.4)
 
 
