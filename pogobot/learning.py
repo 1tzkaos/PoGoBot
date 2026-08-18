@@ -226,13 +226,21 @@ class IntentLedger:
 
     # ------------------------------------------------------------------ corpus
 
+    # Output is a REVIEW QUEUE, not a training split. Writing model-generated labels
+    # straight into training is self-training, and self-training is precisely what
+    # degraded v1's detector (3.23 -> 2.38 detections/frame over three generations).
+    # Pseudo-labels can only reinforce what the model already believes; they cannot teach
+    # it an object it currently misses. So the ledger curates frames for a human to label
+    # (the workflow that produced det_v3, which is genuinely good data) and writes its own
+    # predictions alongside only as an import-time PROPOSAL.
+
     @property
     def train_images(self) -> Path:
-        return self.root / "train" / "images"
+        return self.root / "review" / "images"
 
     @property
     def train_labels(self) -> Path:
-        return self.root / "train" / "labels"
+        return self.root / "review" / "labels"
 
     @property
     def journal(self) -> Path:
@@ -246,8 +254,7 @@ class IntentLedger:
         labels. A mismatch here is fatal to writing, not a warning.
         """
         try:
-            for d in (self.train_images, self.train_labels,
-                      self.root / "val" / "images", self.root / "val" / "labels"):
+            for d in (self.train_images, self.train_labels):
                 d.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             return f"cannot create corpus dirs: {exc}"
@@ -263,8 +270,8 @@ class IntentLedger:
         else:
             yaml_path.write_text(
                 f"path: {self.root}\n"
-                "train: train/images\n"
-                "val: val/images\n"
+                "train: review/images\n"
+                "val: review/images\n"
                 f"nc: {len(self.class_names)}\n"
                 f"names: {list(self.class_names)}\n"
             )
@@ -333,7 +340,7 @@ class IntentLedger:
         if not self.enabled:
             return self.disabled_reason or "ledger disabled"
 
-        if outcome is not IntentOutcome.CONFIRMED:
+        if outcome not in (IntentOutcome.CONFIRMED, IntentOutcome.REFUTED):
             return self._reject(f"outcome {outcome.value}")
 
         latency = now - intent.ts
@@ -367,6 +374,8 @@ class IntentLedger:
                 f"_{staged.seq:07d}_{serial:04d}_{intent.target_name}")
         lines = tuple(self._label_line(d) for d in staged.detections
                       if d.conf >= self.policy.label_min_conf)
+        ambiguous = [round(d.conf, 3) for d in staged.detections
+                     if self.policy.ambiguity_floor <= d.conf < self.policy.label_min_conf]
         job = _Job(
             stem=stem,
             bgr=staged.bgr,
@@ -383,6 +392,13 @@ class IntentLedger:
                 "expected": intent.expected.value,
                 "latency": round(latency, 3),
                 "boxes": len(lines),
+                "outcome": outcome.value,
+                # Labels here are the detector's own predictions. They are a starting point
+                # for a human pass, never ground truth - never train on them unverified.
+                "verified": False,
+                "ambiguous": ambiguous,
+                "review_priority": ("refuted" if outcome is IntentOutcome.REFUTED
+                                    else "ambiguous" if ambiguous else "routine"),
                 "dhash": digest,
                 "classes": list(self.class_names),
             },
@@ -402,12 +418,15 @@ class IntentLedger:
         return None
 
     def _check_labels(self, staged: _Staged, intent: Intent) -> Optional[str]:
-        """All-or-nothing label check. A frame we cannot label completely is not written.
+        """Sanity check before queueing a frame for human review.
 
-        The ambiguity band is the specific fix for v1's measured 37% unlabelled objects: a
-        box the detector is unsure about is neither trustworthy ground truth nor safely
-        omitted, because omitting it asserts background. Either state poisons the corpus,
-        so the frame goes in the bin instead.
+        This deliberately does NOT reject frames containing objects in the ambiguity band.
+        Measured on a live dense map, 2 of 8 detections sit in [0.15, 0.30) on a typical
+        frame, so rejecting on ambiguity discarded essentially every sample - the ledger
+        wrote 0 files across 6 confirmed encounters. More importantly it discarded exactly
+        the wrong ones: an object the detector is unsure about is the highest-information
+        frame a human could label. Ambiguity is recorded on the manifest so those frames
+        can be reviewed first.
         """
         if not staged.detections:
             return "no detections on the tap frame"
@@ -420,16 +439,8 @@ class IntentLedger:
                 if d.name not in self.class_ids:
                     return f"detector emitted unknown class {d.name!r}"
                 confident.append(d)
-            elif d.conf >= self.policy.ambiguity_floor:
-                return f"ambiguous object {d.name!r} at conf {d.conf:.2f}"
         if not confident:
             return "no confident objects to label"
-
-        tol = self.policy.box_match_tol
-        tx, ty = intent.tap_norm
-        if not any(abs(d.xywhn[0] - tx) <= tol and abs(d.xywhn[1] - ty) <= tol
-                   for d in confident):
-            return "tapped box absent from the label set"
         return None
 
     def _label_line(self, d: Detection) -> str:
