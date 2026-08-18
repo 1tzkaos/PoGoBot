@@ -104,11 +104,18 @@ class Reach:
     radius_y: float = 0.16
     tolerance: float = 1.05
 
-    # PokeStops need the player physically within the game's interaction radius, which is
-    # tighter than the visual ellipse that works for Pokemon. Measured over a 5 minute
-    # live soak, 15 of 16 stop taps came back "Walk closer to interact" - each costing a
-    # tap plus a 90s cooldown. Tighten the ellipse for stop targets only.
-    stop_scale: float = 0.55
+    # Scale applied to the reach ellipse for stop targets only.
+    #
+    # This was 0.55, narrowed because 15 of 16 stop taps came back "Walk closer to
+    # interact". That reasoning was wrong: the account had exceeded the rolling 24h spin
+    # cap, and a capped stop refuses with the SAME banner as one that is out of reach. The
+    # narrowing treated a quota problem as a distance problem and cost real stops - a
+    # 2m26s run at 0.55 found only two candidates on a dense map.
+    #
+    # The cap is now tracked explicitly (see quota.py), so distance can be judged on its
+    # own evidence. Back to the ellipse that works for everything else until measurement
+    # says otherwise.
+    stop_scale: float = 1.0
 
 
 @dataclass(frozen=True)
