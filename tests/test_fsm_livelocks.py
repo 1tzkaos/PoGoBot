@@ -99,7 +99,7 @@ def test_pokestop_does_not_confirm_before_the_screen_opens():
                 and e.outcome is IntentOutcome.CONFIRMED]
 
 
-def test_pokestop_confirms_only_after_a_real_poi_screen_and_a_spin():
+def test_pokestop_confirms_only_after_a_real_poi_screen_opened():
     c = ctx(BotState.POKESTOP, now=2.0, spun_disc=True)
     out = fsm.step(obs(x_button=True, screen="Poi"), c)
     t = kinds(out, Transition)
@@ -193,13 +193,32 @@ def test_successful_pokemon_tap_scores_confirmed_not_refuted():
     assert t[0].outcome is IntentOutcome.CONFIRMED
 
 
-def test_spin_records_the_flag_so_the_confirm_branch_is_reachable():
+def test_opening_a_stop_records_the_visit_so_confirm_is_reachable():
     """Nothing set ctx.spun_disc, so POKESTOP could never emit CONFIRMED."""
     from pogobot.effects import SetFlag
     c = ctx(BotState.POKESTOP, now=2.0)
     out = fsm.step(obs(x_button=True, screen="Poi"), c)
     flags = kinds(out, SetFlag)
     assert flags and flags[0].name == "spun_disc" and flags[0].value is True
+
+
+def test_stop_never_swipes_the_screen():
+    """The game auto-spins, so no disc swipe is needed. v1 swiped at y=0.45 on every
+    stop, which dragged the map whenever the tap had not actually opened one."""
+    for staged in (False, True):
+        c = ctx(BotState.POKESTOP, now=2.0, spun_disc=staged)
+        assert not kinds(fsm.step(obs(x_button=True, screen="Poi"), c), Swipe)
+
+
+def test_stop_confirms_after_dwelling_for_auto_spin():
+    c = ctx(BotState.POKESTOP, now=DEFAULT.timings.stop_dwell + 0.1, spun_disc=True)
+    t = kinds(fsm.step(obs(x_button=True, screen="Poi"), c), Transition)
+    assert t and t[0].outcome is IntentOutcome.CONFIRMED
+
+
+def test_stop_does_not_confirm_before_the_dwell_elapses():
+    c = ctx(BotState.POKESTOP, now=0.2, spun_disc=True)
+    assert not kinds(fsm.step(obs(x_button=True, screen="Poi"), c), Transition)
 
 
 def test_detections_below_target_confidence_are_not_tapped():
@@ -227,3 +246,32 @@ def test_pokestops_close_in_are_still_tapped():
     c = ctx(BotState.SCANNING, now=10.0)
     out = fsm.step(obs(on_map=True, detections=[det(name="pokestop", cx=0.5, cy=0.64)]), c)
     assert kinds(out, Tap)
+
+
+# --- found in a live run: ROCKET could not be pulled back by the map ----------
+def test_rocket_returns_to_scanning_once_the_map_is_visible():
+    """Observed live: screen read Overworld@1.00 for 25 consecutive ticks while the state
+    stayed ROCKET, because ROCKET was missing from the map pull-back set."""
+    c = ctx(BotState.ROCKET, now=20.0)
+    t = kinds(fsm.step(obs(on_map=True, screen="Overworld"), c), Transition)
+    assert t and t[0].to is BotState.SCANNING
+
+
+def test_pokestop_returns_to_scanning_once_the_map_is_visible():
+    c = ctx(BotState.POKESTOP, now=20.0)
+    t = kinds(fsm.step(obs(on_map=True, screen="Overworld"), c), Transition)
+    assert t and t[0].to is BotState.SCANNING
+
+
+def test_a_located_pill_is_tapped_even_inside_the_settle_window():
+    """The BATTLE pill was visible for ~1s and the settle window from the preceding close
+    tap swallowed the whole opportunity."""
+    c = ctx(BotState.ROCKET, now=10.0, settle_until=11.0)
+    out = fsm.step(obs(screen="Rocket", conf=0.9, pill_xy=(0.5, 0.72)), c)
+    assert kinds(out, Tap), "a visibly located button must not be blocked by settle"
+
+
+def test_blind_dialogue_taps_still_respect_the_settle_window():
+    c = ctx(BotState.ROCKET, now=10.0, settle_until=11.0)
+    out = fsm.step(obs(screen="Rocket", conf=0.9, pill_xy=None), c)
+    assert not kinds(out, Tap), "a blind tap must still wait for the UI to settle"

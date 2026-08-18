@@ -51,7 +51,7 @@ class Timings:
     tap_target: float = 1.2
     close_menu: float = 1.0
     throw_ball: float = 3.8
-    spin_disc: float = 0.9
+    stop_dwell: float = 1.6
     rotate_camera: float = 3.0
     keyboard_check: float = 2.0
     claim_reward: float = 1.5

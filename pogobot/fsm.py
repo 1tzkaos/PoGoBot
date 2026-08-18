@@ -75,9 +75,16 @@ class Context:
     def elapsed(self) -> float:
         return self.now - self.state_since
 
-    def ready(self, budget: str, gap: float) -> bool:
-        """True when `budget` has been idle for `gap` and the UI is not mid-transition."""
-        if self.now < self.settle_until:
+    def ready(self, budget: str, gap: float, ignore_settle: bool = False) -> bool:
+        """True when `budget` has been idle for `gap` and the UI is not mid-transition.
+
+        `ignore_settle` is for actions taken against a button we have optically LOCATED.
+        The settle window exists to stop us tapping blind through an animation; when the
+        target is visibly on screen right now that reasoning does not apply, and waiting
+        loses the button. Measured live: the Rocket BATTLE pill was visible for ~1s and
+        the settle window from the preceding close tap swallowed the whole opportunity.
+        """
+        if self.now < self.settle_until and not ignore_settle:
             return False
         return self.now - self.last_action.get(budget, -1e9) >= gap
 
@@ -259,9 +266,17 @@ class Encounter(Handler):
 
 
 class Pokestop(Handler):
-    """Spin the disc, then leave. A positive is only recorded once the screen confirms
-    we actually opened an interactable POI - v1 wrote one 0.8s after the swipe with no
-    verification at all, which produced 69% of the poisoned corpus."""
+    """Open the stop, let the game's auto-spin collect it, then leave.
+
+    No disc swipe: the game has auto-spin built in, so opening the stop is the whole
+    interaction. v1 swiped across the screen at y=0.45 on every stop, which on a screen
+    that was NOT a PokeStop (a mis-tapped gym, or a tap that missed and left us on the
+    map) dragged the map and rotated the camera instead.
+
+    The detection is CONFIRMED once a POI screen actually opens - v1 wrote its positive
+    0.8s after the swipe with no verification at all, which produced 69% of the poisoned
+    corpus.
+    """
 
     state = BotState.POKESTOP
     timeout_s = 8.0
@@ -276,14 +291,14 @@ class Pokestop(Handler):
                 Transition(BotState.POPUP, IntentOutcome.REFUTED, "out of range"),
             ]
         if not obs.x_button.value:
-            return []                       # POI screen not up yet
+            return []                       # POI screen has not opened yet
         if not ctx.spun_disc:
-            if not ctx.ready("spin", cfg.timings.spin_disc):
-                return []
-            return [Swipe(0.25, 0.45, 0.75, 0.45, "spin photo disc", duration_ms=220, budget="spin"),
-                    SetFlag("spun_disc", True)]
-        if ctx.ready("close", cfg.timings.close_menu):
-            return [Transition(BotState.POPUP, IntentOutcome.CONFIRMED, "disc spun; leaving")]
+            # Mark the visit the moment the screen is confirmed, then dwell briefly so
+            # auto-spin can run and the item toast can clear before we close.
+            return [SetFlag("spun_disc", True),
+                    Note("PokeStop open; letting auto-spin collect", "info")]
+        if ctx.now - ctx.state_since >= cfg.timings.stop_dwell:
+            return [Transition(BotState.POPUP, IntentOutcome.CONFIRMED, "stop collected; leaving")]
         return []
 
     def on_timeout(self, obs, ctx):
@@ -299,11 +314,14 @@ class Rocket(Handler):
 
     def step(self, obs, ctx):
         cfg = ctx.cfg
+        if obs.action_pill_xy is not None:
+            # The pill is on screen right now; do not let a generic settle window miss it.
+            if ctx.ready("rocket", cfg.timings.rocket_tap, ignore_settle=True):
+                x, y = obs.action_pill_xy
+                return [Tap(x, y, "rocket: affirmative button", budget="rocket")]
+            return []
         if not ctx.ready("rocket", cfg.timings.rocket_tap):
             return []
-        if obs.action_pill_xy is not None:
-            x, y = obs.action_pill_xy
-            return [Tap(x, y, "rocket: affirmative button", budget="rocket")]
         if obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf):
             return [Tap(0.50, 0.62, "rocket: advance dialogue", budget="rocket")]
         return []
@@ -406,7 +424,7 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     if cfg.fight_rockets and rocket_screen(obs, cfg):
         return BotState.ROCKET
     if obs.on_map and ctx.state in (BotState.POPUP, BotState.RECOVERING, BotState.BOOT,
-                                    BotState.ENCOUNTER):
+                                    BotState.ENCOUNTER, BotState.ROCKET, BotState.POKESTOP):
         return BotState.SCANNING
     if obs.in_overlay and ctx.state in (BotState.SCANNING, BotState.TARGETING):
         return BotState.POPUP
