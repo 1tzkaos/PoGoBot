@@ -120,6 +120,16 @@ by the index shift:
 Per-class mAP50: pokemon 0.809, gym 0.566, pokestop_rocket 0.432, **pokestop 0.169**.
 PokéStop is the weak class and the next thing worth labelling.
 
+A larger `yolov8s` is training in the background. When it finishes, compare and adopt:
+
+```bash
+python3 tools/adopt_best_detector.py             # compare on the held-out val set
+python3 tools/adopt_best_detector.py --install   # install the winner
+```
+
+It ranks by class-agnostic recall rather than mAP, because candidates have different
+class counts and what the bot needs is "did it find the object at all".
+
 The screen classifier is 5-class (Overworld / PokemonEncounter / Menu / Poi / Rocket),
 collapsed from 17 because rare classes had 1–2 samples each. Note the previous 17-class
 dataset had **16 train folders but only 10 valid folders**, so ultralytics built different
@@ -128,7 +138,13 @@ meaningless.
 
 ## Known limits
 
-- **PokéStop detection is weak** (mAP50 0.169). Label more PokéStops.
+- **PokéStop spinning is not yet working.** Over two live soaks the bot opened stops but
+  spun zero discs: most taps returned "Walk closer to interact", and PokéStop detection is
+  the weakest class (mAP50 0.169). Pokémon catching works well. Labelling more PokéStops
+  is the highest-value next step.
+- **The Rocket path has not been exercised live** — no Rocket stop appeared during
+  testing. It is covered by unit tests and the button finder hits 100% of the labelled
+  BATTLE/party screens, but it has not run against the real game.
 - **Gym screens can classify as PokemonEncounter** (`Poi` has 8 samples). The confidence
   gate refuses them at 0.59, and the ENCOUNTER timeout bounds any mistake at 25s.
 - Turn off the **Pointer location** developer option. It draws white text across the top
