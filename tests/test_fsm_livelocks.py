@@ -232,14 +232,16 @@ def test_detections_below_target_confidence_are_not_tapped():
     assert kinds(out2, Tap)
 
 
-def test_pokestops_use_a_tighter_reach_than_pokemon():
-    """15 of 16 stop taps in a live soak returned 'Walk closer to interact'; the game's
-    interaction radius for stops is tighter than the ellipse that works for Pokemon."""
+def test_stop_reach_is_configurable_and_currently_matches_pokemon():
+    """This once forced a tighter ellipse for stops, on the belief that "Walk closer to
+    interact" meant distance. It meant the 24h spin cap, which refuses with the same
+    banner. The scale stays available; its value is now 1.0 until distance evidence that
+    is not confounded by the quota says otherwise."""
     far = dict(cx=0.5, cy=0.63 + DEFAULT.reach.radius_y * 0.8)
-    c1 = ctx(BotState.SCANNING, now=10.0)
-    assert kinds(fsm.step(obs(on_map=True, detections=[det(name="pokemon", **far)]), c1), Tap)
-    c2 = ctx(BotState.SCANNING, now=10.0)
-    assert not kinds(fsm.step(obs(on_map=True, detections=[det(name="pokestop", **far)]), c2), Tap)
+    for name in ("pokemon", "pokestop"):
+        c = ctx(BotState.SCANNING, now=10.0)
+        got = bool(kinds(fsm.step(obs(on_map=True, detections=[det(name=name, **far)]), c), Tap))
+        assert got is (DEFAULT.reach.stop_scale >= 1.0 or name == "pokemon")
 
 
 def test_pokestops_close_in_are_still_tapped():
