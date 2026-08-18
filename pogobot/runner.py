@@ -167,7 +167,11 @@ class Runner:
                 self.ctx.now = now
 
                 if not self.source.healthy():
-                    self._halt_reason = f"capture source died: {getattr(self.source, 'failure_reason', lambda: 'unknown')()}"
+                    reason = getattr(self.source, "failure_reason", lambda: "")() or ""
+                    if reason:
+                        self._halt_reason = f"capture source died: {reason}"
+                    else:
+                        log.info("frame source exhausted; finishing")
                     break
                 if not self.actuator.healthy():
                     self._halt_reason = "actuator circuit breaker tripped (adb failing)"

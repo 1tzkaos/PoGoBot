@@ -92,3 +92,33 @@ def test_signals_are_resolution_invariant():
                            interpolation=cv2.INTER_AREA) if s < 1 else im
         got = P.map_ball_signal(small, C)
         assert got.value == base.value, f"map_ball flipped at --max-size {max_size}"
+
+
+def test_screen_stabilizer_rejects_a_single_bad_frame():
+    """One misclassified frame must not move the state machine."""
+    from pogobot.observation import ScreenGuess
+    from pogobot.perception import ScreenStabilizer
+    s = ScreenStabilizer(window=5, needed=3)
+    for _ in range(4):
+        s.push(ScreenGuess("Overworld", 0.99))
+    out = s.push(ScreenGuess("PokemonEncounter", 0.97))
+    assert out.label == "Overworld", "a lone outlier must not flip the stable label"
+
+
+def test_screen_stabilizer_accepts_a_sustained_change():
+    from pogobot.observation import ScreenGuess
+    from pogobot.perception import ScreenStabilizer
+    s = ScreenStabilizer(window=5, needed=3)
+    for _ in range(5):
+        s.push(ScreenGuess("Overworld", 0.99))
+    for _ in range(3):
+        out = s.push(ScreenGuess("PokemonEncounter", 0.97))
+    assert out.label == "PokemonEncounter", "a real transition must be believed"
+
+
+def test_stabilizer_passes_through_when_no_classifier():
+    from pogobot.observation import ScreenGuess
+    from pogobot.perception import ScreenStabilizer
+    s = ScreenStabilizer()
+    g = ScreenGuess("unknown", 0.0, available=False)
+    assert s.push(g) is g
