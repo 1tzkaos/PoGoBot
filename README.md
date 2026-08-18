@@ -1,51 +1,41 @@
 <div align="center">
 
-# PoGoBot 🎯
+# PoGoBot
 
 ### A computer-vision bot for Pokémon GO
 
-<!--
-  Static badges: this repository is currently PRIVATE, and shields.io cannot read a
-  private repo (dynamic badges render as "repo not found"). If you make it public, swap
-  in the live versions:
-    [![Version](https://img.shields.io/github/v/release/1tzkaos/PoGoBot?style=flat-square&color=blue)](https://github.com/1tzkaos/PoGoBot/releases)
-    [![Code size](https://img.shields.io/github/languages/code-size/1tzkaos/PoGoBot?style=flat-square)](https://github.com/1tzkaos/PoGoBot)
-    [![Last commit](https://img.shields.io/github/last-commit/1tzkaos/PoGoBot?style=flat-square)](https://github.com/1tzkaos/PoGoBot/commits/main)
-    [![Stars](https://img.shields.io/github/stars/1tzkaos/PoGoBot?style=flat-square)](https://github.com/1tzkaos/PoGoBot/stargazers)
--->
-
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
-[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square)](#-requirements)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-44%20passing-brightgreen?style=flat-square)](#-development)
-[![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#-models)
-[![Models](https://img.shields.io/badge/models-YOLOv8-orange?style=flat-square)](#-models)
-[![License](https://img.shields.io/badge/license-unspecified-lightgrey?style=flat-square)](#-license)
+[![Tests](https://img.shields.io/badge/tests-50%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
+[![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
+[![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
-**[Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Models](#-models) · [Configuration](#-configuration) · [Audit](docs/audit.md)**
+**[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Models](#models) · [Configuration](#configuration)**
 
 Reads the screen over `scrcpy`, finds targets with YOLOv8, decides with a pure state
 machine, and acts through `adb`.
 
-<img src="docs/hud.png" width="300" alt="PoGoBot HUD showing live detections, the interaction range, and the raw perception scores">
+<img src="assets/hud.png" width="300" alt="PoGoBot HUD showing live detections, the interaction range, and the raw perception scores">
 
 </div>
 
 ---
 
-## ✨ Features
+## Features
 
-- [x] 🎯 **Detects and taps** Pokémon, PokéStops, Rocket stops and gyms with a 4-class YOLOv8 detector
-- [x] 🧠 **Pure state machine** — `(Observation, Context) -> list[Effect]`, importable without a phone, a GPU, or a model
-- [x] 🛡️ **Bounded failure** — every state declares a timeout and an escape, enforced at import time
-- [x] 👁️ **Two-source perception** — optical signals veto the classifier, with an N-of-M stabilizer so no single frame moves the machine
-- [x] 🤖 **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
-- [x] 📚 **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
-- [x] 🔍 **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- [x] 🧪 **44 tests in under 4 seconds**, no device required
-- [x] 🎬 **Replay mode** — run the entire bot against saved frames with nothing plugged in
+- **Detects and taps** Pokémon, PokéStops, Rocket stops and gyms with a 4-class YOLOv8 detector
+- **Pure state machine** — `(Observation, Context) -> list[Effect]`, importable without a phone, a GPU, or a model
+- **Bounded failure** — every state declares a timeout and an escape, enforced at import time
+- **Two-source perception** — optical signals veto the classifier, with an N-of-M stabilizer so no single frame moves the machine
+- **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
+- **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
+- **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
+- **50 tests in under 4 seconds**, no device required
+- **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
-## 📷 Interface
+## Interface
 
 The HUD shows the current state, both perception opinions, the raw optical scores behind
 them, the player's interaction range, and every detection with its confidence.
@@ -60,7 +50,7 @@ map:1(0.32/0.10) X:0 enc:0 pill:0 kbd:U
 0.32 and an orange-binoculars fraction of 0.10. Every number the bot decides on is on
 screen and in the trace.
 
-## 📦 Requirements
+## Requirements
 
 | | |
 |---|---|
@@ -72,7 +62,7 @@ screen and in the trace.
 > Developed and verified on macOS with Apple Silicon. Linux and Windows should work
 > — `scrcpy` and `adb` support both — but are untested.
 
-## 🚀 Quick Start
+## Quick Start
 
 ```bash
 git clone https://github.com/1tzkaos/PoGoBot.git
@@ -94,14 +84,14 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 44 tests, no device required |
+| `python3 -m pytest tests/ -q` | 50 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
 > the top of the screen, which lands inside the region used to detect the encounter UI and
 > is baked into every frame the bot saves.
 
-## 🧭 How It Works
+## How It Works
 
 ```
 scrcpy ──▶ capture ──▶ perception ──▶ fsm ──▶ actions ──▶ adb
@@ -165,7 +155,7 @@ Calibrated against 235 labelled frames:
 The classifier answers what optics cannot, behind those vetoes. Over 321 real frames it
 agrees with the optical map signal 97.9% of the time.
 
-## 🤖 Models
+## Models
 
 Trained on `det_v3` (186/21/11 images, 4 classes) — verified to have no cross-split
 leakage, no duplicate images, and no empty label files.
@@ -194,7 +184,7 @@ pokestop 0.309.
 The screen classifier is 5-class — Overworld / PokemonEncounter / Menu / Poi / Rocket —
 and scores 100% on its held-out split.
 
-## 📚 Learning
+## Learning
 
 The bot **never writes training data**. It curates frames into
 `datasets/active_v2/review/` with the detector's own predictions as a starting point,
@@ -210,7 +200,7 @@ python3 tools/promote_reviewed.py --promote --yes
 Training on unreviewed model output is self-training, which measurably degraded the
 previous detector — 3.23 → 2.38 detections per frame over three generations.
 
-## 🔧 Configuration
+## Configuration
 
 | flag | default | meaning |
 |---|---|---|
@@ -225,7 +215,7 @@ previous detector — 3.23 → 2.38 detections per frame over three generations.
 
 Everything else lives in `pogobot/config.py` as a frozen dataclass.
 
-## 🧪 Development
+## Development
 
 ```bash
 python3 -m pytest tests/ -q
@@ -237,13 +227,12 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       44 tests, no device required
+tests/       50 tests, no device required
 tools/       dataset review and model selection
-docs/        design notes and the v1 audit
 legacy/      previous generations, unmaintained
 ```
 
-## 🤔 Known Limitations
+## Known Limitations
 
 - **PokéStop detection is the weakest class** (mAP50 0.309). Labelling more stops is the
   highest-value improvement available.
@@ -255,23 +244,12 @@ legacy/      previous generations, unmaintained
 - **Cooldowns are anchored to screen position**, so they are invalidated whenever the
   camera rotates. They are not a substitute for real world coordinates.
 
-## 📖 Background
-
-[`docs/audit.md`](docs/audit.md) documents the **106 confirmed defects** found in the
-previous single-file bot and which structural decision makes each class of them
-unrepresentable. [`docs/design.md`](docs/design.md) is the design as approved before
-implementation, including where later measurement contradicted it.
-
-Worth reading before changing the state machine or the perception thresholds.
-
-## 🚨 Disclaimer
+## Disclaimer
 
 Automating Pokémon GO violates Niantic's Terms of Service and can get an account banned.
 This is a computer-vision and state-machine project; use it on an account you are willing
 to lose, and at your own risk.
 
-## 📄 License
+## License
 
-No license is currently specified, which means default copyright applies and others have
-no rights to use, modify, or distribute this code. Add a `LICENSE` file if you want that
-to change.
+Released under the [MIT License](LICENSE).
