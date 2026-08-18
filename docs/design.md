@@ -2,11 +2,15 @@
 
 **Date:** 2026-08-17
 **Status:** Approved
-**Supersedes:** the monolithic `pokemon_vision_bot.py` (kept runnable, untouched, until parity)
+**Supersedes:** the monolithic v1 bot, now at `legacy/pokemon_vision_bot.py`
+
+**Status note:** this is the design as approved before implementation. Where measurement
+later contradicted it — notably the optical encounter signal and the classifier's
+crop behaviour — `docs/audit.md` records what actually happened.
 
 ## Problem
 
-A 7-lens adversarial audit of `pokemon_vision_bot.py` confirmed **106 defects**. They dedupe to ~65,
+A 7-lens adversarial audit of the v1 bot confirmed **106 defects**. They dedupe to ~65,
 of which **39 are instances of 6 missing structures**. Three self-sustaining failure chains dominate:
 
 **Chain A — menu loop.** `find_close_button_coordinates` has no "not found" path and falls back to
