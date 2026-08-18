@@ -57,12 +57,13 @@ class Dashboard:
     """Owns the rich Live display. A no-op if rich is unavailable."""
 
     def __init__(self, stats: SessionStats, lifetime: Optional[dict] = None,
-                 log_capacity: int = 400):
+                 log_capacity: int = 400, quota=None):
         from rich.console import Console
         from rich.live import Live
 
         self.stats = stats
         self.lifetime = lifetime
+        self.quota = quota
         self.console = Console()
         self.pane = LogPane(log_capacity)
         self.pane.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%H:%M:%S"))
@@ -132,6 +133,12 @@ class Dashboard:
         t.add_column(justify="left")
         t.add_column(justify="center")
         t.add_column(justify="right")
+        if self.quota is not None:
+            q = self.quota.state()
+            style = "bold red" if q.exhausted else ("yellow" if q.remaining < 100 else "dim")
+            spins = f"[{style}]spins {q.used}/{q.limit}[/]  "
+        else:
+            spins = ""
         life = ""
         if self.lifetime:
             life = (f"lifetime {self.lifetime['sessions']} runs  "
@@ -140,7 +147,7 @@ class Dashboard:
         t.add_row(
             f"[{STATE_STYLE.get(state, 'white')}]{state.value}[/]",
             f"[bold]PoGoBot[/]  {self.stats.hud_line()}",
-            f"[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
+            f"{spins}[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
         )
         return Panel(t, border_style="grey42")
 

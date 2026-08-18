@@ -74,6 +74,8 @@ class Context:
     failed_encounters: int = 0
     restocking_until: float = 0.0
     restock_stops_at_start: int = 0
+    #: set by the runner from the rolling 24h spin quota
+    spins_exhausted: bool = False
     taps_in_state: int = 0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
@@ -144,6 +146,10 @@ def pick_target(obs: Observation, ctx: Context):
         if cfg.target_mode == "pokemon" and d.name != "pokemon":
             continue
         if cfg.target_mode == "pokestop" and d.name not in STOP_TARGETS:
+            continue
+        if ctx.spins_exhausted and d.name in STOP_TARGETS:
+            # Past the daily cap a stop cannot yield, and tapping it only produces the
+            # "walk closer" banner that made this look like a distance problem.
             continue
         if ctx.restocking and d.name not in STOP_TARGETS:
             # Restocking: ignore Pokemon entirely until the bag is refilled, otherwise
