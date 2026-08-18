@@ -46,6 +46,10 @@ DISPLAY_FPS = 30.0
 # How often a headless run logs its counters, so a long session reports progress.
 REPORT_EVERY = 300.0
 
+# How much of the tail of an encounter to keep for labelling. The catch sequence -
+# ball wobble, "Gotcha!", then the XP/candy/stardust award - runs several seconds.
+ENCOUNTER_RING_SECONDS = 6.0
+
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 
@@ -65,10 +69,11 @@ class Runner:
         self.stats_path = stats_path
         self.dashboard = dashboard
         self.encounter_dump = encounter_dump
-        # A short ring of frames from inside an encounter. On exit these are the frames
-        # that would show a catch award screen, which is the evidence a real catch
-        # counter needs and which nothing currently captures.
-        self._enc_ring: deque = deque(maxlen=8)
+        # A ring of frames from inside an encounter. On exit these are the frames that
+        # would show a catch award screen - the evidence a real catch counter needs.
+        # Sized in seconds, not frames: at 8 inference fps a 8-frame ring held one second
+        # and rolled the award sequence away before the encounter ended.
+        self._enc_ring: deque = deque(maxlen=max(8, int(cfg.infer_fps * ENCOUNTER_RING_SECONDS)))
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
         self.ctx.last_map_ts = time.perf_counter()
@@ -135,6 +140,9 @@ class Runner:
                 st.on_encounter_start()
         elif src is BotState.ENCOUNTER and dst is not BotState.ENCOUNTER:
             st.on_encounter_end()
+            # Only a genuine end: an abandoned encounter still has its screen up, so its
+            # frames are not award screens and would mislabel the training set.
+            self._dump_encounter_ring()
         if dst is BotState.ROCKET and src is not BotState.ROCKET:
             st.rockets_engaged += 1
         if dst is BotState.RECOVERING and src is not BotState.RECOVERING:
