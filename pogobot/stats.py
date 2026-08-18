@@ -34,13 +34,15 @@ class SessionStats:
     encounters: int = 0            # entered ENCOUNTER (a tap opened a real encounter)
     balls_thrown: int = 0          # throw gestures the actuator accepted (see dry_run)
     catch_attempts: int = 0        # encounters in which at least one ball was thrown
-    encounters_finished: int = 0    # ENCOUNTER exited back to the map
+
     stops_collected: int = 0       # POI screen confirmed open, then left cleanly
     stops_out_of_range: int = 0    # "Walk closer to interact" seen
     rockets_engaged: int = 0       # entered ROCKET
     targets_tapped: int = 0        # taps issued at a detection
     taps_expired: int = 0          # tap produced no screen change within the timeout
-    recoveries: int = 0            # escalated to RECOVERING
+    recoveries: int = 0
+    encounters_exhausted: int = 0   # throws did nothing; out of balls or an unwinnable catch
+    restocks: int = 0               # times the bot switched to PokeStop-only to refill            # escalated to RECOVERING
     halts: int = 0
 
     # Not observable yet. Kept so the field exists the day a catch detector lands,
@@ -55,6 +57,13 @@ class SessionStats:
     dry_run: bool = False
 
     _throws_this_encounter: int = 0
+    _in_encounter: bool = False
+
+    @property
+    def encounters_finished(self) -> int:
+        """Derived, so it cannot drift from `encounters`. A resumed encounter is one
+        encounter that is still open, not several that each ended."""
+        return self.encounters - (1 if self._in_encounter else 0)
 
     # ------------------------------------------------------------------ time
 
@@ -77,10 +86,13 @@ class SessionStats:
     def on_encounter_start(self) -> None:
         self.encounters += 1
         self._throws_this_encounter = 0
+        self._in_encounter = True
 
     def on_encounter_end(self) -> None:
-        self.encounters_finished += 1
-        self._throws_this_encounter = 0
+        """Leaving the screen. The throw tracker is NOT reset here: a resumed encounter
+        is the same Pokemon, and resetting it counted a fresh catch attempt each time a
+        stuck screen was re-entered - 5 attempts for one Pokemon."""
+        self._in_encounter = False
 
     def on_ball_thrown(self) -> None:
         self.balls_thrown += 1
@@ -115,6 +127,8 @@ class SessionStats:
             "targets_tapped": self.targets_tapped,
             "taps_expired": self.taps_expired,
             "recoveries": self.recoveries,
+            "encounters_exhausted": self.encounters_exhausted,
+            "restocks": self.restocks,
             "halts": self.halts,
         }
         if self.confirmed_catches is not None:
@@ -149,6 +163,8 @@ class SessionStats:
             ("rockets engaged", s["rockets_engaged"], ""),
             ("targets tapped", s["targets_tapped"], ""),
             ("taps that expired", s["taps_expired"], ""),
+            ("encounters exhausted", s["encounters_exhausted"], ""),
+            ("restocks", s["restocks"], ""),
             ("recoveries", s["recoveries"], ""),
             ("halts", s["halts"], ""),
         ]
@@ -170,6 +186,8 @@ class SessionStats:
     def as_dict(self) -> dict:
         d = asdict(self)
         d.pop("_throws_this_encounter", None)
+        d.pop("_in_encounter", None)
+        d["encounters_finished"] = self.encounters_finished
         return d
 
 
@@ -184,7 +202,8 @@ def _hms(seconds: float) -> str:
 
 COUNTER_FIELDS = ("encounters", "catch_attempts", "balls_thrown", "stops_collected",
                   "stops_out_of_range", "rockets_engaged", "targets_tapped",
-                  "taps_expired", "recoveries", "halts")
+                  "taps_expired", "recoveries", "halts",
+                  "encounters_exhausted", "restocks")
 
 
 def append_session(path, summary: dict) -> None:

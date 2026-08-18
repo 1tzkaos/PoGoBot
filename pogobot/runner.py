@@ -129,17 +129,27 @@ class Runner:
             # counting an end, so the return trip is recognisable as the same encounter.
             self._encounter_left_at = self.ctx.now
         elif dst is BotState.ENCOUNTER and src is not BotState.ENCOUNTER:
+            self.ctx.throws_this_encounter = 0
             # It is the same encounter only if the map was never confirmed in between: a
             # recovery that actually worked lands on the map, and a genuinely new encounter
             # can only be reached through it.
-            resumed = (src is BotState.RECOVERING
-                       and self._encounter_left_at is not None
+            # A NEW encounter is only reachable through the map, so any re-entry with no
+            # confirmed map since we left is the same Pokemon - however we got back.
+            # Requiring src is RECOVERING was too narrow: with the encounter hold in
+            # place the round trip goes through SCANNING instead, and one stuck screen
+            # counted as five encounters.
+            resumed = (self._encounter_left_at is not None
                        and self.ctx.last_map_ts <= self._encounter_left_at)
             if not resumed:
                 self._encounter_left_at = None
                 st.on_encounter_start()
         elif src is BotState.ENCOUNTER and dst is not BotState.ENCOUNTER:
             st.on_encounter_end()
+            self.ctx.left_encounter_ts = self.ctx.now
+            # Remember where we left so a re-entry with no map in between is recognised
+            # as the same encounter rather than a new one.
+            self._encounter_left_at = self.ctx.now
+            self._end_encounter(e)
             # Only a genuine end: an abandoned encounter still has its screen up, so its
             # frames are not award screens and would mislabel the training set.
             self._dump_encounter_ring()
@@ -180,6 +190,46 @@ class Runner:
         if self._halt_reason is None:
             self.stats.halts += 1
         self._halt_reason = reason
+
+    def _end_encounter(self, e: Transition) -> None:
+        """Track consecutive useless encounters and start restocking after enough of them.
+
+        A single exhausted encounter is normal - a hard Pokemon, a bad throw run. Several
+        in a row means the throws themselves are doing nothing, which in practice means an
+        empty bag.
+        """
+        cfg = self.cfg
+        exhausted = self.ctx.throws_this_encounter >= cfg.max_throws_per_encounter
+        self.ctx.throws_this_encounter = 0
+        if not exhausted:
+            self.ctx.failed_encounters = 0
+            return
+        self.ctx.failed_encounters += 1
+        self.stats.encounters_exhausted += 1
+        if self.ctx.failed_encounters < cfg.restock_after_failures or self.ctx.restocking:
+            return
+        self.ctx.restocking_until = self.ctx.now + cfg.restock_max_seconds
+        self.ctx.restock_stops_at_start = self.stats.stops_collected
+        self.ctx.failed_encounters = 0
+        self.stats.restocks += 1
+        log.warning("%d encounters ended with throws doing nothing; restocking - "
+                    "targeting PokeStops only until %d are collected (or %.0fs)",
+                    cfg.restock_after_failures, cfg.restock_target_stops,
+                    cfg.restock_max_seconds)
+
+    def _update_restock(self) -> None:
+        """Leave restock mode once the bag is plausibly refilled, or the budget expires."""
+        ctx = self.ctx
+        if not ctx.restocking:
+            return
+        got = self.stats.stops_collected - ctx.restock_stops_at_start
+        if got >= self.cfg.restock_target_stops:
+            log.info("restocked from %d stops; resuming normal targeting", got)
+            ctx.restocking_until = 0.0
+        elif ctx.now >= ctx.restocking_until:
+            log.warning("restock window expired after %d stop(s); resuming normal targeting "
+                        "- if this repeats, no PokeStop is in range here", got)
+            ctx.restocking_until = 0.0
 
     def _dump_encounter_ring(self) -> None:
         """Write the frames leading up to an encounter ending, for labelling.
@@ -245,6 +295,7 @@ class Runner:
                     budget = getattr(e, "budget", "tap")
                     if budget == "throw":
                         self.stats.on_ball_thrown()
+                        self.ctx.throws_this_encounter += 1
                     elif budget == "tap" and isinstance(e, Tap):
                         self.stats.targets_tapped += 1
                     self.ctx.last_action[budget] = self.ctx.now
@@ -382,6 +433,7 @@ class Runner:
                 if self.ledger is not None:
                     self.ledger.stage(frame, obs)
 
+                self._update_restock()
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
                 if self.dashboard is not None:

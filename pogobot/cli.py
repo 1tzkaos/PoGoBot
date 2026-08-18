@@ -24,6 +24,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--catch-mode", choices=["throw", "flee", "manual"], default=None)
     p.add_argument("--target-mode", choices=["all", "pokemon", "pokestop"], default=None)
     p.add_argument("--no-rockets", action="store_true", help="skip Team GO Rocket stops")
+    p.add_argument("--max-throws", type=int, default=None, metavar="N",
+                   help="give up on an encounter after N throws change nothing "
+                        "(out of balls, or an uncatchable Pokemon)")
+    p.add_argument("--restock-after", type=int, default=None, metavar="N",
+                   help="switch to PokeStop-only targeting after N useless encounters in a row")
+    p.add_argument("--restock-stops", type=int, default=None, metavar="N",
+                   help="PokeStops to collect before resuming normal targeting")
     p.add_argument("--no-rotate", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="perceive and decide, but never touch the device")
@@ -69,6 +76,12 @@ def config_from_args(a) -> Config:
         v = getattr(a, name, None)
         if v is not None:
             overrides[name] = v
+    for cli_name, cfg_name in (("max_throws", "max_throws_per_encounter"),
+                               ("restock_after", "restock_after_failures"),
+                               ("restock_stops", "restock_target_stops")):
+        v = getattr(a, cli_name, None)
+        if v is not None:
+            overrides[cfg_name] = v
     if a.det_model:
         overrides["det_model"] = a.det_model
     if a.cls_model:
