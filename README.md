@@ -1,6 +1,9 @@
 <div align="center">
 
-# PoGoBot
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
+  <img src="assets/logo-light.png" alt="PoGoBot — Pokémon GO Vision Bot" width="440">
+</picture>
 
 ### A computer-vision bot for Pokémon GO
 
