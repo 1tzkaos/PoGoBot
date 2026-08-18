@@ -397,3 +397,21 @@ def test_the_lifetime_line_never_prints_a_rate_it_cannot_stand_behind(tmp_path):
     total = load_lifetime(p)
     assert total["encounters_per_hour"] is None
     assert "120.0/h" not in lifetime_line(total)
+
+
+def test_signal_setup_survives_a_platform_without_sighup(monkeypatch):
+    """Windows CPython has no SIGHUP. Naming it in a tuple raised AttributeError before
+    the guarding try, so run() died before the loop and no session was ever recorded."""
+    import signal as signal_mod
+    monkeypatch.delattr(signal_mod, "SIGHUP", raising=False)
+    names = [n for n in ("SIGTERM", "SIGINT", "SIGHUP") if getattr(signal_mod, n, None)]
+    assert "SIGHUP" not in names and "SIGTERM" in names
+    import inspect
+    src = inspect.getsource(runner_mod.Runner.run)
+    assert "signal.SIGHUP" not in src, "SIGHUP must be resolved with getattr, not named directly"
+
+
+def test_report_surfaces_a_halt():
+    s = SessionStats(started=0.0)
+    s.halts = 1
+    assert "halts" in s.report(now=300.0)

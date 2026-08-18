@@ -150,6 +150,7 @@ class SessionStats:
             ("targets tapped", s["targets_tapped"], ""),
             ("taps that expired", s["taps_expired"], ""),
             ("recoveries", s["recoveries"], ""),
+            ("halts", s["halts"], ""),
         ]
         width = max(len(r[0]) for r in rows)
         lines = [f"  {name:<{width}}  {str(value):>7}  {rate}".rstrip()

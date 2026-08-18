@@ -260,7 +260,13 @@ class Runner:
             log.info("received %s; finishing the current tick",
                      signal.Signals(signum).name)
             self._stop = True
-        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        # Resolved by name: CPython on Windows has no SIGHUP, and naming it in a tuple
+        # raises AttributeError before the try below can catch anything - which killed
+        # run() before the loop started, on a platform the README says is supported.
+        for _name in ("SIGTERM", "SIGINT", "SIGHUP"):
+            sig = getattr(signal, _name, None)
+            if sig is None:
+                continue
             try:
                 previous[sig] = signal.signal(sig, _request_stop)
             except (OSError, ValueError):
