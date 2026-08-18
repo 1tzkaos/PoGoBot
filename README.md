@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-118%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-137%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -34,11 +34,12 @@ machine, and acts through `adb`.
 - **Two-source perception** — optical signals veto the classifier, with an N-of-M stabilizer so no single frame moves the machine
 - **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
 - **Runs out of balls gracefully** — gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting to restock
+- **Tracks the 24h spin cap** — a rolling window that survives restarts, so a refused PokéStop is correctly blamed on the quota rather than on distance
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **118 tests in under 4 seconds**, no device required
+- **137 tests in under 4 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -90,7 +91,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 118 tests, no device required |
+| `python3 -m pytest tests/ -q` | 137 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -227,6 +228,35 @@ An encounter the bot deliberately left is not re-entered until the map is confir
 Without that, fleeing and immediately re-entering the same screen was a livelock —
 observed live as `ENCOUNTER -> RECOVERING -> ENCOUNTER` repeating until the watchdog fired.
 
+## The 24-hour spin cap
+
+Niantic caps PokéStop spins per rolling 24 hours. **Past the cap a stop refuses in a way
+that is visually identical to being out of reach** — the same "walk closer to interact"
+banner. That ambiguity is a trap: a session here logged 152 refused stops and it was
+written up as a positioning problem when the account had simply spun out for the day.
+
+The bot now keeps a rolling window in `logs/spins.jsonl` that survives restarts, because
+the cap belongs to the account rather than to any one process:
+
+```
+spins in the last 24h: 300/1200 (900 left, oldest ages out in 17h59m)
+SPIN QUOTA REACHED: 1200/1200 in the last 24h. Stops will refuse to yield until
+3h59m from now - this looks identical to 'out of range' on screen.
+```
+
+Once the cap is reached the bot stops targeting PokéStops entirely — tapping one can only
+produce the misleading banner — and keeps catching Pokémon. It also refuses to enter
+restock mode, since the bag cannot be refilled against a spent quota.
+
+Spins done by hand or by an earlier run still count against the account, so
+`--seed-spins N` backfills them:
+
+```bash
+python3 -m pogobot --seed-spins 1200      # I already spun 1200 today
+```
+
+This is the counter an account-switching mechanism would key off.
+
 ## Session stats
 
 Every run prints a summary on exit and appends itself to `logs/sessions.jsonl`, so the next
@@ -299,6 +329,9 @@ report how many were left out.
 | `--max-throws` | `5` | give up on an encounter after N throws change nothing |
 | `--restock-after` | `2` | useless encounters in a row before restocking |
 | `--restock-stops` | `5` | PokéStops to collect before resuming normal targeting |
+| `--spin-limit` | `1200` | PokéStop spins per rolling 24h (`0` disables the check) |
+| `--seed-spins N` | – | record N spins this bot did not perform, so the quota reflects the account |
+| `--quota-file PATH` | `logs/spins.jsonl` | rolling spin log, spans restarts |
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
@@ -321,7 +354,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       118 tests, no device required
+tests/       137 tests, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```

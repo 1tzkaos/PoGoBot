@@ -18,6 +18,7 @@ def _dash(width=104, height=34):
     d = Dashboard.__new__(Dashboard)
     d.stats = SessionStats(started=time.perf_counter() - 3600)
     d.lifetime = {"sessions": 2, "encounters": 40, "stops_collected": 5}
+    d.quota = None
     d.console = Console(width=width, height=height, record=True)
     d.pane = LogPane()
     d.pane.setFormatter(logging.Formatter("%(message)s"))
@@ -88,3 +89,19 @@ def test_log_pane_keeps_records_and_never_raises_on_a_bad_record():
 def test_a_narrow_terminal_still_renders():
     d = _dash(width=60, height=20)
     assert "PoGoBot" in _text(d, mkobs(on_map=True))
+
+
+def test_the_spin_quota_is_shown_when_one_is_tracked():
+    from pogobot.quota import SpinQuota
+    d = _dash()
+    d.quota = SpinQuota(None, limit=1200)
+    d.quota.seed(300, spread_hours=6)
+    assert "spins 300/1200" in _text(d, mkobs(on_map=True))
+
+
+def test_an_exhausted_quota_is_shown_too():
+    from pogobot.quota import SpinQuota
+    d = _dash()
+    d.quota = SpinQuota(None, limit=1200)
+    d.quota.seed(1200, spread_hours=20)
+    assert "spins 1200/1200" in _text(d, mkobs(on_map=True))

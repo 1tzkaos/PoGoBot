@@ -35,7 +35,10 @@ from .effects import (
 )
 from .frames import Frame, FrameSource
 from .observation import Observation, Tristate
+from .quota import SpinQuota
 from .stats import SessionStats, append_session
+
+from .quota import _hms
 
 log = logging.getLogger("pogobot")
 
@@ -58,7 +61,8 @@ class Runner:
     def __init__(self, cfg: Config, source: FrameSource, actuator, perceptor,
                  ledger=None, keyboard=None, trace_path: Optional[Path] = None,
                  display: bool = True, stats_path: Optional[Path] = None,
-                 dashboard=None, encounter_dump: Optional[Path] = None):
+                 dashboard=None, encounter_dump: Optional[Path] = None,
+                 quota: Optional[SpinQuota] = None):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -69,6 +73,7 @@ class Runner:
         self.stats_path = stats_path
         self.dashboard = dashboard
         self.encounter_dump = encounter_dump
+        self.quota = quota
         # A ring of frames from inside an encounter. On exit these are the frames that
         # would show a catch award screen - the evidence a real catch counter needs.
         # Sized in seconds, not frames: at 8 inference fps a 8-frame ring held one second
@@ -169,8 +174,11 @@ class Runner:
             # interact" number on screen for stops the bot never got a range answer about.
             if e.outcome is IntentOutcome.CONFIRMED:
                 st.stops_collected += 1
+                if self.quota is not None:
+                    self.quota.record()
             elif e.outcome is IntentOutcome.REFUTED:
                 st.stops_out_of_range += 1
+                self._explain_refusal()
         if e.outcome is IntentOutcome.EXPIRED \
                 and src in (BotState.TARGETING, BotState.POKESTOP):
             # TARGETING and POKESTOP are both post-tap wait states, so an expiry in either
@@ -191,6 +199,21 @@ class Runner:
             self.stats.halts += 1
         self._halt_reason = reason
 
+    def _explain_refusal(self) -> None:
+        """A refused stop past the daily cap is not a distance problem.
+
+        On screen the two are identical - the same "walk closer to interact" banner - and
+        that ambiguity produced a wrong diagnosis once already: 152 refused stops in one
+        session were read as bad positioning when the account had spun out for the day.
+        """
+        if self.quota is None:
+            return
+        st = self.quota.state()
+        if st.exhausted and self.stats.stops_out_of_range % 10 == 1:
+            log.warning("stop refused and the 24h spin quota is used up (%d/%d) - this is "
+                        "the cap, not distance. Resets in %s.",
+                        st.used, st.limit, _hms(st.resets_in))
+
     def _end_encounter(self, e: Transition) -> None:
         """Track consecutive useless encounters and start restocking after enough of them.
 
@@ -207,6 +230,10 @@ class Runner:
         self.ctx.failed_encounters += 1
         self.stats.encounters_exhausted += 1
         if self.ctx.failed_encounters < cfg.restock_after_failures or self.ctx.restocking:
+            return
+        if self.quota is not None and self.quota.state().exhausted:
+            log.warning("throws are doing nothing and the 24h spin quota is used up; "
+                        "restocking would be futile - the bag cannot be refilled here")
             return
         self.ctx.restocking_until = self.ctx.now + cfg.restock_max_seconds
         self.ctx.restock_stops_at_start = self.stats.stops_collected
@@ -433,6 +460,8 @@ class Runner:
                 if self.ledger is not None:
                     self.ledger.stage(frame, obs)
 
+                if self.quota is not None:
+                    self.ctx.spins_exhausted = self.quota.state(time.time()).exhausted
                 self._update_restock()
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
@@ -447,6 +476,8 @@ class Runner:
                 if now >= self._next_report:
                     self._next_report = now + REPORT_EVERY
                     log.info("session: %s", self.stats.hud_line(now))
+                    if self.quota is not None:
+                        log.info("%s", self.quota.state().line())
 
                 elapsed = now - t0
                 if elapsed >= 1.0:
@@ -544,3 +575,5 @@ class Runner:
                 except Exception:
                     log.exception("could not append the session record")
             log.info("session summary:\n%s", self.stats.report())
+        if self.quota is not None:
+            log.info("%s", self.quota.state().line())

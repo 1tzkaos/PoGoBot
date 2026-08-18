@@ -50,6 +50,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stats-file", type=Path, default=BASE_DIR / "logs" / "sessions.jsonl",
                    help="append each finished session here and report lifetime totals")
     p.add_argument("--no-stats", action="store_true", help="do not record session stats")
+    p.add_argument("--quota-file", type=Path, default=BASE_DIR / "logs" / "spins.jsonl",
+                   help="rolling 24h PokeStop spin log (spans restarts)")
+    p.add_argument("--spin-limit", type=int, default=None, metavar="N",
+                   help="PokeStop spins allowed per rolling 24h (0 disables the check)")
+    p.add_argument("--seed-spins", type=int, default=None, metavar="N",
+                   help="record N spins the bot did not perform, spread over the last 12h, "
+                        "so the quota reflects the account rather than this process")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -169,17 +176,28 @@ def main(argv=None) -> int:
         if total:
             log.info("%s", lifetime_line(total))
 
+    from .quota import DEFAULT_DAILY_LIMIT, SpinQuota
+    quota = SpinQuota(a.quota_file,
+                      limit=DEFAULT_DAILY_LIMIT if a.spin_limit is None else a.spin_limit)
+    if a.seed_spins:
+        quota.seed(a.seed_spins)
+        log.info("seeded %d spins into the 24h window", a.seed_spins)
+    qstate = quota.state()
+    log.log(logging.WARNING if qstate.exhausted else logging.INFO, "%s", qstate.line())
+
     dashboard = None
     if a.tui:
         from . import tui
         if not tui.available():
             log.warning("--tui needs the 'rich' package; falling back to log lines")
         else:
-            dashboard = tui.Dashboard(SessionStats(), lifetime=total if stats_path else None)
+            dashboard = tui.Dashboard(SessionStats(), lifetime=total if stats_path else None,
+                                      quota=quota)
 
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
                     trace_path=trace, display=not a.no_display, stats_path=stats_path,
-                    dashboard=dashboard, encounter_dump=a.collect_encounters)
+                    dashboard=dashboard, encounter_dump=a.collect_encounters,
+                    quota=quota)
     if dashboard is None:
         return runner.run()
     # The dashboard owns the session counters so the header can render before the first
