@@ -116,6 +116,9 @@ def _unblock_open(thread: threading.Thread, path: Path, budget: float = 1.0) -> 
 
 
 class ScrcpySource:
+    #: reading does not consume: the reader thread keeps only the newest frame
+    sequential = False
+
     """Live capture from scrcpy recording into a private FIFO.
 
     Only the newest frame is retained; everything the reader thread pulls while
@@ -378,6 +381,9 @@ def _natural_key(path: Path) -> tuple:
 
 
 class ReplaySource:
+    #: reading advances through the directory, so the display must not pull frames
+    sequential = True
+
     """Frames from a directory of images, in name order.
 
     Timestamps are stamped at delivery, not at load, so a replayed frame can never be
