@@ -36,6 +36,10 @@ from .observation import Observation, Tristate
 
 log = logging.getLogger("pogobot")
 
+# Preview refresh rate. The inference loop runs slower than this; redisplaying the cached
+# HUD in between keeps the window responsive to the q key without re-rendering.
+DISPLAY_FPS = 30.0
+
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 
@@ -60,6 +64,11 @@ class Runner:
         self._ticks = 0
         self._fps = 0.0
         self._last_frame: Optional[Frame] = None
+        self._last_hud = None          # last rendered HUD image, reused between inferences
+        self._last_obs: Optional[Observation] = None
+        self._last_shown = 0.0
+        self._shown_hud = 0
+        self._shown_raw = 0
 
     # ---------------------------------------------------------------- state
 
@@ -178,8 +187,24 @@ class Runner:
                     break
 
                 if now < next_infer:
-                    if self.display and self._last_frame is not None:
-                        self._show(window, self._last_frame, None)
+                    # Redisplay the last rendered HUD rather than a bare frame. Passing
+                    # obs=None here used to draw the un-annotated frame ~1000x/second
+                    # (the rate is capped only by waitKey), while the HUD was drawn once
+                    # per inference at 8Hz - so the overlay was visible for roughly 8
+                    # frames in 1000 and appeared to strobe.
+                    if self.display and self._last_hud is not None \
+                            and now - self._last_shown >= 1.0 / DISPLAY_FPS:
+                        self._last_shown = now
+                        # Repaint the newest frame under the most recent observation, so
+                        # the video stays smooth while the overlay updates at infer_fps.
+                        # Skipped for a replay directory, where reading consumes a frame.
+                        if not getattr(self.source, "sequential", False):
+                            fresh = self.source.read()
+                            if fresh is not None:
+                                self._last_frame = fresh
+                                self._render(fresh, self._last_obs)
+                        if not self._blit(window):
+                            break
                     else:
                         time.sleep(0.002)
                     continue
@@ -236,18 +261,31 @@ class Runner:
             return 1
         return 0
 
-    def _show(self, window: str, frame: Frame, obs: Optional[Observation]) -> bool:
-        import cv2
-        from . import hud
+    def _render(self, frame: Frame, obs: Optional[Observation]) -> None:
+        """Draw the HUD and cache it. Never caches a bare frame."""
         if obs is None:
-            img = frame.bgr
-        else:
-            stats = self.actuator.stats()
-            extra = {"taps": stats.get("sent", 0), "state_s": f"{self.ctx.elapsed:.1f}"}
-            if self.ledger is not None:
-                extra["saved"] = self.ledger.stats().get("written", 0)
-            img = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra)
-        cv2.imshow(window, img)
+            return
+        from . import hud
+        stats = self.actuator.stats()
+        extra = {"taps": stats.get("sent", 0), "state_s": f"{self.ctx.elapsed:.1f}"}
+        if self.ledger is not None:
+            extra["saved"] = self.ledger.stats().get("written", 0)
+        self._last_hud = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra)
+        self._shown_hud += 1
+
+    def _show(self, window: str, frame: Frame, obs: Observation) -> bool:
+        """Render the HUD for a fresh observation and display it."""
+        self._last_obs = obs
+        self._render(frame, obs)
+        self._last_shown = self.ctx.now
+        return self._blit(window)
+
+    def _blit(self, window: str) -> bool:
+        """Push the cached HUD to the window. Returns False when the user presses q."""
+        import cv2
+        if self._last_hud is None:
+            return True
+        cv2.imshow(window, self._last_hud)
         return (cv2.waitKey(1) & 0xFF) != ord("q")
 
     def close(self) -> None:
@@ -268,4 +306,5 @@ class Runner:
                 cv2.destroyAllWindows()
             except Exception:
                 pass
-        log.info("stopped after %d ticks; actuator=%s", self._ticks, self.actuator.stats())
+        log.info("stopped after %d ticks (%d HUD renders); actuator=%s",
+                 self._ticks, self._shown_hud, self.actuator.stats())
