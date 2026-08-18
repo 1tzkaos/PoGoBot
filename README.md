@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-156%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -38,9 +38,9 @@ machine, and acts through `adb`.
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
-- **Pause and resume** — stops sending input without stopping perception, and without ageing the state machine
+- **Pause and resume** — stops sending input, and stops recording, without stopping perception or ageing the state machine
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **149 tests in under 4 seconds**, no device required
+- **156 tests in under 8 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -92,7 +92,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 149 tests, no device required |
+| `python3 -m pytest tests/ -q` | 156 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -268,7 +268,7 @@ This is the counter an account-switching mechanism would key off.
 
 ## Pausing
 
-Three ways, all equivalent:
+Three ways — two toggles and one latch:
 
 ```bash
 touch logs/PAUSE            # pause          (rm logs/PAUSE to resume)
@@ -276,14 +276,28 @@ kill -USR1 $(pgrep -f "python3 -m pogobot")   # toggle
 ```
 …or press **`p`** on the preview window (**`q`** still quits).
 
+`SIGUSR1` and the `p` key drive the same toggle. The pause file is not equivalent to
+either: while it exists the bot stays paused, and neither the signal nor the key can
+resume it — delete the file. That precedence is deliberate (a file is the one handle a
+script or a cron job has), but it does mean a stale `logs/PAUSE` from a previous run
+starts the next one paused.
+
 While paused the bot keeps perceiving, rendering and tracing — so you can watch what it
-sees — but sends nothing to the device.
+sees — but sends nothing to the device, advances no state, and records nothing: no frame
+enters the learning ledger and none joins the encounter ring, because a paused frame is
+not evidence of anything the bot did.
 
 **The state machine's clock is frozen rather than its timers shifted.** `ctx.now` is driven
 from `perf_counter() - paused_seconds`, so every stored deadline stays the same distance
 away and nothing has to know a pause happened. Shifting each timer instead would mean a
 resume fires every timeout at once, and a pause that ends in a recovery storm is worse
 than no pause at all.
+
+The freeze covers the state machine's clock and nothing else. The loop's own pacing — the
+inference schedule, the preview refresh, the fps window — stays on the real clock, because
+a frozen clock never reaches its own next deadline: driving `next_infer` from it stopped
+perception after a single frame and stopped the repaint that reads the keyboard, so the
+`p` key could pause the preview but never resume it and `q` could not quit.
 
 Paused time is excluded from `uptime`, so a run left paused overnight does not report a
 catch rate diluted by hours of doing nothing. The summary reports it separately.
@@ -387,7 +401,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       149 tests, no device required
+tests/       156 tests, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```
