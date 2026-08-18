@@ -1,0 +1,19 @@
+# Datasets and captures — large, and regenerable from the Roboflow exports
+datasets/
+runs/
+screenshots/
+logs/
+"Pokemon Go State"*.zip
+*.zip
+
+# Model artifacts. The two the bot actually loads are force-added below so a fresh
+# clone can run; everything else (training runs, optimizer states) stays out.
+models/
+*.pt
+!models/v3/det/weights/best.pt
+!models/v3/cls/weights/best.pt
+
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
