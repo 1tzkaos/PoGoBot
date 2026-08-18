@@ -118,8 +118,6 @@ def rocket_screen(obs: Observation, cfg: Config) -> bool:
 def pick_target(obs: Observation, ctx: Context):
     """Best in-reach, not-cooled detection. Pokemon outrank stops, then confidence."""
     cfg = ctx.cfg
-    rx = max(cfg.reach.radius_x * cfg.range_scale, 1e-6)
-    ry = max(cfg.reach.radius_y * cfg.range_scale, 1e-6)
     best = None
     for d in obs.detections:
         if d.name not in TARGETABLE:
@@ -133,6 +131,9 @@ def pick_target(obs: Observation, ctx: Context):
         if not cfg.fight_rockets and d.name in ROCKET_TARGETS:
             continue
         x, y = d.center_norm
+        scale = cfg.reach.stop_scale if d.name in STOP_TARGETS else 1.0
+        rx = max(cfg.reach.radius_x * cfg.range_scale * scale, 1e-6)
+        ry = max(cfg.reach.radius_y * cfg.range_scale * scale, 1e-6)
         dx = (x - cfg.reach.center_x) / rx
         dy = (y - cfg.reach.center_y) / ry
         if (dx * dx + dy * dy) ** 0.5 > cfg.reach.tolerance:

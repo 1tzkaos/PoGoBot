@@ -94,6 +94,12 @@ class Reach:
     radius_y: float = 0.16
     tolerance: float = 1.05
 
+    # PokeStops need the player physically within the game's interaction radius, which is
+    # tighter than the visual ellipse that works for Pokemon. Measured over a 5 minute
+    # live soak, 15 of 16 stop taps came back "Walk closer to interact" - each costing a
+    # tap plus a 90s cooldown. Tighten the ellipse for stop targets only.
+    stop_scale: float = 0.55
+
 
 @dataclass(frozen=True)
 class Config:
