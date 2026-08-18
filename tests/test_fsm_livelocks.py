@@ -174,3 +174,40 @@ def test_optical_encounter_signal_decides_nothing():
     """Measured 27% false-positive on overworld and 30% recall; it is trace-only."""
     o = obs(on_map=False, encounter=True, screen="Menu", conf=0.99)
     assert not fsm.encounter_confirmed(o, DEFAULT)
+
+
+# --- the learning path must actually be reachable ----------------------------
+def test_successful_pokemon_tap_scores_confirmed_not_refuted():
+    """`expected` must be the state that CONFIRMS the detection, not the waiting state.
+    With expected=TARGETING a successful catch scored REFUTED and cooled a good spot."""
+    from pogobot.effects import SetIntent
+    c = ctx(BotState.SCANNING, now=10.0)
+    out = fsm.step(obs(on_map=True, detections=[det(cx=0.5, cy=0.63)]), c)
+    intent = kinds(out, SetIntent)[0].intent
+    assert intent.expected is BotState.ENCOUNTER
+    c.intent = intent
+    c.state = BotState.TARGETING
+    out2 = fsm.step(obs(screen="PokemonEncounter", conf=0.99), c)
+    t = kinds(out2, Transition)
+    assert t[0].to is BotState.ENCOUNTER
+    assert t[0].outcome is IntentOutcome.CONFIRMED
+
+
+def test_spin_records_the_flag_so_the_confirm_branch_is_reachable():
+    """Nothing set ctx.spun_disc, so POKESTOP could never emit CONFIRMED."""
+    from pogobot.effects import SetFlag
+    c = ctx(BotState.POKESTOP, now=2.0)
+    out = fsm.step(obs(x_button=True, screen="Poi"), c)
+    flags = kinds(out, SetFlag)
+    assert flags and flags[0].name == "spun_disc" and flags[0].value is True
+
+
+def test_detections_below_target_confidence_are_not_tapped():
+    """The detector runs at a low floor so the ledger can see marginal objects; the FSM
+    must not act on them."""
+    c = ctx(BotState.SCANNING, now=10.0)
+    out = fsm.step(obs(on_map=True, detections=[det(cx=0.5, cy=0.63, conf=0.20)]), c)
+    assert not kinds(out, Tap)
+    c2 = ctx(BotState.SCANNING, now=10.0)
+    out2 = fsm.step(obs(on_map=True, detections=[det(cx=0.5, cy=0.63, conf=0.40)]), c2)
+    assert kinds(out2, Tap)

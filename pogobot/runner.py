@@ -24,6 +24,7 @@ from .effects import (
     Halt,
     IntentOutcome,
     Note,
+    SetFlag,
     SetIntent,
     Swipe,
     Tap,
@@ -58,6 +59,7 @@ class Runner:
         self._halt_reason: Optional[str] = None
         self._ticks = 0
         self._fps = 0.0
+        self._last_frame: Optional[Frame] = None
 
     # ---------------------------------------------------------------- state
 
@@ -104,6 +106,8 @@ class Runner:
                 self.enter_state(e.to, e.outcome, e.reason)
             elif isinstance(e, SetIntent):
                 self.ctx.intent = e.intent
+            elif isinstance(e, SetFlag):
+                setattr(self.ctx, e.name, e.value)
             elif isinstance(e, Cooldown):
                 self.ctx.cooldowns.append((e.x, e.y, self.ctx.now + e.seconds))
             elif isinstance(e, ClearSpatialMemory):
@@ -169,6 +173,13 @@ class Runner:
                     self._halt_reason = "actuator circuit breaker tripped (adb failing)"
                     break
 
+                if now < next_infer:
+                    if self.display and self._last_frame is not None:
+                        self._show(window, self._last_frame, None)
+                    else:
+                        time.sleep(0.002)
+                    continue
+
                 frame: Optional[Frame] = self.source.read()
                 if frame is None:
                     # A stale or missing frame must never be treated as a fresh one; v1
@@ -180,10 +191,7 @@ class Runner:
                     continue
 
                 frames += 1
-                if now < next_infer:
-                    if self.display:
-                        self._show(window, frame, None)
-                    continue
+                self._last_frame = frame
                 next_infer = now + 1.0 / max(cfg.infer_fps, 0.1)
 
                 kbd = self.keyboard.state if self.keyboard else Tristate.UNKNOWN
@@ -231,7 +239,7 @@ class Runner:
             img = frame.bgr
         else:
             stats = self.actuator.stats()
-            extra = {"taps": stats.get("applied", 0), "state_s": f"{self.ctx.elapsed:.1f}"}
+            extra = {"taps": stats.get("sent", 0), "state_s": f"{self.ctx.elapsed:.1f}"}
             if self.ledger is not None:
                 extra["saved"] = self.ledger.stats().get("written", 0)
             img = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra)

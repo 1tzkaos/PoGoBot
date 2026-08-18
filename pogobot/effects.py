@@ -94,6 +94,19 @@ class ClearSpatialMemory:
 
 
 @dataclass(frozen=True)
+class SetFlag:
+    """Set a per-visit bookkeeping flag on the Context.
+
+    Handlers are pure, so they cannot record "I already spun the disc" themselves.
+    Without this the POKESTOP confirm branch was unreachable and every stop scored
+    EXPIRED - the learning path was dead code.
+    """
+
+    name: str
+    value: object = True
+
+
+@dataclass(frozen=True)
 class Note:
     text: str
     level: str = "info"
@@ -104,7 +117,8 @@ class Halt:
     reason: str
 
 
-Effect = Union[Tap, Swipe, Back, Transition, SetIntent, Cooldown, ClearSpatialMemory, Note, Halt]
+Effect = Union[Tap, Swipe, Back, Transition, SetIntent, SetFlag, Cooldown,
+               ClearSpatialMemory, Note, Halt]
 
 ACTUATIONS = (Tap, Swipe, Back)
 

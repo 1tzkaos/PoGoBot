@@ -27,6 +27,7 @@ from .effects import (
     Halt,
     IntentOutcome,
     Note,
+    SetFlag,
     SetIntent,
     Swipe,
     Tap,
@@ -123,6 +124,8 @@ def pick_target(obs: Observation, ctx: Context):
     for d in obs.detections:
         if d.name not in TARGETABLE:
             continue
+        if d.conf < cfg.target_confidence:
+            continue
         if cfg.target_mode == "pokemon" and d.name != "pokemon":
             continue
         if cfg.target_mode == "pokestop" and d.name not in STOP_TARGETS:
@@ -188,14 +191,18 @@ class Scanning(Handler):
             if not ctx.ready("tap", cfg.timings.tap_target):
                 return []
             x, y = target.center_norm
-            expected = BotState.POKESTOP if target.name in STOP_TARGETS else BotState.TARGETING
+            # `expected` is the state that would CONFIRM the detection was right, not
+            # the state we pass through while waiting. Setting it to TARGETING scored a
+            # successful Pokemon tap as REFUTED and cooled a location that worked.
+            expected = BotState.POKESTOP if target.name in STOP_TARGETS else BotState.ENCOUNTER
+            goto = BotState.POKESTOP if target.name in STOP_TARGETS else BotState.TARGETING
             intent = Intent(ts=ctx.now, target_name=target.name, confidence=target.conf,
                             tap_norm=(x, y), xywhn=target.xywhn, expected=expected,
                             frame_seq=obs.seq)
             return [
                 SetIntent(intent),
                 Tap(x, y, f"target {target.name} conf={target.conf:.2f}"),
-                Transition(expected, IntentOutcome.CARRIED, f"tapped {target.name}"),
+                Transition(goto, IntentOutcome.CARRIED, f"tapped {target.name}"),
             ]
         if cfg.auto_rotate and ctx.ready("rotate", cfg.timings.rotate_camera) \
                 and ctx.now - ctx.last_map_ts >= cfg.timings.scanning_idle_rotate:
@@ -272,7 +279,8 @@ class Pokestop(Handler):
         if not ctx.spun_disc:
             if not ctx.ready("spin", cfg.timings.spin_disc):
                 return []
-            return [Swipe(0.25, 0.45, 0.75, 0.45, "spin photo disc", duration_ms=220, budget="spin")]
+            return [Swipe(0.25, 0.45, 0.75, 0.45, "spin photo disc", duration_ms=220, budget="spin"),
+                    SetFlag("spun_disc", True)]
         if ctx.ready("close", cfg.timings.close_menu):
             return [Transition(BotState.POPUP, IntentOutcome.CONFIRMED, "disc spun; leaving")]
         return []

@@ -176,10 +176,12 @@ class ScrcpySource:
         return self._proc is not None and self._proc.poll() is None
 
     def release(self) -> None:
-        """Idempotent teardown in reader-first order.
+        """Idempotent teardown in writer -> reader -> capture order.
 
         v1 could reach `cleanup()` four times per exit and freed the capture out from
-        under a thread that was inside `cap.read()`.
+        under a thread that was inside `cap.read()`. Each step here exists to make the
+        next one safe: killing scrcpy is what lets the reader leave `cap.read()`, and
+        the reader leaving is what makes releasing the capture safe.
         """
         with self._release_lock:
             if self._released:
@@ -187,22 +189,38 @@ class ScrcpySource:
             self._released = True
 
         self._stop.set()
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(_JOIN_TIMEOUT)
 
+        # Kill the writer FIRST. `_stop` is invisible to a reader parked inside cv2's
+        # read() on the FIFO, and it parks there indefinitely whenever scrcpy holds the
+        # pipe open without producing frames (screen off, USB flaked, device asleep).
+        # Closing the write end is the only thing that delivers the EOF which lets that
+        # read() return, so terminating before the join is what makes the join succeed.
         if self._proc is not None and self._proc.poll() is None:
             self._proc.terminate()
             try:
                 self._proc.wait(timeout=_JOIN_TIMEOUT)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
+                try:
+                    self._proc.wait(timeout=_JOIN_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    pass
 
-        if self._cap is not None:
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            thread.join(_JOIN_TIMEOUT)
+
+        # Free the capture only once the reader is provably out of it. v1 released it
+        # while the thread was inside `cap.read()`; cv2.VideoCapture is not thread-safe
+        # and that frees the decoder context out from under an active read. If the reader
+        # is still wedged, drop our reference instead: it holds the last one, so CPython
+        # runs the destructor on the owning thread when it finally unblocks.
+        cap, self._cap = self._cap, None
+        if cap is not None and (thread is None or not thread.is_alive()):
             try:
-                self._cap.release()
+                cap.release()
             except Exception:
                 pass
-            self._cap = None
 
         if self._stderr is not None:
             try:
@@ -286,6 +304,14 @@ class ScrcpySource:
         if thread.is_alive():
             self._stop.set()
             _unblock_open(thread, self._fifo)
+            # The opener can win the race between its own `_stop` check and the set
+            # above; anything it left behind is ours to close or it leaks the fd.
+            for item in box:
+                if not isinstance(item, Exception):
+                    try:
+                        item.release()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
             raise CaptureError(
                 f"no video on {self._fifo} within {timeout:.1f}s. "
                 f"scrcpy returncode={self.returncode}; stderr: {self.stderr_tail()}"

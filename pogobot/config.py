@@ -106,7 +106,11 @@ class Config:
     det_model: Path = BASE_DIR / "models" / "v3" / "det" / "weights" / "best.pt"
     cls_model: Path = BASE_DIR / "models" / "v3" / "cls" / "weights" / "best.pt"
 
-    confidence: float = 0.30
+    # The detector runs at the FLOOR so the learning path can see marginal objects and
+    # refuse to write a frame that contains them (they would become background labels).
+    # The FSM only acts on detections at or above target_confidence.
+    confidence: float = 0.15
+    target_confidence: float = 0.30
     imgsz: int = 1024
     infer_fps: float = 8.0
     max_size: int = 1280
