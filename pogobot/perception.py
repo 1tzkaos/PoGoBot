@@ -291,5 +291,6 @@ class Perceptor:
             detections=self.detect(bgr) if run_detector else (),
             keyboard=keyboard,
             close_button_xy=find_close_button(bgr, cfg),
+            action_pill_xy=find_action_pill(bgr, cfg),
             frame_age=frame.age(),
         )

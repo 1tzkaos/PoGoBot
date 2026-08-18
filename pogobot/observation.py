@@ -104,7 +104,8 @@ class Observation:
     screen: ScreenGuess
     detections: tuple[Detection, ...] = ()
     keyboard: Tristate = Tristate.UNKNOWN
-    close_button_xy: Optional[tuple[int, int]] = None
+    close_button_xy: Optional[tuple[float, float]] = None
+    action_pill_xy: Optional[tuple[float, float]] = None
     frame_age: float = 0.0
 
     @property
