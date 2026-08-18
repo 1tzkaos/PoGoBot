@@ -35,7 +35,7 @@ NAME_COLOR = {
 
 
 def render(frame_bgr, obs: Observation, cfg: Config, state: BotState,
-           fps: float = 0.0, extra: Optional[dict] = None):
+           fps: float = 0.0, extra: Optional[dict] = None, status: str = ""):
     img = frame_bgr.copy()
     h, w = img.shape[:2]
 
@@ -74,7 +74,11 @@ def render(frame_bgr, obs: Observation, cfg: Config, state: BotState,
              f"pill:{int(obs.action_pill_xy is not None)} kbd:{obs.keyboard.value[0]}")
     cv2.putText(img, flags, (12, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (170, 220, 170), 1)
 
-    if extra:
+    if status:
+        cv2.rectangle(img, (0, h - 34), (w, h), (18, 18, 18), -1)
+        cv2.putText(img, status, (12, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.40,
+                    (120, 220, 255), 1, cv2.LINE_AA)
+    elif extra:
         cv2.putText(img, "  ".join(f"{k}={v}" for k, v in extra.items()),
                     (12, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 200, 120), 1)
     return img

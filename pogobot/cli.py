@@ -35,6 +35,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--serial", default=None, help="adb device serial")
     p.add_argument("--trace", type=Path, default=BASE_DIR / "logs" / "trace.jsonl")
     p.add_argument("--no-trace", action="store_true")
+    p.add_argument("--stats-file", type=Path, default=BASE_DIR / "logs" / "sessions.jsonl",
+                   help="append each finished session here and report lifetime totals")
+    p.add_argument("--no-stats", action="store_true", help="do not record session stats")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
 
@@ -139,8 +142,15 @@ def main(argv=None) -> int:
     if trace:
         trace.parent.mkdir(parents=True, exist_ok=True)
 
+    stats_path = None if a.no_stats else a.stats_file
+    if stats_path is not None:
+        from .stats import lifetime_line, load_lifetime
+        total = load_lifetime(stats_path)
+        if total:
+            log.info("%s", lifetime_line(total))
+
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
-                    trace_path=trace, display=not a.no_display)
+                    trace_path=trace, display=not a.no_display, stats_path=stats_path)
     return runner.run()
 
 
