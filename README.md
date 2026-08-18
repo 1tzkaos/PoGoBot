@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-139%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-149%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -38,8 +38,9 @@ machine, and acts through `adb`.
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
+- **Pause and resume** — stops sending input without stopping perception, and without ageing the state machine
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **139 tests in under 4 seconds**, no device required
+- **149 tests in under 4 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -91,7 +92,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 139 tests, no device required |
+| `python3 -m pytest tests/ -q` | 149 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -265,6 +266,28 @@ python3 -m pogobot --reset-spins
 
 This is the counter an account-switching mechanism would key off.
 
+## Pausing
+
+Three ways, all equivalent:
+
+```bash
+touch logs/PAUSE            # pause          (rm logs/PAUSE to resume)
+kill -USR1 $(pgrep -f "python3 -m pogobot")   # toggle
+```
+…or press **`p`** on the preview window (**`q`** still quits).
+
+While paused the bot keeps perceiving, rendering and tracing — so you can watch what it
+sees — but sends nothing to the device.
+
+**The state machine's clock is frozen rather than its timers shifted.** `ctx.now` is driven
+from `perf_counter() - paused_seconds`, so every stored deadline stays the same distance
+away and nothing has to know a pause happened. Shifting each timer instead would mean a
+resume fires every timeout at once, and a pause that ends in a recovery storm is worse
+than no pause at all.
+
+Paused time is excluded from `uptime`, so a run left paused overnight does not report a
+catch rate diluted by hours of doing nothing. The summary reports it separately.
+
 ## Session stats
 
 Every run prints a summary on exit and appends itself to `logs/sessions.jsonl`, so the next
@@ -345,6 +368,7 @@ report how many were left out.
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
 | `--tui` | off | live terminal dashboard instead of scrolling log lines |
+| `--pause-file PATH` | `logs/PAUSE` | while this file exists the bot sends no input |
 | `--collect-encounters DIR` | – | save frames around each encounter ending, for labelling a catch detector |
 | `--stats-file PATH` | `logs/sessions.jsonl` | append each finished session, report lifetime totals |
 | `--no-stats` | off | do not record session stats |
@@ -363,7 +387,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       139 tests, no device required
+tests/       149 tests, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```

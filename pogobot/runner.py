@@ -62,7 +62,8 @@ class Runner:
                  ledger=None, keyboard=None, trace_path: Optional[Path] = None,
                  display: bool = True, stats_path: Optional[Path] = None,
                  dashboard=None, encounter_dump: Optional[Path] = None,
-                 quota: Optional[SpinQuota] = None):
+                 quota: Optional[SpinQuota] = None,
+                 pause_file: Optional[Path] = None):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -74,6 +75,11 @@ class Runner:
         self.dashboard = dashboard
         self.encounter_dump = encounter_dump
         self.quota = quota
+        self.pause_file = pause_file
+        self._paused = False
+        self._pause_requested = False    # toggled by SIGUSR1 and by the display key
+        self._paused_at = 0.0
+        self._pause_total = 0.0
         # A ring of frames from inside an encounter. On exit these are the frames that
         # would show a catch award screen - the evidence a real catch counter needs.
         # Sized in seconds, not frames: at 8 inference fps a 8-frame ring held one second
@@ -198,6 +204,48 @@ class Runner:
         if self._halt_reason is None:
             self.stats.halts += 1
         self._halt_reason = reason
+
+    def toggle_pause(self) -> None:
+        self._pause_requested = not self._pause_requested
+
+    def _pause_wanted(self) -> bool:
+        if self._pause_requested:
+            return True
+        if self.pause_file is not None:
+            try:
+                return self.pause_file.exists()
+            except OSError:
+                return False
+        return False
+
+    def _sync_pause(self) -> bool:
+        """Enter or leave the paused state. Returns whether we are paused now.
+
+        The FSM clock is frozen rather than the timers being shifted one by one: `ctx.now`
+        is driven from `perf_counter() - _pause_total`, so every stored deadline stays
+        comparable and nothing has to know that a pause happened. Shifting each timer
+        instead would mean a resume fires every timeout at once - a pause that ends in a
+        recovery storm is worse than no pause at all.
+        """
+        want = self._pause_wanted()
+        if want and not self._paused:
+            self._paused = True
+            self._paused_at = time.perf_counter()
+            log.warning("PAUSED - no taps will be sent. %s",
+                        "delete the pause file to resume" if self.pause_file
+                        else "send SIGUSR1 again to resume")
+        elif not want and self._paused:
+            self._paused = False
+            self._pause_total += time.perf_counter() - self._paused_at
+            self.stats.paused_seconds = self._pause_total
+            log.info("resumed after %.0fs paused", time.perf_counter() - self._paused_at)
+        if self._paused:
+            self.stats.paused_seconds = self._pause_total + (time.perf_counter() - self._paused_at)
+        return self._paused
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def _explain_refusal(self) -> None:
         """A refused stop past the daily cap is not a distance problem.
@@ -377,6 +425,14 @@ class Runner:
         # Resolved by name: CPython on Windows has no SIGHUP, and naming it in a tuple
         # raises AttributeError before the try below can catch anything - which killed
         # run() before the loop started, on a platform the README says is supported.
+        usr1 = getattr(signal, "SIGUSR1", None)
+        if usr1 is not None:
+            def _toggle(_signum, _frame):
+                self.toggle_pause()
+            try:
+                previous[usr1] = signal.signal(usr1, _toggle)
+            except (OSError, ValueError):
+                pass
         for _name in ("SIGTERM", "SIGINT", "SIGHUP"):
             sig = getattr(signal, _name, None)
             if sig is None:
@@ -388,7 +444,9 @@ class Runner:
 
         try:
             while not self._stop:
-                now = time.perf_counter()
+                paused = self._sync_pause()
+                # The FSM clock excludes paused time, so no deadline expires while idle.
+                now = time.perf_counter() - self.stats.paused_seconds
                 self.ctx.now = now
 
                 if not self.source.healthy():
@@ -462,12 +520,25 @@ class Runner:
 
                 if self.quota is not None:
                     self.ctx.spins_exhausted = self.quota.state(time.time()).exhausted
+                if paused:
+                    # Perception still runs so the display stays live and the trace keeps
+                    # a record, but the machine does not advance and nothing is actuated.
+                    self._write_trace(obs, [])
+                    if self.dashboard is not None:
+                        try:
+                            self.dashboard.update(obs, self.ctx.state, self._fps, paused=True)
+                        except Exception:
+                            log.exception("dashboard update failed")
+                    if self.display:
+                        self._show(window, frame, obs)
+                    continue
+
                 self._update_restock()
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
                 if self.dashboard is not None:
                     try:
-                        self.dashboard.update(obs, self.ctx.state, self._fps)
+                        self.dashboard.update(obs, self.ctx.state, self._fps, paused=self._paused)
                     except Exception:
                         log.exception("dashboard update failed")
                 self._write_trace(obs, effects)
@@ -522,7 +593,11 @@ class Runner:
         extra = {"taps": stats.get("sent", 0), "state_s": f"{self.ctx.elapsed:.1f}"}
         if self.ledger is not None:
             extra["saved"] = self.ledger.stats().get("written", 0)
-        self._last_hud = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra)
+        # `status` was added to hud.render when the dashboard landed but never passed
+        # here, so the counters line was never actually drawn on the preview window.
+        self._last_hud = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra,
+                                    status=self.stats.hud_line(self.ctx.now),
+                                    paused=self._paused)
         self._shown_hud += 1
 
     def _show(self, window: str, frame: Frame, obs: Observation) -> bool:
@@ -538,7 +613,10 @@ class Runner:
         if self._last_hud is None:
             return True
         cv2.imshow(window, self._last_hud)
-        return (cv2.waitKey(1) & 0xFF) != ord("q")
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("p"):
+            self.toggle_pause()
+        return key != ord("q")
 
     def close(self) -> None:
         # The session record is the durable output of the run, so it is written from a

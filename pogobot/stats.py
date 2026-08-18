@@ -29,6 +29,8 @@ RATE_MIN_UPTIME = 120.0
 @dataclass
 class SessionStats:
     started: float = field(default_factory=time.perf_counter)
+    #: seconds spent paused, excluded from uptime so rates describe working time
+    paused_seconds: float = 0.0
 
     # Verifiable: the bot observed the screen change, or issued the action itself.
     encounters: int = 0            # entered ENCOUNTER (a tap opened a real encounter)
@@ -68,7 +70,10 @@ class SessionStats:
     # ------------------------------------------------------------------ time
 
     def uptime(self, now: Optional[float] = None) -> float:
-        return (time.perf_counter() if now is None else now) - self.started
+        """Working time. Paused time is excluded, otherwise a run left paused overnight
+        would report a catch rate diluted by hours in which the bot did nothing."""
+        elapsed = (time.perf_counter() if now is None else now) - self.started
+        return max(0.0, elapsed - self.paused_seconds)
 
     def per_hour(self, count: int, now: Optional[float] = None) -> Optional[float]:
         """Rate per hour, or None until the session is long enough to mean anything.
@@ -113,6 +118,7 @@ class SessionStats:
 
         out = {
             "uptime_s": round(up, 1),
+            "paused_s": round(self.paused_seconds, 1),
             "dry_run": bool(self.dry_run),
             "uptime": _hms(up),
             "encounters": self.encounters,
@@ -154,7 +160,8 @@ class SessionStats:
             return "" if v is None else f"{v}/h"
 
         rows = [
-            ("uptime", s["uptime"], ""),
+            ("uptime (working)", s["uptime"], ""),
+            ("paused", _hms(self.paused_seconds), ""),
             ("encounters", s["encounters"], rate("encounters_per_hour")),
             ("catch attempts", s["catch_attempts"], rate("catch_attempts_per_hour")),
             ("balls thrown", s["balls_thrown"], ""),
