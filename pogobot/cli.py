@@ -89,6 +89,12 @@ def main(argv=None) -> int:
     from .perception import Perceptor
     from .runner import Runner
 
+    # A locally trained larger detector wins if one is present. Only the compact model
+    # is committed; an 85 MB weight file is not something every clone should download.
+    if a.det_model is None:
+        bigger = BASE_DIR / "models" / "v3" / "det_s" / "weights" / "best.pt"
+        if bigger.exists():
+            cfg = cfg.scaled(det_model=bigger)
     if not cfg.det_model.exists():
         log.error("detector not found: %s", cfg.det_model)
         return 2
