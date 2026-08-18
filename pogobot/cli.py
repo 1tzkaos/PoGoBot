@@ -54,6 +54,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rolling 24h PokeStop spin log (spans restarts)")
     p.add_argument("--spin-limit", type=int, default=None, metavar="N",
                    help="PokeStop spins allowed per rolling 24h (0 disables the check)")
+    p.add_argument("--reset-spins", action="store_true",
+                   help="clear the 24h spin window, e.g. once a soft ban has lifted")
     p.add_argument("--seed-spins", type=int, default=None, metavar="N",
                    help="record N spins the bot did not perform, spread over the last 12h, "
                         "so the quota reflects the account rather than this process")
@@ -179,6 +181,8 @@ def main(argv=None) -> int:
     from .quota import DEFAULT_DAILY_LIMIT, SpinQuota
     quota = SpinQuota(a.quota_file,
                       limit=DEFAULT_DAILY_LIMIT if a.spin_limit is None else a.spin_limit)
+    if a.reset_spins:
+        log.info("cleared %d spin(s) from the 24h window", quota.reset())
     if a.seed_spins:
         quota.seed(a.seed_spins)
         log.info("seeded %d spins into the 24h window", a.seed_spins)

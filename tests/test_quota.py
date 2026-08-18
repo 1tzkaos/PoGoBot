@@ -146,3 +146,21 @@ def test_a_zero_limit_disables_the_check():
 
 def test_the_default_limit_is_niantics_documented_cap():
     assert DEFAULT_DAILY_LIMIT == 1200
+
+
+def test_reset_clears_the_window(tmp_path):
+    """A ban that lifts early, or a seed that turns out to be stale, must be correctable:
+    an over-stated quota stops the bot targeting stops it can actually use."""
+    p = tmp_path / "spins.jsonl"
+    q = SpinQuota(p, limit=1200)
+    q.seed(1200, spread_hours=20)
+    assert q.state().exhausted
+    dropped = q.reset()
+    assert dropped == 1200
+    assert q.state().used == 0 and not q.state().exhausted
+    assert SpinQuota(p, limit=1200).state().used == 0, "and it stays cleared across restarts"
+
+
+def test_reset_on_an_empty_window_is_harmless(tmp_path):
+    q = SpinQuota(tmp_path / "spins.jsonl", limit=1200)
+    assert q.reset() == 0

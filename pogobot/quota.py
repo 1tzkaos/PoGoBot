@@ -131,6 +131,23 @@ class SpinQuota:
         for i in range(count):
             self.record(now - (count - i) * step)
 
+    def reset(self) -> int:
+        """Forget every recorded spin. Returns how many were dropped.
+
+        Needed because the window can be wrong in the optimistic direction as well as the
+        pessimistic one: a seeded count that turns out to be stale, or a ban that lifted
+        earlier than the rolling window implies, would otherwise keep the bot from
+        targeting stops it can actually use.
+        """
+        dropped = len(self._stamps)
+        self._stamps = []
+        if self.path is not None:
+            try:
+                self.path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return dropped
+
     def state(self, now: Optional[float] = None) -> QuotaState:
         now = time.time() if now is None else now
         self._prune(now)
