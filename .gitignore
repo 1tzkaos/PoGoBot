@@ -12,6 +12,9 @@ models/
 *.pt
 !models/v3/det/weights/best.pt
 !models/v3/cls/weights/best.pt
+# models/v3/det_s/ is the larger yolov8s detector: better, but ~85 MB, which is not
+# something every clone should pay for. Train it locally and adopt it with
+# tools/adopt_best_detector.py --install.
 
 __pycache__/
 *.py[cod]

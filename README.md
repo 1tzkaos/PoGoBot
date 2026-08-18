@@ -117,21 +117,33 @@ previous detector (3.23 → 2.38 detections per frame over three generations).
 
 ## Models
 
-| | dataset | result |
-|---|---|---|
-| detector | `det_v3`, 186/21/11, 4 classes | class-agnostic recall **69.2%** (previous model: 23.3%) |
-| screen classifier | 5 classes: Overworld / PokemonEncounter / Menu / Poi / Rocket | 100% on the held-out split |
+Trained on `det_v3` (186/21/11 images, 4 classes) — verified to have no cross-split
+leakage, no duplicate images, and no empty label files.
 
-Per-class detector mAP50: pokemon 0.809, gym 0.566, pokestop_rocket 0.432,
-pokestop 0.169.
+| detector | size | class-agnostic recall | mAP50 |
+|---|---|---|---|
+| previous | 6 MB | 23.3% | not measurable — its validation set was leaked |
+| **`yolov8n` (shipped)** | **6 MB** | **69.2%** | 0.494 |
+| `yolov8s` (train locally) | 85 MB | 75.9% | 0.609 |
+
+Only the compact model is committed; an 85 MB weight file is not something every clone
+should download. The bot automatically prefers `models/v3/det_s/weights/best.pt` when it
+exists, so training the larger one is opt-in:
 
 ```bash
 python3 tools/adopt_best_detector.py             # compare candidates on held-out val
 python3 tools/adopt_best_detector.py --install   # install the winner
 ```
 
-It ranks by class-agnostic localization recall rather than mAP, because candidate models
-have different class counts and what the bot needs is *did it find the object at all*.
+Per-class mAP50 for `yolov8s`: pokemon 0.806, gym 0.699, pokestop_rocket 0.622,
+pokestop 0.309.
+
+The screen classifier is 5-class — Overworld / PokemonEncounter / Menu / Poi / Rocket —
+and scores 100% on its held-out split.
+
+`adopt_best_detector.py` ranks by class-agnostic localization recall rather than mAP,
+because candidate models have different class counts and what the bot needs is *did it
+find the object at all*.
 
 ## Configuration
 
@@ -163,8 +175,8 @@ includes a sweep from `--max-size 1920` down to `540` asserting the signals hold
 
 ## Known limitations
 
-- **PokéStop detection is the weakest class** (mAP50 0.169). Labelling more stops is the
-  highest-value improvement available.
+- **PokéStop detection is the weakest class** (mAP50 0.309 on the larger model). Labelling more
+  stops is the highest-value improvement available.
 - **Gym screens can classify as `PokemonEncounter`** — the `Poi` class has only 8 training
   samples. The 0.60 confidence gate refuses them and the 25s encounter timeout bounds the
   cost, but it is a real gap.

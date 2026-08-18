@@ -106,3 +106,12 @@ Recorded because they are the same species of defect and were caught the same wa
 - The Rocket BATTLE button is visible for roughly one second, and the generic UI-settle
   window from the preceding close tap swallowed the entire opportunity. Actions taken
   against an optically **located** button no longer wait for settle; blind taps still do.
+
+## Outcome
+
+| metric | v1 | now |
+|---|---|---|
+| class-agnostic localization recall, held-out val | 23.3% (31/133) | **75.9%** (101/133) |
+| detector mAP50 | not measurable (validation set leaked) | 0.609 |
+| tests that run without a device | 0 | 44, in under 4 seconds |
+| unattended failure modes with a bounded escape | 0 of 4 | 4 of 4 |
