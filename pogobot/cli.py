@@ -28,6 +28,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true",
                    help="perceive and decide, but never touch the device")
     p.add_argument("--no-display", action="store_true")
+    p.add_argument("--tui", action="store_true",
+                   help="live terminal dashboard instead of scrolling log lines")
+    p.add_argument("--collect-encounters", type=Path, default=None,
+                   help="write the frames around each encounter ending here, for labelling "
+                        "a catch detector")
     p.add_argument("--no-learning", action="store_true", help="do not write training data")
     p.add_argument("--replay", type=Path, default=None,
                    help="run against a directory of frames instead of a phone")
@@ -86,6 +91,7 @@ def main(argv=None) -> int:
 
     from ultralytics import YOLO
     from .actions import Actuator, NullActuator
+    from .stats import SessionStats
     from .capture import ReplaySource, ScrcpySource
     from .device import KeyboardPoller, device_online, screen_size
     from .learning import IntentLedger
@@ -143,15 +149,31 @@ def main(argv=None) -> int:
         trace.parent.mkdir(parents=True, exist_ok=True)
 
     stats_path = None if a.no_stats else a.stats_file
+    total = None
     if stats_path is not None:
         from .stats import lifetime_line, load_lifetime
         total = load_lifetime(stats_path)
         if total:
             log.info("%s", lifetime_line(total))
 
+    dashboard = None
+    if a.tui:
+        from . import tui
+        if not tui.available():
+            log.warning("--tui needs the 'rich' package; falling back to log lines")
+        else:
+            dashboard = tui.Dashboard(SessionStats(), lifetime=total if stats_path else None)
+
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
-                    trace_path=trace, display=not a.no_display, stats_path=stats_path)
-    return runner.run()
+                    trace_path=trace, display=not a.no_display, stats_path=stats_path,
+                    dashboard=dashboard, encounter_dump=a.collect_encounters)
+    if dashboard is None:
+        return runner.run()
+    # The dashboard owns the session counters so the header can render before the first
+    # tick; the runner must not create a second set.
+    runner.stats = dashboard.stats
+    with dashboard:
+        return runner.run()
 
 
 if __name__ == "__main__":

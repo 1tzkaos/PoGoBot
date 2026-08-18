@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+from collections import deque
 import time
 from pathlib import Path
 from typing import Optional
@@ -52,7 +53,8 @@ _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 class Runner:
     def __init__(self, cfg: Config, source: FrameSource, actuator, perceptor,
                  ledger=None, keyboard=None, trace_path: Optional[Path] = None,
-                 display: bool = True, stats_path: Optional[Path] = None):
+                 display: bool = True, stats_path: Optional[Path] = None,
+                 dashboard=None, encounter_dump: Optional[Path] = None):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -61,6 +63,12 @@ class Runner:
         self.keyboard = keyboard
         self.display = display
         self.stats_path = stats_path
+        self.dashboard = dashboard
+        self.encounter_dump = encounter_dump
+        # A short ring of frames from inside an encounter. On exit these are the frames
+        # that would show a catch award screen, which is the evidence a real catch
+        # counter needs and which nothing currently captures.
+        self._enc_ring: deque = deque(maxlen=8)
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
         self.ctx.last_map_ts = time.perf_counter()
@@ -164,6 +172,26 @@ class Runner:
         if self._halt_reason is None:
             self.stats.halts += 1
         self._halt_reason = reason
+
+    def _dump_encounter_ring(self) -> None:
+        """Write the frames leading up to an encounter ending, for labelling.
+
+        A catch and a flee are indistinguishable to the bot today, so `catch_attempts`
+        cannot be promoted to a catch count without evidence. These frames are that
+        evidence: the award screen, if there was one, is in here.
+        """
+        if self.encounter_dump is None or not self._enc_ring:
+            return
+        try:
+            import cv2
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self.encounter_dump.mkdir(parents=True, exist_ok=True)
+            for i, bgr in enumerate(self._enc_ring):
+                cv2.imwrite(str(self.encounter_dump / f"{stamp}_{self._ticks:07d}_{i}.png"), bgr)
+        except Exception:
+            log.exception("could not write the encounter frames")
+        finally:
+            self._enc_ring.clear()
 
     def _resolve_intent(self, intent, outcome: IntentOutcome) -> None:
         cd = self.cfg.cooldowns
@@ -337,6 +365,8 @@ class Runner:
                         break
                     continue
 
+                if self.ctx.state is BotState.ENCOUNTER and self.encounter_dump is not None:
+                    self._enc_ring.append(frame.bgr.copy())
                 if obs.on_map:
                     self.ctx.last_map_ts = now
                 if fsm.rocket_screen(obs, cfg):
@@ -346,6 +376,11 @@ class Runner:
 
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
+                if self.dashboard is not None:
+                    try:
+                        self.dashboard.update(obs, self.ctx.state, self._fps)
+                    except Exception:
+                        log.exception("dashboard update failed")
                 self._write_trace(obs, effects)
                 self._ticks += 1
 

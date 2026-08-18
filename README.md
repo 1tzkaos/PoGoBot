@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-98%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-106%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -35,8 +35,9 @@ machine, and acts through `adb`.
 - **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
+- **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **98 tests in under 4 seconds**, no device required
+- **106 tests in under 4 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -88,7 +89,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 98 tests, no device required |
+| `python3 -m pytest tests/ -q` | 106 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -226,6 +227,20 @@ minutes, so a headless session reports progress.
 Every counter is incremented from `Runner.apply`, the single place that performs actions,
 so a count cannot drift from what the bot actually did.
 
+`--tui` renders the same numbers live alongside the perception state and the log:
+
+```
+╭──────────────────── session ─────────────────────╮╭─────────────────── perception ───────────────────╮
+│ encounters               525  253.0/h            ││ screen          Overworld 1.00                   │
+│ catch attempts           517  249.2/h            ││ map (optical)  yes r0.31 o0.10                   │
+│ balls thrown             680                     ││ close button                no                   │
+│ stops collected            0    0.0/h            ││ action pill                 no                   │
+│ stops out of range       152                     ││ frame age                78 ms                   │
+│ rockets engaged           58                     ││ detections                   4                   │
+│ recoveries               207                     ││   pokemon          2  max 0.81                   │
+╰──────────────────────────────────────────────────╯╰──────────────────────────────────────────────────╯
+```
+
 **On the word "catches".** `catch attempts` counts encounters in which a ball was thrown.
 It is **not** a confirmed catch count: a successful catch and a Pokémon fleeing both end the
 same way — the encounter UI disappears and the map returns — and the screen classifier has
@@ -262,6 +277,8 @@ report how many were left out.
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
+| `--tui` | off | live terminal dashboard instead of scrolling log lines |
+| `--collect-encounters DIR` | – | save frames around each encounter ending, for labelling a catch detector |
 | `--stats-file PATH` | `logs/sessions.jsonl` | append each finished session, report lifetime totals |
 | `--no-stats` | off | do not record session stats |
 
@@ -279,7 +296,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       98 tests, no device required
+tests/       106 tests, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```
