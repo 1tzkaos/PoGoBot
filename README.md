@@ -1,151 +1,190 @@
 # PoGoBot
 
-A Pokémon GO vision bot: scrcpy video → YOLOv8 detector + screen classifier → a pure,
-testable state machine → adb taps.
+A computer-vision bot for Pokémon GO on Android. It reads the screen over `scrcpy`,
+locates targets with YOLOv8, decides what to do with a pure state machine, and acts
+through `adb`.
+
+The state machine and the perception layer import without a phone, a GPU, or a model, so
+the whole decision surface is unit-testable: **44 tests run in under 4 seconds.**
 
 ```bash
-python3 -m pogobot                 # run it
-python3 -m pogobot --dry-run       # perceive and decide, never touch the phone
+python3 -m pogobot                 # run against a connected phone
+python3 -m pogobot --dry-run       # perceive and decide, but never touch the device
 python3 -m pogobot --replay <dir>  # run against saved frames, no phone at all
-python3 -m pytest tests/ -q        # 35 tests, no device needed, ~4s
 ```
 
-## Why this exists
+## Requirements
 
-A 7-lens adversarial audit of the previous single-file bot (`pokemon_vision_bot.py`, kept
-for reference) confirmed **106 defects**. They deduplicated to ~65, of which 39 were
-instances of six missing structures. Three of them were self-sustaining loops that
-consumed an entire unattended session:
+- Python 3.10+
+- [`scrcpy`](https://github.com/Genymobile/scrcpy) 2.0+ and `adb` on your `PATH`
+- An Android device with USB debugging enabled, Pokémon GO in the foreground
 
-| | what happened |
+```bash
+pip install -r requirements.txt
+adb devices          # confirm the device is listed and authorized
+python3 -m pogobot --dry-run
+```
+
+Start with `--dry-run`. It runs the full pipeline and prints every decision without
+sending a single tap.
+
+> Turn **off** the *Pointer location* developer option. It draws a white readout across
+> the top of the screen, which lands inside the region used to detect the encounter UI and
+> is baked into every frame the bot saves.
+
+## How it works
+
+```
+scrcpy ──▶ capture ──▶ perception ──▶ fsm ──▶ actions ──▶ adb
+           Frame        Observation    Effect
+```
+
+Each stage has one job and one contract:
+
+| module | responsibility |
 |---|---|
-| **Menu loop** | `find_close_button_coordinates` had no "not found" path and fell back to `(0.50w, 0.8808h)` = `(540, 2061)` — a coordinate that sits *inside* the ROI the same file used to identify the overworld Pokéball. "Close the popup" **opened the main menu**. `CLOSING_POPUP`'s 4s escape was an `elif` below the tap branch, so it was unreachable while that branch held. |
-| **Poison loop** | `SPINNING_STOP` wrote a `+1.0` training sample 0.8s after swiping with no verification a PokéStop had opened (69% of the corpus), each with a *single* box label on a multi-object frame. Measured: **3.23 → 2.38 detections/frame** after three self-retrain generations. |
-| **Blind loop** | `read()` returned `(True, last_frame.copy())` forever after the stream died, and `scrcpy_proc` was never polled. A cable bump turned the bot into ~3600 blind taps/hour against a phone it could not see. |
+| `capture.py` | `ScrcpySource` (keeps only the newest frame) and `ReplaySource` |
+| `perception.py` | **pure**: `Frame -> Observation`. No adb, no disk, no globals |
+| `fsm.py` | **pure**: `(Observation, Context) -> list[Effect]` |
+| `actions.py` | the only code permitted to invoke `adb` |
+| `learning.py` | the only code permitted to write data |
+| `runner.py` | the only module holding both a `FrameSource` and an `Actuator` |
+| `config.py` | every threshold and timing constant, one frozen dataclass |
 
-## Architecture
+### The state machine
 
+```mermaid
+stateDiagram-v2
+    [*] --> BOOT
+    BOOT --> SCANNING: map confirmed
+    SCANNING --> TARGETING: tapped a Pokémon
+    SCANNING --> POKESTOP: tapped a stop
+    TARGETING --> ENCOUNTER: encounter opened
+    TARGETING --> SCANNING: timed out
+    ENCOUNTER --> SCANNING: back on the map
+    POKESTOP --> POPUP: collected / out of range
+    POPUP --> ROCKET: Rocket screen detected
+    ROCKET --> SCANNING: back on the map
+    POPUP --> SCANNING: overlay closed
+    SCANNING --> RECOVERING: map not visible
+    RECOVERING --> SCANNING: recovered
+    RECOVERING --> HALTED: cannot find the map
 ```
-pogobot/
-  config.py       every threshold and timing constant, one frozen dataclass
-  frames.py       Frame(seq, ts, bgr) — staleness is expressible
-  capture.py      ScrcpySource (drop-to-latest) | ReplaySource
-  perception.py   PURE: frame -> Observation
-  observation.py  Observation, Signal, ScreenStabilizer
-  actions.py      Actuator — the only code that touches adb
-  fsm.py          PURE: (Observation, Context) -> list[Effect]
-  learning.py     IntentLedger — the only code that writes data
-  runner.py       the only module holding both a FrameSource and an Actuator
-```
 
-**Three chokepoints**, because 39 of 65 defects were one missing chokepoint each:
+Three properties are enforced structurally rather than by convention:
 
-1. `enter_state()` is the only writer of `state`. It stamps the clock, demands an explicit
-   `IntentOutcome`, and appends the cooldown. v1 assigned `state` at 12 sites and stamped
-   the clock at 9.
-2. `Actuator` enforces `dry_run`, rate limits, adb return codes and a circuit breaker once.
-   v1 checked `no_click` at 5 of 10 actuation sites.
-3. `IntentLedger` is the only writer of training data.
+1. **Handlers cannot write `state`.** They return a `Transition` and one function applies
+   it, stamping the clock and resolving the pending tap-intent.
+2. **Timeouts are checked before handler bodies run**, so a timeout can never be shadowed
+   by an earlier branch. Every handler must declare `timeout_s` and `on_timeout` or the
+   package raises at import.
+3. **Every effect coordinate is a normalized float.** Stream pixels and device pixels
+   cannot be mixed because only one of them is representable.
 
-**Timeouts are checked by the dispatcher before the handler body runs**, so an unreachable
-timeout is impossible. Every handler must declare `timeout_s` and `on_timeout`; a missing
-one raises at import, not at 3am.
+### Perception
 
-**All effect coordinates are normalized floats.** v1 mixed stream pixels and device pixels
-freely — cooldowns stored device pixels while detections were in stream pixels.
-
-## Perception: measured, not assumed
-
-Every threshold is a **fraction of its ROI area**. v1 used absolute pixel counts on ROIs
-that scale with `--max-size`; at `--max-size 720` the binoculars check measured 479 px
-against a `> 500` bar and overworld detection silently stopped working.
+Every optical threshold is a **fraction of its region's area**, never a pixel count, so
+changing `--max-size` cannot silently disable a check. Buttons are **located, never
+assumed** — every finder returns `Optional`, and no located button means no tap.
 
 Calibrated against 235 labelled frames:
 
 | signal | behaviour |
 |---|---|
-| optical map (red Pokéball **and** orange binoculars) | 79% recall, ~0% false positive → used as a **precision-first veto** |
-| red Pokéball alone | 97% recall but 18% false positive on encounters → not used alone |
-| `find_close_button` | 93% on menu screens, 1% on encounters |
-| `find_action_pill` | 100% on the Rocket BATTLE / USE THIS PARTY screens, 4% on menus |
-| optical encounter (ball + flee icon) | **27% false positive, 30% recall — deleted.** It decides nothing; the classifier owns that call behind the map and X-button vetoes |
+| map (red Pokéball **and** orange binoculars) | 79% recall, ~0% false positive — used as a precision-first veto |
+| close button | 93% on menu screens, 1% on encounters |
+| affirmative pill | 100% on the Rocket BATTLE / party screens, 4% on menus |
 
-Buttons are **located, never assumed**. Every finder returns `Optional`; no located button
-means no tap. That alone breaks the menu loop.
+The classifier answers what optics cannot, behind those vetoes, with an N-of-M stabilizer
+so no single frame can move the machine. Over 321 real frames it agrees with the optical
+map signal 97.9% of the time.
 
-Over 321 real frames the classifier agrees with the optical map signal 97.9% of the time
-and is confidently wrong (≥0.90) on 0.5% — all covered by the veto. An N-of-M stabilizer
-means no single frame can move the machine.
-
-## Team GO Rocket
-
-Uses the in-game auto-battler, so no combat vision is needed: tap through `GruntDialogue`,
-press the located BATTLE pill, confirm the party, let the battle play itself, tap through
-`ExitTrainerBattle`. The Rocket rule outranks the popup rule — those screens carry an X
-button, so a popup-first ordering would close the grunt dialogue instead of fighting it.
-
-## Learning: a review queue, not a training split
+### Learning
 
 The bot **never writes training data**. It curates frames into
-`datasets/active_v2/review/` with the detector's own predictions as a *proposal*, marked
-`verified: false`.
-
-Writing model predictions into a training split is self-training, and self-training is
-what degraded v1. Pseudo-labels can only reinforce what the model already believes; they
-cannot teach it an object it currently misses.
+`datasets/active_v2/review/` with the detector's own predictions as a starting point,
+marked `verified: false`, ranking frames where the bot was **wrong** and frames containing
+objects it was **unsure** about first.
 
 ```bash
-python3 tools/promote_reviewed.py --list            # queue, worst first
-# ... correct the labels by hand ...
+python3 tools/promote_reviewed.py --list          # the queue, most informative first
+#   ... correct the labels by hand ...
 python3 tools/promote_reviewed.py --promote --yes
 ```
 
-Frames where the bot was **wrong** (`refuted`) and frames containing objects the detector
-was **unsure** about are ranked first — those carry the information a human pass can add.
+Training on unreviewed model output is self-training, which measurably degraded the
+previous detector (3.23 → 2.38 detections per frame over three generations).
 
 ## Models
 
-`datasets/det_v3` (186/21/11, 4 classes) — verified zero cross-split leakage, zero
-duplicates, 8.04 boxes/image.
+| | dataset | result |
+|---|---|---|
+| detector | `det_v3`, 186/21/11, 4 classes | class-agnostic recall **69.2%** (previous model: 23.3%) |
+| screen classifier | 5 classes: Overworld / PokemonEncounter / Menu / Poi / Rocket | 100% on the held-out split |
 
-Class-agnostic localization recall on the held-out val set — class-agnostic because the
-old model is 3-class and the new one is 4-class, so a per-class comparison would be skewed
-by the index shift:
-
-| detector | recall @ IoU 0.5 |
-|---|---|
-| old `pokemongo_yolov8n.pt` | 23.3% (31/133) |
-| new `models/v3/det` | **69.2%** (92/133) |
-
-Per-class mAP50: pokemon 0.809, gym 0.566, pokestop_rocket 0.432, **pokestop 0.169**.
-PokéStop is the weak class and the next thing worth labelling.
-
-A larger `yolov8s` is training in the background. When it finishes, compare and adopt:
+Per-class detector mAP50: pokemon 0.809, gym 0.566, pokestop_rocket 0.432,
+pokestop 0.169.
 
 ```bash
-python3 tools/adopt_best_detector.py             # compare on the held-out val set
+python3 tools/adopt_best_detector.py             # compare candidates on held-out val
 python3 tools/adopt_best_detector.py --install   # install the winner
 ```
 
-It ranks by class-agnostic recall rather than mAP, because candidates have different
-class counts and what the bot needs is "did it find the object at all".
+It ranks by class-agnostic localization recall rather than mAP, because candidate models
+have different class counts and what the bot needs is *did it find the object at all*.
 
-The screen classifier is 5-class (Overworld / PokemonEncounter / Menu / Poi / Rocket),
-collapsed from 17 because rare classes had 1–2 samples each. Note the previous 17-class
-dataset had **16 train folders but only 10 valid folders**, so ultralytics built different
-class indices per split and every validation label was scrambled — its metrics were
-meaningless.
+## Configuration
 
-## Known limits
+| flag | default | meaning |
+|---|---|---|
+| `--dry-run` | off | decide but never actuate |
+| `--replay DIR` | – | read frames from a directory instead of a phone |
+| `--catch-mode` | `throw` | `throw`, `flee`, or `manual` |
+| `--target-mode` | `all` | `all`, `pokemon`, or `pokestop` |
+| `--no-rockets` | off | skip Team GO Rocket stops |
+| `--confidence` | 0.15 | detector floor (the FSM acts at 0.30) |
+| `--infer-fps` | 8.0 | inference rate |
+| `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
 
-- **PokéStop spinning is not yet working.** Over two live soaks the bot opened stops but
-  spun zero discs: most taps returned "Walk closer to interact", and PokéStop detection is
-  the weakest class (mAP50 0.169). Pokémon catching works well. Labelling more PokéStops
-  is the highest-value next step.
-- **The Rocket path has not been exercised live** — no Rocket stop appeared during
-  testing. It is covered by unit tests and the button finder hits 100% of the labelled
-  BATTLE/party screens, but it has not run against the real game.
-- **Gym screens can classify as PokemonEncounter** (`Poi` has 8 samples). The confidence
-  gate refuses them at 0.59, and the ENCOUNTER timeout bounds any mistake at 25s.
-- Turn off the **Pointer location** developer option. It draws white text across the top
-  of every frame, which lands in the flee-icon ROI and is baked into saved frames.
+Everything else lives in `pogobot/config.py` as a frozen dataclass.
+
+The trace is one line per tick with the state, both perception opinions, the raw optical
+scores, and the effects issued — enough to reconstruct any session after the fact.
+
+## Development
+
+```bash
+python3 -m pytest tests/ -q
+```
+
+`tests/test_fsm_livelocks.py` encodes each failure mode of the previous bot as a test.
+`tests/test_perception_golden.py` runs the optical layer over the labelled corpus and
+includes a sweep from `--max-size 1920` down to `540` asserting the signals hold.
+
+## Known limitations
+
+- **PokéStop detection is the weakest class** (mAP50 0.169). Labelling more stops is the
+  highest-value improvement available.
+- **Gym screens can classify as `PokemonEncounter`** — the `Poi` class has only 8 training
+  samples. The 0.60 confidence gate refuses them and the 25s encounter timeout bounds the
+  cost, but it is a real gap.
+- **Rocket battling relies on the in-game auto-battler.** The bot presses BATTLE and
+  confirms the party; it does not dodge or time charged moves.
+- Cooldowns are anchored to screen position, so they are invalidated whenever the camera
+  rotates. They are not a substitute for real world coordinates.
+
+## Repository layout
+
+```
+pogobot/     the bot
+tests/       44 tests, no device required
+tools/       dataset review and model selection
+docs/        design notes and the v1 audit
+legacy/      previous generations, unmaintained
+```
+
+## Background
+
+`docs/audit.md` documents the 106 confirmed defects found in the previous single-file bot
+and how the current structure makes each class of them unrepresentable. It is worth
+reading before changing the state machine or the perception thresholds.
