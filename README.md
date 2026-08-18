@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-50%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-98%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -34,8 +34,9 @@ machine, and acts through `adb`.
 - **Two-source perception** — optical signals veto the classifier, with an N-of-M stabilizer so no single frame moves the machine
 - **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
+- **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **50 tests in under 4 seconds**, no device required
+- **98 tests in under 4 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -87,7 +88,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 50 tests, no device required |
+| `python3 -m pytest tests/ -q` | 98 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -167,7 +168,7 @@ leakage, no duplicate images, and no empty label files.
 |---|---|---|---|
 | previous | 6 MB | 23.3% | not measurable — its validation set was leaked |
 | **`yolov8n`** (shipped) | **6 MB** | **69.2%** | 0.494 |
-| `yolov8s` (opt-in) | 85 MB | **75.9%** | **0.609** |
+| `yolov8s` (opt-in) | 85 MB | **75.9%** | **0.601** |
 
 Only the compact model is committed; an 85 MB weight file is not something every clone
 should download. The bot automatically prefers `models/v3/det_s/weights/best.pt` when it
@@ -181,8 +182,8 @@ python3 tools/adopt_best_detector.py --install   # install the winner
 It ranks by class-agnostic localization recall rather than mAP, because candidates have
 different class counts and what the bot needs is *did it find the object at all*.
 
-Per-class mAP50 for `yolov8s`: pokemon 0.806, gym 0.699, pokestop_rocket 0.622,
-pokestop 0.309.
+Per-class mAP50 for `yolov8s`: pokemon 0.778, gym 0.630, pokestop_rocket 0.578,
+pokestop 0.417.
 
 The screen classifier is 5-class — Overworld / PokemonEncounter / Menu / Poi / Rocket —
 and scores 100% on its held-out split.
@@ -203,6 +204,52 @@ python3 tools/promote_reviewed.py --promote --yes
 Training on unreviewed model output is self-training, which measurably degraded the
 previous detector — 3.23 → 2.38 detections per frame over three generations.
 
+## Session stats
+
+Every run prints a summary on exit and appends itself to `logs/sessions.jsonl`, so the next
+run opens by reporting cumulative totals. A long run also logs the same counters every five
+minutes, so a headless session reports progress.
+
+```
+  uptime               42m18s
+  encounters               87  123.4/h
+  catch attempts           81  114.9/h
+  balls thrown            194
+  stops collected          12  17.0/h
+  stops out of range        9
+  rockets engaged           2
+  targets tapped          104
+  taps that expired        14
+  recoveries                1
+```
+
+Every counter is incremented from `Runner.apply`, the single place that performs actions,
+so a count cannot drift from what the bot actually did.
+
+**On the word "catches".** `catch attempts` counts encounters in which a ball was thrown.
+It is **not** a confirmed catch count: a successful catch and a Pokémon fleeing both end the
+same way — the encounter UI disappears and the map returns — and the screen classifier has
+no class for the post-catch award screen. A `confirmed_catches` field exists and stays
+absent rather than being conflated with attempts.
+
+**What the other names do and do not claim.** `stops collected` counts stop screens that
+opened and then closed cleanly — the item toast is never read, so the collection itself is
+inferred from the screen, not observed. `stops out of range` counts only the frames where
+"Walk closer to interact" was actually seen. `taps that expired` counts post-tap waits that
+never produced the screen they claimed, whether the tap was aimed at a Pokémon or a stop; a
+tap that hit nothing and simply left the map showing is counted nowhere, because the bot
+learned nothing about it beyond the cooldown it set.
+
+**Rates.** A rate is withheld until the session has run for two minutes — `--/h` in the log
+line, an empty column in the summary — because one event five seconds in extrapolates to
+677/h. Lifetime rates are withheld the same way, and also whenever a recorded session has no
+duration in it, since the denominator would then be unknown.
+
+**Dry runs are not history.** Under `--dry-run` or `--replay` the actuator suppresses every
+gesture, so `balls thrown` and `targets tapped` are decisions rather than actions. Those
+sessions are written with `"dry_run": true` and excluded from the lifetime totals, which
+report how many were left out.
+
 ## Configuration
 
 | flag | default | meaning |
@@ -215,6 +262,8 @@ previous detector — 3.23 → 2.38 detections per frame over three generations.
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
+| `--stats-file PATH` | `logs/sessions.jsonl` | append each finished session, report lifetime totals |
+| `--no-stats` | off | do not record session stats |
 
 Everything else lives in `pogobot/config.py` as a frozen dataclass.
 
@@ -230,7 +279,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       50 tests, no device required
+tests/       98 tests, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```

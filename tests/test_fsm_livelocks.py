@@ -275,3 +275,27 @@ def test_blind_dialogue_taps_still_respect_the_settle_window():
     c = ctx(BotState.ROCKET, now=10.0, settle_until=11.0)
     out = fsm.step(obs(screen="Rocket", conf=0.9, pill_xy=None), c)
     assert not kinds(out, Tap), "a blind tap must still wait for the UI to settle"
+
+
+# --- found in a live run: ROCKET <-> ENCOUNTER oscillation ---------------------
+def test_rocket_is_not_pulled_out_by_an_encounter_looking_screen():
+    """A Rocket battle is a run of screens the classifier reads as PokemonEncounter.
+    Observed live: 6 ROCKET<->ENCOUNTER round trips in 70s, which also double counted
+    both rockets_engaged and encounters."""
+    c = ctx(BotState.ROCKET, now=10.0, last_rocket_ts=9.0)
+    out = fsm.step(obs(screen="PokemonEncounter", conf=0.99), c)
+    assert not kinds(out, Transition), "an encounter screen must not interrupt the fight"
+
+
+def test_rocket_still_yields_to_the_map():
+    c = ctx(BotState.ROCKET, now=10.0, last_rocket_ts=9.9)
+    t = kinds(fsm.step(obs(on_map=True, screen="Overworld"), c), Transition)
+    assert t and t[0].to is BotState.SCANNING, "the map must always win"
+
+
+def test_reward_encounter_is_taken_once_rocket_screens_stop():
+    """After the fight the shadow Pokemon encounter is real and must be caught."""
+    c = ctx(BotState.ROCKET, now=100.0,
+            last_rocket_ts=100.0 - DEFAULT.timings.rocket_hold - 1)
+    t = kinds(fsm.step(obs(screen="PokemonEncounter", conf=0.99), c), Transition)
+    assert t and t[0].to is BotState.ENCOUNTER

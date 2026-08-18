@@ -68,6 +68,7 @@ class Context:
     spun_disc: bool = False
     rotate_dir: str = "left"
     last_map_ts: float = 0.0
+    last_rocket_ts: float = 0.0
     taps_in_state: int = 0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
@@ -418,6 +419,12 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     """
     cfg = ctx.cfg
     if ctx.state is BotState.HALTED:
+        return None
+    # While a Rocket fight is in progress, an encounter-looking screen is almost always
+    # part of the fight. Only the map may pull us out; the reward encounter is picked up
+    # once Rocket screens have stopped for rocket_hold seconds.
+    rocket_recent = ctx.now - ctx.last_rocket_ts < cfg.timings.rocket_hold
+    if ctx.state is BotState.ROCKET and rocket_recent and not obs.on_map:
         return None
     if encounter_confirmed(obs, cfg):
         return BotState.ENCOUNTER

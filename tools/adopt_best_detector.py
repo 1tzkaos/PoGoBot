@@ -60,6 +60,33 @@ def score(model_path: Path, conf: float, imgsz: int) -> tuple[float, int, int]:
     return (hit / max(1, tot)), hit, tot
 
 
+def scrub_paths(weights: Path) -> list:
+    """Remove absolute build paths from a checkpoint before it can be committed.
+
+    Ultralytics records the training `data` and `project` arguments verbatim, so a
+    checkpoint trained locally carries the author's home directory inside it. That is
+    invisible to grep because it lives in a pickle, and `torch.load` hands it to anyone
+    who downloads the file. TARGET is a tracked path, so scrubbing has to happen here or
+    a future --install silently republishes it.
+    """
+    import torch
+    ck = torch.load(weights, map_location="cpu", weights_only=False)
+    changed = []
+    for field in ("train_args", "args"):
+        a = ck.get(field)
+        if not isinstance(a, dict):
+            continue
+        for k, v in list(a.items()):
+            if isinstance(v, str) and ("/Users/" in v or "/home/" in v):
+                a[k] = Path(v).name
+                changed.append(f"{field}.{k}")
+    if "git" in ck:
+        ck["git"] = None
+    if changed:
+        torch.save(ck, weights)
+    return changed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -95,9 +122,12 @@ def main() -> int:
         print("the winner is already installed")
         return 0
     TARGET.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(TARGET, TARGET.with_suffix(".pt.bak")) if TARGET.exists() else None
+    if TARGET.exists():
+        shutil.copy2(TARGET, TARGET.with_suffix(".pt.bak"))
     shutil.copy2(best, TARGET)
+    scrubbed = scrub_paths(TARGET)
     print(f"installed -> {TARGET.relative_to(BASE)} (previous kept as best.pt.bak)")
+    print(f"scrubbed build paths from the installed copy: {scrubbed or 'nothing to scrub'}")
     return 0
 
 

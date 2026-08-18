@@ -56,6 +56,12 @@ class Timings:
     keyboard_check: float = 2.0
     claim_reward: float = 1.5
     rocket_tap: float = 1.6
+    # A Rocket battle is a run of screens that look like encounters - a Pokemon, no map,
+    # no X button - so the classifier alternates between Rocket and PokemonEncounter and
+    # the machine used to follow every flip. Observed live: 6 ROCKET<->ENCOUNTER round
+    # trips in 70 seconds, which also inflated both counters. ROCKET now holds until no
+    # Rocket screen has been seen for this long.
+    rocket_hold: float = 5.0
 
     targeting_timeout: float = 4.0
     encounter_timeout: float = 25.0
