@@ -69,12 +69,21 @@ class Context:
     rotate_dir: str = "left"
     last_map_ts: float = 0.0
     last_rocket_ts: float = 0.0
+    left_encounter_ts: float = 0.0
+    throws_this_encounter: int = 0
+    failed_encounters: int = 0
+    restocking_until: float = 0.0
+    restock_stops_at_start: int = 0
     taps_in_state: int = 0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
     def elapsed(self) -> float:
         return self.now - self.state_since
+
+    @property
+    def restocking(self) -> bool:
+        return self.now < self.restocking_until
 
     def ready(self, budget: str, gap: float, ignore_settle: bool = False) -> bool:
         """True when `budget` has been idle for `gap` and the UI is not mid-transition.
@@ -135,6 +144,10 @@ def pick_target(obs: Observation, ctx: Context):
         if cfg.target_mode == "pokemon" and d.name != "pokemon":
             continue
         if cfg.target_mode == "pokestop" and d.name not in STOP_TARGETS:
+            continue
+        if ctx.restocking and d.name not in STOP_TARGETS:
+            # Restocking: ignore Pokemon entirely until the bag is refilled, otherwise
+            # every spawn on a dense map outranks the stops we came for.
             continue
         if not cfg.fight_rockets and d.name in ROCKET_TARGETS:
             continue
@@ -253,7 +266,18 @@ class Encounter(Handler):
             return []
         if cfg.catch_mode == "flee":
             if ctx.ready("flee", cfg.timings.throw_ball):
-                return [Tap(0.09, 0.08, "flee encounter", budget="flee")]
+                return [Tap(0.095, 0.095, "flee encounter", budget="flee")]
+            return []
+        if ctx.throws_this_encounter >= cfg.max_throws_per_encounter:
+            # Throws are doing nothing: out of balls, or a Pokemon we cannot land. Either
+            # way the encounter is over for us. Leave by the flee icon rather than sitting
+            # here until the timeout, which is what wedged the bot in a no-ball encounter.
+            if ctx.ready("flee", 1.0):
+                return [
+                    Note(f"{ctx.throws_this_encounter} throws with no result; leaving", "warn"),
+                    Tap(0.095, 0.095, "flee: throws exhausted", budget="flee"),
+                    Transition(BotState.SCANNING, IntentOutcome.EXPIRED, "throws exhausted"),
+                ]
             return []
         if ctx.ready("throw", cfg.timings.throw_ball):
             return [Swipe(0.50, 0.84, 0.50, 0.38, "throw ball", duration_ms=160, budget="throw")]
@@ -427,7 +451,15 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     if ctx.state is BotState.ROCKET and rocket_recent and not obs.on_map:
         return None
     if encounter_confirmed(obs, cfg):
-        return BotState.ENCOUNTER
+        # An encounter we deliberately left stays left for a moment. Re-entering it on the
+        # next tick is a livelock: observed live as ENCOUNTER -> RECOVERING -> ENCOUNTER
+        # repeating on a no-ball screen until the watchdog halted the run.
+        held = (ctx.now - ctx.left_encounter_ts < cfg.timings.encounter_hold
+                and ctx.last_map_ts <= ctx.left_encounter_ts)
+        # Once the map is confirmed the screen really did change, so the next encounter is
+        # a different Pokemon and must not be blocked. The hold exists only for the case
+        # where we left and the same screen is still up.
+        return None if held else BotState.ENCOUNTER
     if cfg.fight_rockets and rocket_screen(obs, cfg):
         return BotState.ROCKET
     if obs.on_map and ctx.state in (BotState.POPUP, BotState.RECOVERING, BotState.BOOT,

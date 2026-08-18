@@ -62,6 +62,10 @@ class Timings:
     # trips in 70 seconds, which also inflated both counters. ROCKET now holds until no
     # Rocket screen has been seen for this long.
     rocket_hold: float = 5.0
+    # After deliberately leaving an encounter, ignore encounter-looking screens for this
+    # long. Without it, fleeing and re-entering the same screen is a livelock: observed
+    # live as ENCOUNTER -> RECOVERING -> ENCOUNTER repeating until the watchdog halted.
+    encounter_hold: float = 6.0
 
     targeting_timeout: float = 4.0
     encounter_timeout: float = 25.0
@@ -136,6 +140,18 @@ class Config:
     catch_mode: str = "throw"
     target_mode: str = "all"
     fight_rockets: bool = True
+
+    # Out of Poke Balls is not observable: with one labelled example and no clean
+    # positive set, an optical ball detector would be a guessed threshold. It IS
+    # observable behaviourally - throwing repeatedly with no resolution means the throws
+    # are doing nothing. That covers running out of balls and an unwinnable Pokemon alike.
+    max_throws_per_encounter: int = 5
+    #: consecutive throw-exhausted encounters before switching to restocking
+    restock_after_failures: int = 2
+    #: stops to collect before returning to normal targeting
+    restock_target_stops: int = 5
+    #: give up restocking after this long even if no stop was reachable
+    restock_max_seconds: float = 600.0
     auto_rotate: bool = True
     dry_run: bool = False
 

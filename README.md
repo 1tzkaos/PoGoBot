@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-106%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-118%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -33,11 +33,12 @@ machine, and acts through `adb`.
 - **Bounded failure** — every state declares a timeout and an escape, enforced at import time
 - **Two-source perception** — optical signals veto the classifier, with an N-of-M stabilizer so no single frame moves the machine
 - **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
+- **Runs out of balls gracefully** — gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting to restock
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **106 tests in under 4 seconds**, no device required
+- **118 tests in under 4 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -89,7 +90,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 106 tests, no device required |
+| `python3 -m pytest tests/ -q` | 118 tests, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -205,6 +206,27 @@ python3 tools/promote_reviewed.py --promote --yes
 Training on unreviewed model output is self-training, which measurably degraded the
 previous detector — 3.23 → 2.38 detections per frame over three generations.
 
+## Running out of Poké Balls
+
+An encounter with an empty bag looks exactly like a normal one — the giant throwable ball
+is simply absent — and throws silently do nothing. Left alone the bot sat on that screen
+until its watchdog halted the run.
+
+Out of balls is **not** detected optically. With one labelled example and no clean positive
+set, any pixel threshold would be a guess. It is detected behaviourally instead: throws
+that change nothing are throws that are doing nothing, which covers an empty bag and an
+uncatchable Pokémon alike.
+
+- after `--max-throws` throws with no result, the bot taps the flee icon and moves on
+- after `--restock-after` such encounters in a row, it switches to **PokéStop-only**
+  targeting and ignores Pokémon entirely
+- normal targeting resumes once `--restock-stops` stops are collected, or after
+  `restock_max_seconds` if no stop turns out to be in range
+
+An encounter the bot deliberately left is not re-entered until the map is confirmed again.
+Without that, fleeing and immediately re-entering the same screen was a livelock —
+observed live as `ENCOUNTER -> RECOVERING -> ENCOUNTER` repeating until the watchdog fired.
+
 ## Session stats
 
 Every run prints a summary on exit and appends itself to `logs/sessions.jsonl`, so the next
@@ -274,6 +296,9 @@ report how many were left out.
 | `--catch-mode` | `throw` | `throw`, `flee`, or `manual` |
 | `--target-mode` | `all` | `all`, `pokemon`, or `pokestop` |
 | `--no-rockets` | off | skip Team GO Rocket stops |
+| `--max-throws` | `5` | give up on an encounter after N throws change nothing |
+| `--restock-after` | `2` | useless encounters in a row before restocking |
+| `--restock-stops` | `5` | PokéStops to collect before resuming normal targeting |
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
@@ -296,7 +321,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       106 tests, no device required
+tests/       118 tests, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```
