@@ -74,6 +74,7 @@ class Dashboard:
         self._state = BotState.BOOT
         self._fps = 0.0
         self._extra: dict = {}
+        self._paused = False
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -100,8 +101,9 @@ class Dashboard:
                 self.console.print(line, style=LEVEL_STYLE.get(level, ""), highlight=False)
 
     def update(self, obs: Optional[Observation], state: BotState, fps: float,
-               extra: Optional[dict] = None) -> None:
+               extra: Optional[dict] = None, paused: bool = False) -> None:
         self._obs, self._state, self._fps = obs, state, fps
+        self._paused = paused
         if extra:
             self._extra = extra
         self._live.update(self._render(obs, state, fps))
@@ -144,8 +146,11 @@ class Dashboard:
             life = (f"lifetime {self.lifetime['sessions']} runs  "
                     f"enc {self.lifetime['encounters']}  "
                     f"stops {self.lifetime['stops_collected']}")
+        label = (f"[bold black on yellow] PAUSED [/] {state.value}"
+                 if getattr(self, "_paused", False)
+                 else f"[{STATE_STYLE.get(state, 'white')}]{state.value}[/]")
         t.add_row(
-            f"[{STATE_STYLE.get(state, 'white')}]{state.value}[/]",
+            label,
             f"[bold]PoGoBot[/]  {self.stats.hud_line()}",
             f"{spins}[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
         )

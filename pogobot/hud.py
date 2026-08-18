@@ -35,7 +35,8 @@ NAME_COLOR = {
 
 
 def render(frame_bgr, obs: Observation, cfg: Config, state: BotState,
-           fps: float = 0.0, extra: Optional[dict] = None, status: str = ""):
+           fps: float = 0.0, extra: Optional[dict] = None, status: str = "",
+           paused: bool = False):
     img = frame_bgr.copy()
     h, w = img.shape[:2]
 
@@ -61,8 +62,9 @@ def render(frame_bgr, obs: Observation, cfg: Config, state: BotState,
             cv2.putText(img, tag, (px + 18, py + 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 2)
 
     cv2.rectangle(img, (0, 0), (w, 86), (18, 18, 18), -1)
-    cv2.putText(img, f"{state.value}", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
-                STATE_COLOR.get(state, (255, 255, 255)), 2)
+    label = f"PAUSED ({state.value})" if paused else state.value
+    cv2.putText(img, label, (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.62,
+                (0, 215, 255) if paused else STATE_COLOR.get(state, (255, 255, 255)), 2)
     screen = f"{obs.screen.label} {obs.screen.conf:.2f}" if obs.screen.available else "no-cls"
     cv2.putText(img, f"screen:{screen}  age:{obs.frame_age*1000:.0f}ms  {fps:.1f}fps",
                 (12, 46), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (200, 200, 200), 1)

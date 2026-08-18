@@ -62,7 +62,8 @@ class Runner:
                  ledger=None, keyboard=None, trace_path: Optional[Path] = None,
                  display: bool = True, stats_path: Optional[Path] = None,
                  dashboard=None, encounter_dump: Optional[Path] = None,
-                 quota: Optional[SpinQuota] = None):
+                 quota: Optional[SpinQuota] = None,
+                 pause_file: Optional[Path] = None):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -74,6 +75,11 @@ class Runner:
         self.dashboard = dashboard
         self.encounter_dump = encounter_dump
         self.quota = quota
+        self.pause_file = pause_file
+        self._paused = False
+        self._pause_requested = False    # toggled by SIGUSR1 and by the display key
+        self._paused_at = 0.0
+        self._pause_total = 0.0
         # A ring of frames from inside an encounter. On exit these are the frames that
         # would show a catch award screen - the evidence a real catch counter needs.
         # Sized in seconds, not frames: at 8 inference fps a 8-frame ring held one second
@@ -97,6 +103,7 @@ class Runner:
         self._last_hud = None          # last rendered HUD image, reused between inferences
         self._last_obs: Optional[Observation] = None
         self._last_shown = 0.0
+        self._real = time.perf_counter()   # loop's real-clock sample; paces display + fps
         self._shown_hud = 0
         self._shown_raw = 0
 
@@ -198,6 +205,83 @@ class Runner:
         if self._halt_reason is None:
             self.stats.halts += 1
         self._halt_reason = reason
+
+    def toggle_pause(self) -> None:
+        self._pause_requested = not self._pause_requested
+
+    def _pause_wanted(self) -> bool:
+        if self._pause_requested:
+            return True
+        if self.pause_file is not None:
+            try:
+                return self.pause_file.exists()
+            except OSError:
+                return False
+        return False
+
+    def _abandon_intent(self) -> None:
+        """Give up any tap whose answer we will not be there to see.
+
+        An Intent is a causal claim - "the screen changed BECAUSE of this tap" - and the
+        ledger writes a training sample on the strength of it. Freezing the FSM clock keeps
+        that claim alive across a pause while making it uncheckable: the latency the ledger
+        tests against `causal_max_s` is measured on the frozen clock, so a tap answered ten
+        real minutes later is recorded as answered in a fraction of a second. Measured -
+        real Runner, real IntentLedger - one corpus row written with `latency: 0.3` for a
+        real gap of 601.8s, straight past the 5s causal window that exists to make exactly
+        that row impossible, and `verified: false` means a human reads that latency as
+        evidence. The same stale claim would score a CONFIRMED against a screen the pause
+        invited a human to open by hand.
+
+        So the claim dies with the pause. EXPIRED is what we can actually support - the tap
+        got no answer we watched - and it costs only the short on_expired cooldown; the
+        ledger rejects a non-CONFIRMED/REFUTED outcome, so nothing reaches the corpus.
+        """
+        if self.ctx.intent is None:
+            return
+        log.info("abandoning the pending %s tap: paused before the screen answered",
+                 self.ctx.intent.target_name)
+        self._resolve_intent(self.ctx.intent, IntentOutcome.EXPIRED)
+        self.ctx.intent = None
+
+    def _sync_pause(self, real: Optional[float] = None) -> bool:
+        """Enter or leave the paused state. Returns whether we are paused now.
+
+        `real` is the loop's single `perf_counter()` sample. Taking it as an argument keeps
+        the pause accounting and `ctx.now` on the *same* instant; sampling the clock twice
+        let `ctx.now` creep forward by the gap between the two samples on every iteration.
+
+        The FSM clock is frozen rather than the timers being shifted one by one: `ctx.now`
+        is driven from `perf_counter() - _pause_total`, so every stored deadline stays
+        comparable and nothing has to know that a pause happened. Shifting each timer
+        instead would mean a resume fires every timeout at once - a pause that ends in a
+        recovery storm is worse than no pause at all.
+
+        This freeze applies to the FSM clock ONLY. Pacing - the inference schedule, the
+        display refresh, the fps window - must stay on the real clock: a frozen `now` never
+        reaches its own `next_infer`, so driving the schedule from it stops the loop dead.
+        """
+        real = time.perf_counter() if real is None else real
+        want = self._pause_wanted()      # one stat() of the pause file per iteration
+        if want and not self._paused:
+            self._paused = True
+            self._paused_at = real
+            self._abandon_intent()
+            log.warning("PAUSED - no taps will be sent. %s",
+                        "delete the pause file to resume" if self.pause_file
+                        else "send SIGUSR1 again to resume")
+        elif not want and self._paused:
+            self._paused = False
+            self._pause_total += real - self._paused_at
+            self.stats.paused_seconds = self._pause_total
+            log.info("resumed after %.0fs paused", real - self._paused_at)
+        if self._paused:
+            self.stats.paused_seconds = self._pause_total + (real - self._paused_at)
+        return self._paused
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
 
     def _explain_refusal(self) -> None:
         """A refused stop past the daily cap is not a distance problem.
@@ -377,6 +461,14 @@ class Runner:
         # Resolved by name: CPython on Windows has no SIGHUP, and naming it in a tuple
         # raises AttributeError before the try below can catch anything - which killed
         # run() before the loop started, on a platform the README says is supported.
+        usr1 = getattr(signal, "SIGUSR1", None)
+        if usr1 is not None:
+            def _toggle(_signum, _frame):
+                self.toggle_pause()
+            try:
+                previous[usr1] = signal.signal(usr1, _toggle)
+            except (OSError, ValueError):
+                pass
         for _name in ("SIGTERM", "SIGINT", "SIGHUP"):
             sig = getattr(signal, _name, None)
             if sig is None:
@@ -388,7 +480,14 @@ class Runner:
 
         try:
             while not self._stop:
-                now = time.perf_counter()
+                # Two clocks, sampled once. `real` paces the loop (inference, display,
+                # fps); `now` is the FSM clock and excludes paused time, so no deadline
+                # expires while idle. Pacing off `now` deadlocks the loop: it is frozen,
+                # so `now < next_infer` stays true forever and neither perception nor
+                # waitKey ever runs again - which also made the p and q keys dead.
+                self._real = real = time.perf_counter()
+                paused = self._sync_pause(real)
+                now = real - self.stats.paused_seconds
                 self.ctx.now = now
 
                 if not self.source.healthy():
@@ -402,15 +501,15 @@ class Runner:
                     self._halt("actuator circuit breaker tripped (adb failing)")
                     break
 
-                if now < next_infer:
+                if real < next_infer:
                     # Redisplay the last rendered HUD rather than a bare frame. Passing
                     # obs=None here used to draw the un-annotated frame ~1000x/second
                     # (the rate is capped only by waitKey), while the HUD was drawn once
                     # per inference at 8Hz - so the overlay was visible for roughly 8
                     # frames in 1000 and appeared to strobe.
                     if self.display and self._last_hud is not None \
-                            and now - self._last_shown >= 1.0 / DISPLAY_FPS:
-                        self._last_shown = now
+                            and real - self._last_shown >= 1.0 / DISPLAY_FPS:
+                        self._last_shown = real
                         # Repaint the newest frame under the most recent observation, so
                         # the video stays smooth while the overlay updates at infer_fps.
                         # Skipped for a replay directory, where reading consumes a frame.
@@ -437,7 +536,7 @@ class Runner:
 
                 frames += 1
                 self._last_frame = frame
-                next_infer = now + 1.0 / max(cfg.infer_fps, 0.1)
+                next_infer = real + 1.0 / max(cfg.infer_fps, 0.1)
 
                 kbd = self.keyboard.state if self.keyboard else Tristate.UNKNOWN
                 try:
@@ -451,23 +550,44 @@ class Runner:
                         break
                     continue
 
-                if self.ctx.state is BotState.ENCOUNTER and self.encounter_dump is not None:
-                    self._enc_ring.append(frame.bgr.copy())
                 if obs.on_map:
                     self.ctx.last_map_ts = now
                 if fsm.rocket_screen(obs, cfg):
                     self.ctx.last_rocket_ts = now
-                if self.ledger is not None:
-                    self.ledger.stage(frame, obs)
+                if not paused:
+                    # Both of these are evidence stores, and a paused frame is evidence of
+                    # nothing the bot did. The encounter ring is sized to hold the tail of
+                    # an encounter, so a pause inside one rolls the award screen away and
+                    # dumps identical idle frames in its place - a mislabelled corpus, the
+                    # exact failure this rewrite exists to prevent. The ledger ring is
+                    # claimed by a resolving intent, and no intent can resolve while
+                    # paused, so staging only evicts the frame the pending intent needs.
+                    if self.ctx.state is BotState.ENCOUNTER and self.encounter_dump is not None:
+                        self._enc_ring.append(frame.bgr.copy())
+                    if self.ledger is not None:
+                        self.ledger.stage(frame, obs)
 
                 if self.quota is not None:
                     self.ctx.spins_exhausted = self.quota.state(time.time()).exhausted
+                if paused:
+                    # Perception still runs so the display stays live and the trace keeps
+                    # a record, but the machine does not advance and nothing is actuated.
+                    self._write_trace(obs, [])
+                    if self.dashboard is not None:
+                        try:
+                            self.dashboard.update(obs, self.ctx.state, self._fps, paused=True)
+                        except Exception:
+                            log.exception("dashboard update failed")
+                    if self.display:
+                        self._show(window, frame, obs)
+                    continue
+
                 self._update_restock()
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
                 if self.dashboard is not None:
                     try:
-                        self.dashboard.update(obs, self.ctx.state, self._fps)
+                        self.dashboard.update(obs, self.ctx.state, self._fps, paused=self._paused)
                     except Exception:
                         log.exception("dashboard update failed")
                 self._write_trace(obs, effects)
@@ -475,14 +595,14 @@ class Runner:
 
                 if now >= self._next_report:
                     self._next_report = now + REPORT_EVERY
-                    log.info("session: %s", self.stats.hud_line(now))
+                    log.info("session: %s", self.stats.hud_line())
                     if self.quota is not None:
                         log.info("%s", self.quota.state().line())
 
-                elapsed = now - t0
+                elapsed = real - t0
                 if elapsed >= 1.0:
                     self._fps = frames / elapsed
-                    frames, t0 = 0, now
+                    frames, t0 = 0, real
 
                 if self.display and not self._show(window, frame, obs):
                     break
@@ -522,14 +642,22 @@ class Runner:
         extra = {"taps": stats.get("sent", 0), "state_s": f"{self.ctx.elapsed:.1f}"}
         if self.ledger is not None:
             extra["saved"] = self.ledger.stats().get("written", 0)
-        self._last_hud = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra)
+        # `status` was added to hud.render when the dashboard landed but never passed
+        # here, so the counters line was never actually drawn on the preview window.
+        # `SessionStats` subtracts paused_seconds itself, so it must be given the REAL
+        # clock. Passing ctx.now - which already has paused_seconds removed - subtracted it
+        # twice: after a 10-minute pause the HUD read "0m00s" uptime on an 11-minute run,
+        # and every rate above it was divided by the wrong denominator.
+        self._last_hud = hud.render(frame.bgr, obs, self.cfg, self.ctx.state, self._fps, extra,
+                                    status=self.stats.hud_line(),
+                                    paused=self._paused)
         self._shown_hud += 1
 
     def _show(self, window: str, frame: Frame, obs: Observation) -> bool:
         """Render the HUD for a fresh observation and display it."""
         self._last_obs = obs
         self._render(frame, obs)
-        self._last_shown = self.ctx.now
+        self._last_shown = self._real
         return self._blit(window)
 
     def _blit(self, window: str) -> bool:
@@ -538,7 +666,10 @@ class Runner:
         if self._last_hud is None:
             return True
         cv2.imshow(window, self._last_hud)
-        return (cv2.waitKey(1) & 0xFF) != ord("q")
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("p"):
+            self.toggle_pause()
+        return key != ord("q")
 
     def close(self) -> None:
         # The session record is the durable output of the run, so it is written from a

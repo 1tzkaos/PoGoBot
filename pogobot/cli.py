@@ -54,6 +54,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="rolling 24h PokeStop spin log (spans restarts)")
     p.add_argument("--spin-limit", type=int, default=None, metavar="N",
                    help="PokeStop spins allowed per rolling 24h (0 disables the check)")
+    p.add_argument("--pause-file", type=Path, default=BASE_DIR / "logs" / "PAUSE",
+                   help="while this file exists the bot perceives but sends no input; "
+                        "also toggled by SIGUSR1, or the p key on the preview window")
     p.add_argument("--reset-spins", action="store_true",
                    help="clear the 24h spin window, e.g. once a soft ban has lifted")
     p.add_argument("--seed-spins", type=int, default=None, metavar="N",
@@ -196,12 +199,12 @@ def main(argv=None) -> int:
             log.warning("--tui needs the 'rich' package; falling back to log lines")
         else:
             dashboard = tui.Dashboard(SessionStats(), lifetime=total if stats_path else None,
-                                      quota=quota)
+                                      quota=quota, pause_file=a.pause_file)
 
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
                     trace_path=trace, display=not a.no_display, stats_path=stats_path,
                     dashboard=dashboard, encounter_dump=a.collect_encounters,
-                    quota=quota)
+                    quota=quota, pause_file=a.pause_file)
     if dashboard is None:
         return runner.run()
     # The dashboard owns the session counters so the header can render before the first
