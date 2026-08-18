@@ -116,9 +116,12 @@ class Observation:
 
     @property
     def on_map(self) -> bool:
-        """Best available belief that the overworld map is showing."""
-        if self.encounter.value:
-            return False
+        """Best available belief that the overworld map is showing.
+
+        Deliberately does NOT consult the optical `encounter` signal: measured over the
+        labelled corpus it fires on 27% of overworld frames and only 30% of encounters.
+        It is retained on the Observation for the trace and HUD, but it decides nothing.
+        """
         return self.map_ball.value or self.screen.is_("Overworld", min_conf=0.60)
 
     @property

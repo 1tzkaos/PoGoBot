@@ -152,3 +152,25 @@ def test_in_reach_target_is_tapped_and_transitions():
     c = ctx(BotState.SCANNING, now=10.0)
     out = fsm.step(obs(on_map=True, detections=[det(cx=0.5, cy=0.63)]), c)
     assert kinds(out, Tap) and kinds(out, Transition)
+
+
+# --- v1 #11: SCANNING was the only state with no else and no watchdog ---------
+def test_scanning_does_not_act_when_the_map_is_not_visible():
+    """A gym screen misclassified as an encounter @0.59 is refused by the confidence
+    gate; SCANNING must then not swipe at it either."""
+    c = ctx(BotState.SCANNING, now=1.0, last_map_ts=1.0)
+    out = fsm.step(obs(on_map=False, screen="PokemonEncounter", conf=0.59), c)
+    assert not kinds(out, Swipe) and not kinds(out, Tap)
+
+
+def test_scanning_escalates_when_the_map_stays_missing():
+    c = ctx(BotState.SCANNING, now=30.0, last_map_ts=0.0)
+    out = fsm.step(obs(on_map=False, screen="PokemonEncounter", conf=0.59), c)
+    t = kinds(out, Transition)
+    assert t and t[0].to is BotState.RECOVERING
+
+
+def test_optical_encounter_signal_decides_nothing():
+    """Measured 27% false-positive on overworld and 30% recall; it is trace-only."""
+    o = obs(on_map=False, encounter=True, screen="Menu", conf=0.99)
+    assert not fsm.encounter_confirmed(o, DEFAULT)

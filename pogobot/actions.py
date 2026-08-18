@@ -45,6 +45,12 @@ MIN_GLOBAL_GAP = 0.08
 """Floor between any two actuations regardless of budget. v1 emitted a tap and a swipe
 in the same tick and the device dropped one of them."""
 
+_CLOCK = time.perf_counter
+"""One clock for the whole package. frames.Frame.ts and Runner.ctx.now are perf_counter,
+and Runner passes ctx.now into apply(); defaulting to a different clock here would mix
+two epochs in _last_any (they are not the same epoch on every platform), and a single
+jump forward would rate-limit every future actuation for the life of the process."""
+
 ADB_TIMEOUT = 5.0
 QUEUE_DEPTH = 32
 
@@ -194,28 +200,48 @@ class Actuator:
             px, py = self.to_device(effect.x, effect.y)
             return Command(_adb_argv(self.adb, self.serial, "shell", "input", "tap",
                                      str(px), str(py)),
-                           effect.budget, effect.reason, (px, py), time.monotonic())
+                           effect.budget, effect.reason, (px, py), _CLOCK())
         if isinstance(effect, Swipe):
             x1, y1 = self.to_device(effect.x1, effect.y1)
             x2, y2 = self.to_device(effect.x2, effect.y2)
             ms = max(1, int(effect.duration_ms))
             return Command(_adb_argv(self.adb, self.serial, "shell", "input", "swipe",
                                      str(x1), str(y1), str(x2), str(y2), str(ms)),
-                           effect.budget, effect.reason, (x2, y2), time.monotonic())
+                           effect.budget, effect.reason, (x2, y2), _CLOCK())
         if isinstance(effect, Back):
             return Command(_adb_argv(self.adb, self.serial, "shell", "input", "keyevent", "4"),
-                           effect.budget, effect.reason, None, time.monotonic())
+                           effect.budget, effect.reason, None, _CLOCK())
         return None
 
     # ------------------------------------------------------------- dispatch
 
     def apply(self, effect: Effect, now: Optional[float] = None) -> bool:
-        """Dispatch one effect. True only when it was handed to the device."""
+        """Dispatch one effect.
+
+        Returns whether the effect was ACCEPTED - i.e. it consumed its budget and, in a
+        live run, went to the device. It is deliberately NOT "bytes reached the phone":
+        the caller uses this to advance its own pacing state (last_action, settle_until,
+        taps_in_state), so a dry run that returned False here would make the FSM re-emit
+        the same Tap on every single tick. Measured: 6 taps over 6 ticks under dry_run
+        against 1 tap live. A preview that does not follow the live trajectory is the v1
+        `--no-click` defect wearing a different hat, so dry_run returns True and the
+        *dispatch* question is answered by stats(): `sent`/`ok` vs `suppressed_dry_run`.
+
+        False means suppressed: not an actuation, closed, breaker tripped, rate limited,
+        or dropped for backpressure.
+        """
         if not is_actuation(effect):
             return False
-        now = time.monotonic() if now is None else now
+        now = _CLOCK() if now is None else now
 
-        if self.health.tripped:
+        if self._closed:
+            # Without this, _ensure_worker() below would resurrect the worker thread
+            # after close() and keep talking to a device the runner has already let go.
+            self._bump("suppressed_unhealthy")
+            return False
+
+        _, tripped, _ = self.health.snapshot()
+        if tripped:
             self._bump("suppressed_unhealthy")
             return False
 
@@ -233,8 +259,11 @@ class Actuator:
         if self.dry_run:
             self._bump("suppressed_dry_run")
             self._mark(cmd.budget, now)
-            return False
+            return True
 
+        # Before the put, not after: a full queue returns early below, so starting the
+        # worker afterwards meant a dead worker plus a full queue could never recover.
+        self._ensure_worker()
         try:
             self._q.put_nowait(cmd)
         except queue.Full:
@@ -242,7 +271,6 @@ class Actuator:
             self.health.record_failure("adb queue full; device is not keeping up")
             return False
 
-        self._ensure_worker()
         self._mark(cmd.budget, now)
         self._bump("sent")
         return True
@@ -273,7 +301,13 @@ class Actuator:
             try:
                 if cmd is None:
                     return
-                self._execute(cmd)
+                try:
+                    self._execute(cmd)
+                except BaseException as exc:      # noqa: BLE001 - the worker must not die
+                    # A worker that dies silently is the v1 failure exactly: commands
+                    # vanish while healthy() keeps saying yes. Record it and stay up.
+                    self._bump("failed")
+                    self.health.record_failure(f"worker error: {exc!r}")
             finally:
                 self._q.task_done()
 
@@ -317,7 +351,8 @@ class Actuator:
             self._by_budget[budget] = self._by_budget.get(budget, 0) + 1
 
     def healthy(self) -> bool:
-        return not self.health.tripped
+        _, tripped, _ = self.health.snapshot()
+        return not tripped
 
     def stats(self) -> dict:
         consecutive, tripped, last_error = self.health.snapshot()
@@ -357,8 +392,8 @@ class Actuator:
     def flush(self, timeout: float = 3.0) -> bool:
         """Wait for queued commands to drain. Used at shutdown so the last BACK actually
         reaches the phone before the process exits."""
-        deadline = time.monotonic() + timeout
-        while self._q.unfinished_tasks and time.monotonic() < deadline:
+        deadline = _CLOCK() + timeout
+        while self._q.unfinished_tasks and _CLOCK() < deadline:
             time.sleep(0.02)
         return not self._q.unfinished_tasks
 
@@ -408,17 +443,17 @@ class NullActuator:
     render = Actuator.render
 
     def apply(self, effect: Effect, now: Optional[float] = None) -> bool:
+        """True on acceptance, matching Actuator.apply, so a replayed trajectory is the
+        same trajectory. Nothing here can reach subprocess, so True never means a tap."""
         cmd = self.render(effect) if is_actuation(effect) else None
         if cmd is None:
             return False
         self.log.append(cmd)
         self._by_budget[cmd.budget] = self._by_budget.get(cmd.budget, 0) + 1
-        return False
+        return True
 
     def apply_all(self, effects: Sequence[Effect], now: Optional[float] = None) -> int:
-        for e in effects:
-            self.apply(e, now)
-        return 0
+        return sum(1 for e in effects if self.apply(e, now))
 
     def healthy(self) -> bool:
         return True
@@ -477,7 +512,7 @@ class KeyboardProbe:
         self._checked_at: float = -1e9
 
     def visible(self, now: Optional[float] = None, force: bool = False) -> Tristate:
-        now = time.monotonic() if now is None else now
+        now = _CLOCK() if now is None else now
         if not force and now - self._checked_at < self.ttl:
             return self._value
         self._checked_at = now

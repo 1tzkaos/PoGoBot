@@ -102,6 +102,19 @@ def _poke_fifo(path: Path) -> None:
     os.close(fd)
 
 
+def _unblock_open(thread: threading.Thread, path: Path, budget: float = 1.0) -> None:
+    """Repeatedly hand EOF to a thread stuck opening `path`.
+
+    The ffmpeg backend reopens the pipe after a failed probe, so one poke is not always
+    enough. The thread is a daemon either way - this only stops it from holding a file
+    descriptor for the rest of the run.
+    """
+    deadline = time.perf_counter() + budget
+    while thread.is_alive() and time.perf_counter() < deadline:
+        _poke_fifo(path)
+        thread.join(0.1)
+
+
 class ScrcpySource:
     """Live capture from scrcpy recording into a private FIFO.
 
@@ -198,6 +211,7 @@ class ScrcpySource:
                 pass
             self._stderr = None
 
+        _poke_fifo(self._fifo)
         shutil.rmtree(self._dir, ignore_errors=True)
 
     # ------------------------------------------------------------- diagnosis
@@ -256,19 +270,24 @@ class ScrcpySource:
 
         def opener() -> None:
             try:
-                box.append(cv2.VideoCapture(str(self._fifo)))
+                opened = cv2.VideoCapture(str(self._fifo))
             except Exception as exc:
                 box.append(exc)
+                return
+            if self._stop.is_set():
+                opened.release()
+                return
+            box.append(opened)
 
         thread = threading.Thread(target=opener, name="pogobot-capture-open", daemon=True)
         thread.start()
         thread.join(timeout)
 
         if thread.is_alive():
-            _poke_fifo(self._fifo)
-            thread.join(1.0)
+            self._stop.set()
+            _unblock_open(thread, self._fifo)
             raise CaptureError(
-                f"no video on {self._fifo} within {timeout:.0f}s. "
+                f"no video on {self._fifo} within {timeout:.1f}s. "
                 f"scrcpy returncode={self.returncode}; stderr: {self.stderr_tail()}"
             )
 

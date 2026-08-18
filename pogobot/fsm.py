@@ -91,15 +91,18 @@ class Context:
 def encounter_confirmed(obs: Observation, cfg: Config) -> bool:
     """Encounter needs positive evidence, never 'none of the above'.
 
-    Optical ball-colour matching was measured against 53 labelled encounter frames and
-    does not separate (Overworld scored HIGHER: 0.268 vs 0.005 median, because the map is
-    full of red and blue objects). So the classifier owns this call, with the reliable
-    optical map signal as a hard veto.
+    The optical route was measured and rejected. Ball-colour matching does not separate at
+    all (Overworld scores HIGHER than encounters: 0.268 vs 0.005 median, because the map is
+    full of red and blue objects), and the combined ball+flee test fires on 27% of overworld
+    frames while catching only 30% of encounters. So the classifier owns this call, with the
+    high-precision optical map signal and the X button as hard vetoes.
+
+    A worked example this protects: a Gym screen classifies as PokemonEncounter @0.59.
+    Under the 0.60 gate it is correctly refused, and the bot leaves via POPUP instead of
+    throwing balls at a gym.
     """
     if obs.map_ball.value or obs.x_button.value:
         return False
-    if obs.encounter.value:
-        return True
     return obs.screen.is_("PokemonEncounter", min_conf=cfg.screen_min_conf)
 
 
@@ -172,6 +175,14 @@ class Scanning(Handler):
 
     def step(self, obs, ctx):
         cfg = ctx.cfg
+        if not obs.on_map:
+            # v1's SCANNING had neither an else branch nor a watchdog - the only state
+            # with no way out. If we believe we are scanning but no map is visible, we
+            # are wrong about something; escalate rather than swiping at whatever is up.
+            if ctx.now - ctx.last_map_ts > cfg.timings.popup_timeout:
+                return [Transition(BotState.RECOVERING, IntentOutcome.CARRIED,
+                                   "scanning but the map is not visible")]
+            return []
         target = pick_target(obs, ctx)
         if target is not None:
             if not ctx.ready("tap", cfg.timings.tap_target):
