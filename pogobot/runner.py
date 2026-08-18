@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+from collections import deque
 import time
 from pathlib import Path
 from typing import Optional
@@ -45,6 +46,10 @@ DISPLAY_FPS = 30.0
 # How often a headless run logs its counters, so a long session reports progress.
 REPORT_EVERY = 300.0
 
+# How much of the tail of an encounter to keep for labelling. The catch sequence -
+# ball wobble, "Gotcha!", then the XP/candy/stardust award - runs several seconds.
+ENCOUNTER_RING_SECONDS = 6.0
+
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 
@@ -52,7 +57,8 @@ _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 class Runner:
     def __init__(self, cfg: Config, source: FrameSource, actuator, perceptor,
                  ledger=None, keyboard=None, trace_path: Optional[Path] = None,
-                 display: bool = True, stats_path: Optional[Path] = None):
+                 display: bool = True, stats_path: Optional[Path] = None,
+                 dashboard=None, encounter_dump: Optional[Path] = None):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -61,6 +67,13 @@ class Runner:
         self.keyboard = keyboard
         self.display = display
         self.stats_path = stats_path
+        self.dashboard = dashboard
+        self.encounter_dump = encounter_dump
+        # A ring of frames from inside an encounter. On exit these are the frames that
+        # would show a catch award screen - the evidence a real catch counter needs.
+        # Sized in seconds, not frames: at 8 inference fps a 8-frame ring held one second
+        # and rolled the award sequence away before the encounter ended.
+        self._enc_ring: deque = deque(maxlen=max(8, int(cfg.infer_fps * ENCOUNTER_RING_SECONDS)))
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
         self.ctx.last_map_ts = time.perf_counter()
@@ -127,6 +140,9 @@ class Runner:
                 st.on_encounter_start()
         elif src is BotState.ENCOUNTER and dst is not BotState.ENCOUNTER:
             st.on_encounter_end()
+            # Only a genuine end: an abandoned encounter still has its screen up, so its
+            # frames are not award screens and would mislabel the training set.
+            self._dump_encounter_ring()
         if dst is BotState.ROCKET and src is not BotState.ROCKET:
             st.rockets_engaged += 1
         if dst is BotState.RECOVERING and src is not BotState.RECOVERING:
@@ -164,6 +180,26 @@ class Runner:
         if self._halt_reason is None:
             self.stats.halts += 1
         self._halt_reason = reason
+
+    def _dump_encounter_ring(self) -> None:
+        """Write the frames leading up to an encounter ending, for labelling.
+
+        A catch and a flee are indistinguishable to the bot today, so `catch_attempts`
+        cannot be promoted to a catch count without evidence. These frames are that
+        evidence: the award screen, if there was one, is in here.
+        """
+        if self.encounter_dump is None or not self._enc_ring:
+            return
+        try:
+            import cv2
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            self.encounter_dump.mkdir(parents=True, exist_ok=True)
+            for i, bgr in enumerate(self._enc_ring):
+                cv2.imwrite(str(self.encounter_dump / f"{stamp}_{self._ticks:07d}_{i}.png"), bgr)
+        except Exception:
+            log.exception("could not write the encounter frames")
+        finally:
+            self._enc_ring.clear()
 
     def _resolve_intent(self, intent, outcome: IntentOutcome) -> None:
         cd = self.cfg.cooldowns
@@ -337,6 +373,8 @@ class Runner:
                         break
                     continue
 
+                if self.ctx.state is BotState.ENCOUNTER and self.encounter_dump is not None:
+                    self._enc_ring.append(frame.bgr.copy())
                 if obs.on_map:
                     self.ctx.last_map_ts = now
                 if fsm.rocket_screen(obs, cfg):
@@ -346,6 +384,11 @@ class Runner:
 
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
+                if self.dashboard is not None:
+                    try:
+                        self.dashboard.update(obs, self.ctx.state, self._fps)
+                    except Exception:
+                        log.exception("dashboard update failed")
                 self._write_trace(obs, effects)
                 self._ticks += 1
 
