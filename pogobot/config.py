@@ -19,7 +19,7 @@ class Rois:
     """Normalized regions of interest. Ported from the tuned values in the v1 bot."""
 
     bottom_button: Rect = (0.44, 0.85, 0.56, 0.91)
-    binoculars: Rect = (0.85, 0.78, 0.97, 0.85)
+    binoculars: Rect = (0.78, 0.78, 0.94, 0.88)
     throw_ball: Rect = (0.35, 0.76, 0.65, 0.86)
     flee_icon: Rect = (0.05, 0.06, 0.16, 0.12)
     out_of_range_banner: Rect = (0.15, 0.79, 0.85, 0.85)
@@ -31,7 +31,7 @@ class Thresholds:
     """Fraction-of-ROI bars. Calibrated in tools/calibrate.py against labelled screens."""
 
     map_ball_red: float = 0.10
-    map_bino_orange: float = 0.08
+    map_bino_orange: float = 0.03
     x_button_mint: float = 0.035
     x_button_teal: float = 0.015
     encounter_ball: float = 0.020
