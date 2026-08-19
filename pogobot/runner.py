@@ -53,6 +53,17 @@ REPORT_EVERY = 300.0
 # ball wobble, "Gotcha!", then the XP/candy/stardust award - runs several seconds.
 ENCOUNTER_RING_SECONDS = 6.0
 
+# How often the account list is re-read while a switch is in flight. The dump blocks for
+# roughly a second, so this is as often as the loop can afford; it is also why the read
+# happens during a switch and nowhere else.
+ACCOUNTS_REFRESH = 2.5
+
+# How often a switch trigger that is due but cannot be satisfied may pay for a tree read.
+# `spins_exhausted` stays true for hours and selection can legitimately answer "nowhere
+# useful to go" the whole time, so without this the forced probe below is a ~1s blocking
+# dump on every tick of an 8fps loop.
+SWITCH_PROBE_EVERY = 30.0
+
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 
@@ -63,7 +74,7 @@ class Runner:
                  display: bool = True, stats_path: Optional[Path] = None,
                  dashboard=None, encounter_dump: Optional[Path] = None,
                  quota: Optional[SpinQuota] = None,
-                 pause_file: Optional[Path] = None):
+                 pause_file: Optional[Path] = None, tree_reader=None):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -76,6 +87,10 @@ class Runner:
         self.encounter_dump = encounter_dump
         self.quota = quota
         self.pause_file = pause_file
+        self.tree_reader = tree_reader
+        self._accounts_read_at = 0.0
+        self._switch_probe_at = 0.0
+        self._switch_target: Optional[str] = None
         self._paused = False
         self._pause_requested = False    # toggled by SIGUSR1 and by the display key
         self._paused_at = 0.0
@@ -88,6 +103,10 @@ class Runner:
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
         self.ctx.last_map_ts = time.perf_counter()
+        # One full interval in, not on the first tick: `--switch-every 45` means every 45
+        # minutes, and rotating out of a fresh account immediately is nobody's intent.
+        self._next_rotation = (self.ctx.now + cfg.switch_every_minutes * 60.0
+                               if cfg.switch_every_minutes > 0 else 0.0)
         # The actuator, not the config, is the authority on whether anything was actually
         # sent: --replay swaps in a NullActuator regardless of cfg.dry_run.
         self.stats = SessionStats(dry_run=bool(getattr(actuator, "dry_run", False)
@@ -182,7 +201,9 @@ class Runner:
             if e.outcome is IntentOutcome.CONFIRMED:
                 st.stops_collected += 1
                 if self.quota is not None:
-                    self.quota.record()
+                    # The cap belongs to the account, so the spin is booked against the
+                    # one that earned it. None normalizes to the unknown-account bucket.
+                    self.quota.record(account=self.stats.account)
             elif e.outcome is IntentOutcome.REFUTED:
                 st.stops_out_of_range += 1
                 self._explain_refusal()
@@ -192,6 +213,15 @@ class Runner:
             # is one target tap that never produced the screen it claimed. Counting only
             # TARGETING silently dropped every stop tap whose POI screen never opened.
             st.taps_expired += 1
+        if src is BotState.SWITCHING and dst is BotState.SCANNING \
+                and e.outcome is IntentOutcome.CONFIRMED and self._switch_target:
+            # Only a CONFIRMED switch rolls the session over: that outcome means the tree
+            # named the target as active AND the map came back. The timeout leaves through
+            # RECOVERING as EXPIRED, and an attempt that never landed must not split the
+            # books or reset a counter. Last in this method because it REPLACES self.stats,
+            # so every count above still lands on the outgoing account.
+            self._on_switch_confirmed(self._switch_target)
+            self._switch_target = None
 
     def _halt(self, reason: str) -> None:
         """The single place a run is declared halted.
@@ -292,11 +322,27 @@ class Runner:
         """
         if self.quota is None:
             return
-        st = self.quota.state()
+        st = self.quota.state(account=self.stats.account)
         if st.exhausted and self.stats.stops_out_of_range % 10 == 1:
             log.warning("stop refused and the 24h spin quota is used up (%d/%d) - this is "
                         "the cap, not distance. Resets in %s.",
                         st.used, st.limit, _hms(st.resets_in))
+
+    def _update_spins_exhausted(self) -> None:
+        """Derive the FSM's quota flag from THIS account's rolling 24h window.
+
+        A method rather than three lines in the loop so the derivation can be driven
+        directly: the account argument is the easy thing to get wrong here, and getting it
+        wrong reports a confident "in good standing" for an account that is spun out - the
+        exact ambiguity the quota module exists to remove.
+        """
+        if self.quota is None:
+            return
+        # Keyword, not positional: quota.state()'s first positional slot is `account`
+        # (per-account quotas), so a bare timestamp here would silently bind to the wrong
+        # parameter and never match any bucket.
+        self.ctx.spins_exhausted = self.quota.state(account=self.stats.account,
+                                                    now=time.time()).exhausted
 
     def _end_encounter(self, e: Transition) -> None:
         """Track consecutive useless encounters and start restocking after enough of them.
@@ -315,7 +361,8 @@ class Runner:
         self.stats.encounters_exhausted += 1
         if self.ctx.failed_encounters < cfg.restock_after_failures or self.ctx.restocking:
             return
-        if self.quota is not None and self.quota.state().exhausted:
+        if self.quota is not None \
+                and self.quota.state(account=self.stats.account).exhausted:
             log.warning("throws are doing nothing and the 24h spin quota is used up; "
                         "restocking would be futile - the bag cannot be refilled here")
             return
@@ -378,6 +425,129 @@ class Runner:
             except Exception:
                 log.exception("ledger.resolve failed")
 
+    # ---------------------------------------------------------------- accounts
+
+    def _refresh_accounts(self, real: float, force: bool = False) -> None:
+        """Re-read the UI tree. Only during a switch: the dump blocks for ~1s.
+
+        Paced on the REAL clock, like every other pacing decision in the loop: a paused run
+        freezes `ctx.now`, and a frozen clock never reaches its own next deadline.
+        """
+        if self.tree_reader is None:
+            return
+        if not force and self.ctx.state is not BotState.SWITCHING:
+            return
+        if not force and real - self._accounts_read_at < ACCOUNTS_REFRESH:
+            return
+        self._accounts_read_at = real
+        try:
+            self.ctx.accounts = self.tree_reader.read()
+        except Exception:
+            log.exception("account tree read failed")
+
+    def choose_next_account(self, view) -> Optional[str]:
+        """Next usable account, round-robin from the current one.
+
+        Everyone capped is not a reason to stop: the cap blocks stops, not catches
+        (`pick_target` skips only STOP_TARGETS when `spins_exhausted`). So we move to
+        whichever account frees up first and keep catching there while it does.
+        """
+        if view is None or not view.available or len(view.rows) < 2:
+            return None
+        if view.active is None:
+            # Rows but no asterisk: we do not know which account we are on, so there is no
+            # defensible origin to rotate from, and guessing one could switch away from an
+            # account that was working. A missing signal means do nothing.
+            return None
+        names = list(view.names)
+        current = view.active.name
+        start = names.index(current) + 1
+        order = [n for n in names[start:] + names[:start] if n != current]
+        if not order:
+            return None
+        if self.quota is None:
+            return order[0]
+        usable = [n for n in order if not self.quota.state(account=n).exhausted]
+        if usable:
+            return usable[0]
+        # Every alternative is capped too, so the only question is who frees up first - and
+        # the account we are already on is a candidate for that. Without it, two capped
+        # accounts each name the other, the quota trigger stays due, and the bot spends the
+        # whole wait trading places instead of catching. `current` leads because
+        # soonest_reset keeps the first name on a tie, which is the "stay put" answer.
+        best = self.quota.soonest_reset([current] + order)
+        return None if best == current else best
+
+    def _maybe_switch(self, obs: Observation) -> None:
+        """Start a switch if a trigger is due and this is a safe moment to leave.
+
+        SCANNING with the map in front of us is the only such moment: leaving an encounter
+        or a Rocket fight abandons a Pokemon mid-throw, and the state alone is not enough
+        because RECOVERING gives up INTO scanning without the map ever being confirmed.
+        """
+        cfg = self.cfg
+        if self.tree_reader is None or self.ctx.state is not BotState.SCANNING \
+                or not obs.on_map:
+            return
+        due_quota = cfg.switch_on_quota and self.ctx.spins_exhausted
+        due_clock = (cfg.switch_every_minutes > 0
+                     and self.ctx.now >= self._next_rotation)
+        if not (due_quota or due_clock):
+            return
+        # A due trigger can be unsatisfiable for hours (every account capped, or an
+        # unreadable overlay), so the forced read is rate-limited rather than paid for on
+        # every tick. A switch that actually proceeds is unaffected - it only ever needs
+        # the one read.
+        if self._real - self._switch_probe_at < SWITCH_PROBE_EVERY:
+            return
+        self._switch_probe_at = self._real
+        self._refresh_accounts(self._real, force=True)
+        target = self.choose_next_account(self.ctx.accounts)
+        if target is None:
+            return
+        self._begin_switch(target)
+
+    def _begin_switch(self, name: str) -> None:
+        # Any tap still waiting for an answer dies here, for the reason _abandon_intent
+        # spells out: SWITCHING owns the screen for up to 120s and fills it with post-login
+        # screens, so anything that happens after is not evidence that our tap caused it.
+        self._abandon_intent()
+        self.ctx.switch_target = name
+        self.ctx.switch_phase = "open"
+        self._switch_target = name
+        log.info("switching account -> %s", name)
+        self.enter_state(BotState.SWITCHING, IntentOutcome.CARRIED, f"switch to {name}")
+
+    def _on_switch_confirmed(self, name: str) -> None:
+        """Close the outgoing account's session and start the incoming one's.
+
+        Split rather than merged so uptime and rates stay attributable; one row covering
+        two accounts describes neither.
+        """
+        old = self.stats
+        if self.stats_path is not None and old.account is not None:
+            try:
+                append_session(self.stats_path, old.summary())
+            except Exception:
+                log.exception("could not append the outgoing session")
+        # `paused_seconds` has to carry forward: the FSM clock is `real - paused_seconds`,
+        # so zeroing it would jump `now` forward by the whole pause total and fire every
+        # stored deadline at once. That means `started` must be on the same clock, which is
+        # exactly `ctx.now` - with `perf_counter()` instead, the new session's uptime reads
+        # short by every pause taken BEFORE the switch, and below RATE_MIN_UPTIME every
+        # per-account rate then reports as unknown, which is the whole point of the split.
+        self.stats = SessionStats(started=self.ctx.now, dry_run=old.dry_run, account=name)
+        self.stats.paused_seconds = old.paused_seconds
+        self._next_report = self.stats.started + REPORT_EVERY
+        if self.dashboard is not None:
+            # The dashboard holds the counters object, not the runner, so a TUI that is not
+            # re-pointed keeps rendering the session that just ended.
+            self.dashboard.stats = self.stats
+        # Any rotation timer restarts here, so a quota switch and a clock switch cannot
+        # stack into a second switch moments later.
+        if self.cfg.switch_every_minutes > 0:
+            self._next_rotation = self.ctx.now + self.cfg.switch_every_minutes * 60.0
+
     # ---------------------------------------------------------------- effects
 
     def apply(self, effects: list[Effect], obs: Observation) -> None:
@@ -413,6 +583,13 @@ class Runner:
                     self.ctx.taps_in_state += 1
                     if isinstance(e, (Tap, Swipe, Back)):
                         self.ctx.settle_until = self.ctx.now + self.cfg.timings.ui_settle
+                    if self.ctx.state is BotState.SWITCHING:
+                        # The launcher tap TOGGLES the overlay, so a second decision taken
+                        # from the same view closes the panel the first one opened and the
+                        # switch stalls until its 120s timeout. Drop the view here, where
+                        # every applied effect is already seen: the handler does nothing
+                        # while it is None, and the next refresh reflects the tap.
+                        self.ctx.accounts = None
 
     # ---------------------------------------------------------------- trace
 
@@ -567,11 +744,7 @@ class Runner:
                     if self.ledger is not None:
                         self.ledger.stage(frame, obs)
 
-                if self.quota is not None:
-                    # Keyword, not positional: quota.state()'s first positional slot is
-                    # now `account` (per-account quotas), so a bare timestamp here would
-                    # silently bind to the wrong parameter and never match any bucket.
-                    self.ctx.spins_exhausted = self.quota.state(now=time.time()).exhausted
+                self._update_spins_exhausted()
                 if paused:
                     # Perception still runs so the display stays live and the trace keeps
                     # a record, but the machine does not advance and nothing is actuated.
@@ -585,6 +758,11 @@ class Runner:
                         self._show(window, frame, obs)
                     continue
 
+                # Both are below the `paused` block on purpose: a paused run must not drive
+                # the overlay, and a switch entered while paused would sit in SWITCHING
+                # with the FSM clock frozen, so not even its timeout could end it.
+                self._refresh_accounts(real)
+                self._maybe_switch(obs)
                 self._update_restock()
                 effects = fsm.step(obs, self.ctx)
                 self.apply(effects, obs)
@@ -600,7 +778,7 @@ class Runner:
                     self._next_report = now + REPORT_EVERY
                     log.info("session: %s", self.stats.hud_line())
                     if self.quota is not None:
-                        log.info("%s", self.quota.state().line())
+                        log.info("%s", self.quota.state(account=self.stats.account).line())
 
                 elapsed = real - t0
                 if elapsed >= 1.0:
@@ -710,4 +888,4 @@ class Runner:
                     log.exception("could not append the session record")
             log.info("session summary:\n%s", self.stats.report())
         if self.quota is not None:
-            log.info("%s", self.quota.state().line())
+            log.info("%s", self.quota.state(account=self.stats.account).line())
