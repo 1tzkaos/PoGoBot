@@ -73,6 +73,7 @@ class Runner:
                  ledger=None, keyboard=None, trace_path: Optional[Path] = None,
                  display: bool = True, stats_path: Optional[Path] = None,
                  dashboard=None, encounter_dump: Optional[Path] = None,
+                 dialogue_dump: Optional[Path] = None,
                  quota: Optional[SpinQuota] = None,
                  pause_file: Optional[Path] = None, tree_reader=None):
         self.cfg = cfg
@@ -85,6 +86,7 @@ class Runner:
         self.stats_path = stats_path
         self.dashboard = dashboard
         self.encounter_dump = encounter_dump
+        self.dialogue_dump = dialogue_dump
         self.quota = quota
         self.pause_file = pause_file
         self.tree_reader = tree_reader
@@ -412,6 +414,21 @@ class Runner:
             log.exception("could not write the encounter frames")
         finally:
             self._enc_ring.clear()
+
+    def _collect_dialogue(self, frame, obs) -> None:
+        """Save post-login screens for labelling. Never fatal: this is a data-collection
+        side effect, and losing a frame must not end a run."""
+        if self.dialogue_dump is None or self.ctx.state is not BotState.SWITCHING:
+            return
+        if obs.on_map:
+            return
+        try:
+            import cv2
+            self.dialogue_dump.mkdir(parents=True, exist_ok=True)
+            name = f"switch_{int(time.time())}_{frame.seq:06d}.png"
+            cv2.imwrite(str(self.dialogue_dump / name), frame.bgr)
+        except Exception:
+            log.debug("dialogue frame not saved", exc_info=True)
 
     def _resolve_intent(self, intent, outcome: IntentOutcome) -> None:
         cd = self.cfg.cooldowns
@@ -763,6 +780,7 @@ class Runner:
                         self._enc_ring.append(frame.bgr.copy())
                     if self.ledger is not None:
                         self.ledger.stage(frame, obs)
+                    self._collect_dialogue(frame, obs)
 
                 self._update_spins_exhausted()
                 if paused:

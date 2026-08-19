@@ -15,6 +15,7 @@ import json
 import logging
 import time
 
+import numpy as np
 import pytest
 
 from pogobot import fsm
@@ -22,9 +23,15 @@ from pogobot import runner as runner_mod
 from pogobot.accounts import AccountView, FakeTreeReader
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState, IntentOutcome, Tap, Transition
+from pogobot.frames import Frame
 from pogobot.quota import SpinQuota
 from tests.factories import obs
 from tests.test_switching import panel
+
+
+def _frame_of(seq):
+    return Frame(seq=seq, ts=time.perf_counter(),
+                 bgr=np.zeros((1280, 590, 3), dtype=np.uint8))
 
 
 # Local fakes, matching the pattern every other runner test in this suite uses
@@ -499,3 +506,28 @@ def test_a_spin_is_recorded_against_the_running_account(tmp_path):
     r.apply([Transition(BotState.POPUP, IntentOutcome.CONFIRMED, "stop collected")], obs())
     assert q.state("TrainerOne").used == 1
     assert q.state().used == 0, "an unattributed bucket means the cap is tracked twice"
+
+
+# ------------------------------------------------------------------ dialogue collection
+
+def test_non_map_frames_during_a_switch_are_saved_for_labelling(tmp_path):
+    out = tmp_path / "dialogues"
+    r = make_runner(tree_reader=FakeTreeReader([panel()]), dialogue_dump=out)
+    r.ctx.state = BotState.SWITCHING
+    r._collect_dialogue(_frame_of(120), obs(on_map=False, screen="Menu", conf=0.99))
+    r._collect_dialogue(_frame_of(121), obs(on_map=True))     # map: not a dialogue
+    assert len(list(out.glob("*.png"))) == 1
+
+
+def test_nothing_is_written_when_the_flag_is_absent(tmp_path):
+    r = make_runner(tree_reader=FakeTreeReader([panel()]))
+    r.ctx.state = BotState.SWITCHING
+    r._collect_dialogue(_frame_of(1), obs(on_map=False, screen="Menu", conf=0.99))      # must not raise
+
+
+def test_frames_outside_a_switch_are_not_collected(tmp_path):
+    out = tmp_path / "dialogues"
+    r = make_runner(tree_reader=FakeTreeReader([panel()]), dialogue_dump=out)
+    r.ctx.state = BotState.SCANNING
+    r._collect_dialogue(_frame_of(1), obs(on_map=False, screen="Menu", conf=0.99))
+    assert not out.exists()
