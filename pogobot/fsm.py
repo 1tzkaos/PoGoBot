@@ -373,13 +373,26 @@ class Switching(Handler):
     """Log into another account through the PGSharp overlay.
 
     Phases advance through `switch_phase` on the Context rather than through nested
-    conditionals, so each tick makes exactly one decision from observable state.
+    conditionals, so each tick makes exactly one decision from observable state: "open"
+    drives the overlay to the target's login button, "settle" waits out whatever the
+    login produces until the map is back, "verify" re-opens the overlay to read the
+    asterisk, and "failed" is terminal - a login that did not take, left for the state
+    timeout to own rather than retried blind.
 
-    The `settle` phase does NOT identify the screens that appear after a login. It cannot:
-    Willow's dialogue classifies as Rocket @0.66, and the optical signal that separates a
-    dialogue box fires on 5/5 ChooseParty frames, which is a real Rocket screen. What
-    justifies clearing them is context - we just tapped a login button, so whatever is on
-    screen is between us and the map. That claim expires with the state timeout.
+    `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
+    dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
+    box fires on 5/5 ChooseParty frames, which is a real Rocket screen. What justifies
+    clearing them is context - we just tapped a login button, so whatever is on screen is
+    between us and the map. That claim expires with the state timeout.
+
+    The map coming back is not proof the switch worked, either. PGSharp shuts its own
+    panel as part of logging in, so every post-login read of the account list comes back
+    `rows=0` regardless of whether the login succeeded - measured live, polling every few
+    seconds from the login tap through the full 120s timeout never once saw a row, so a
+    version that trusted `obs.on_map` alone confirmed nothing and expired into RECOVERING
+    on every real run while the device sat logged into the new account. `verify` is the
+    fix: it re-opens the panel and reads the asterisk, the only ground truth for who is
+    actually logged in, before anything is confirmed.
     """
 
     state = BotState.SWITCHING
@@ -388,6 +401,10 @@ class Switching(Handler):
     def step(self, obs, ctx):
         if ctx.switch_phase == "settle":
             return self._settle(obs, ctx)
+        if ctx.switch_phase == "verify":
+            return self._verify(obs, ctx)
+        if ctx.switch_phase == "failed":
+            return []                    # login did not take; the timeout owns the outcome
         cfg = ctx.cfg
         v = ctx.accounts
         if v is None or not v.available:
@@ -414,23 +431,66 @@ class Switching(Handler):
 
     def _settle(self, obs, ctx):
         cfg = ctx.cfg
+        if not obs.on_map:
+            if obs.close_button_xy is not None and ctx.ready("close", cfg.timings.close_menu):
+                return [Tap(*obs.close_button_xy, "switch: close a post-login overlay",
+                            budget="close")]
+            if ctx.ready("back", cfg.timings.switch_clear):
+                # Measured: one BACK dismissed the post-login news modal. BACK carries no
+                # coordinate at all, which is why it is preferred to tapping a screen whose
+                # layout we have exactly one example of.
+                return [Back("switch: dismiss a post-login screen")]
+            return []
+        # The map is back, but that proves nothing on its own (see class docstring).
+        # Hand off to verify in the same tick rather than spending one just to flip the
+        # phase - `_verify` reads whatever view is on the Context right now.
+        return [SetFlag("switch_phase", "verify")] + self._verify(obs, ctx)
+
+    def _verify(self, obs, ctx):
+        """Re-open the overlay and read the asterisk - the only ground truth for who is
+        logged in. Never adds its own staleness tracking: the runner drops `ctx.accounts`
+        after every tap taken while SWITCHING, so a `None` or an already-stale-looking
+        view here just means the next refresh has not landed yet, and doing nothing is
+        the correct response either way.
+        """
+        cfg = ctx.cfg
         v = ctx.accounts
-        confirmed = (v is not None and v.available
-                     and v.active is not None and v.active.name == ctx.switch_target)
-        if obs.on_map and confirmed:
-            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                               f"logged into {ctx.switch_target}")]
-        if obs.on_map:
-            return []                    # map is back; waiting for the tree to agree
-        if obs.close_button_xy is not None and ctx.ready("close", cfg.timings.close_menu):
-            return [Tap(*obs.close_button_xy, "switch: close a post-login overlay",
-                        budget="close")]
-        if ctx.ready("back", cfg.timings.switch_clear):
-            # Measured: one BACK dismissed the post-login news modal. BACK carries no
-            # coordinate at all, which is why it is preferred to tapping a screen whose
-            # layout we have exactly one example of.
-            return [Back("switch: dismiss a post-login screen")]
-        return []
+        if v is None or not v.available:
+            return []                    # could not look; wait for the next refresh
+        if not ctx.ready("switch", cfg.timings.switch_tap):
+            return []
+        if not v.panel_open:
+            if v.launcher_norm is None:
+                return []
+            return [Tap(*v.launcher_norm, "switch: re-open the overlay to verify",
+                        budget="switch")]
+        if not v.rows:
+            # PGSharp remembers the last-viewed tab, so the panel can reopen on Cooldown
+            # History rather than the account list. identify_account (accounts.py)
+            # mirrors this same tab-follow for the same reason; not a third shape.
+            if v.accounts_tab_norm is None:
+                return []
+            return [Tap(*v.accounts_tab_norm, "switch: follow the Accounts tab",
+                        budget="switch")]
+        if v.active is not None and v.active.name == ctx.switch_target:
+            effects = []
+            if v.close_norm is not None:
+                effects.append(Tap(*v.close_norm, "switch: close overlay after verifying",
+                                   budget="switch"))
+            effects.append(Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                                      f"logged into {ctx.switch_target}"))
+            return effects
+        # Someone else is active: the login did not take. A second login tap here would
+        # be blind - close what we can and let the 120s timeout own the outcome.
+        effects = [
+            SetFlag("switch_phase", "failed"),
+            Note(f"switch to {ctx.switch_target} did not take; "
+                f"{v.active.name if v.active else 'no one'} is active", "warn"),
+        ]
+        if v.close_norm is not None:
+            effects.append(Tap(*v.close_norm, "switch: close overlay after a failed verify",
+                               budget="switch"))
+        return effects
 
     def on_timeout(self, obs, ctx):
         return [

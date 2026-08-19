@@ -57,7 +57,7 @@ def test_target_row_present_taps_its_login_button():
 
 def test_no_tap_ever_lands_on_a_delete_button():
     """The delete button sits ~24px from login. This is the test that matters."""
-    for phase in ("open", "tab", "login", "settle"):
+    for phase in ("open", "tab", "login", "settle", "verify", "failed"):
         for on_map in (True, False):
             c = ctx(phase=phase)
             for t in taps(fsm.step(obs(on_map=on_map), c)):
@@ -93,6 +93,36 @@ def test_confirmation_needs_both_the_map_and_the_asterisk():
     both = ctx(phase="settle", accounts=panel(active="TrainerTwo"))
     tr = [e for e in fsm.step(obs(on_map=True), both) if isinstance(e, Transition)][0]
     assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
+
+
+def test_settle_reopens_the_panel_once_the_map_is_back():
+    """The live-run defect: PGSharp shuts its own panel as part of logging in, so a
+    post-login read is rows=0 even though the login worked. The map alone must not
+    confirm anything - the state must go looking for the asterisk, not stall."""
+    closed = AccountView(rows=(), launcher_norm=(0.12, 0.05), accounts_tab_norm=(0.83, 0.18),
+                         close_norm=(0.06, 0.10), available=True, panel_open=False)
+    c = ctx(phase="settle", accounts=closed)
+    effects = fsm.step(obs(on_map=True), c)
+    assert taps(effects)[0].x == pytest.approx(0.12)
+    assert any(isinstance(e, SetFlag) and e.value == "verify" for e in effects)
+    assert not any(isinstance(e, Transition) for e in effects)
+
+
+def test_verify_confirms_when_the_reopened_panel_shows_the_target_active():
+    c = ctx(phase="verify", accounts=panel(active="TrainerTwo"))
+    effects = fsm.step(obs(on_map=True), c)
+    assert taps(effects)[0].x == pytest.approx(0.06)     # the panel's own close_norm
+    tr = [e for e in effects if isinstance(e, Transition)][0]
+    assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
+
+
+def test_verify_does_not_confirm_or_retap_login_when_someone_else_is_active():
+    c = ctx(phase="verify", accounts=panel(active="TrainerOne"))
+    effects = fsm.step(obs(on_map=True), c)
+    assert not any(isinstance(e, Transition) for e in effects)
+    assert any(isinstance(e, SetFlag) and e.value == "failed" for e in effects)
+    login_norm = c.accounts.by_name("TrainerTwo").login_norm
+    assert not any((t.x, t.y) == login_norm for t in taps(effects))
 
 
 def test_a_rocket_looking_screen_cannot_hijack_a_switch():
