@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from pogobot.accounts import AccountView, parse_dump
+from pogobot.accounts import AccountView, FakeTreeReader, UiTreeReader, parse_dump
 
 FIX = Path(__file__).parent / "fixtures" / "uiautomator"
 WH = (1080, 2340)
@@ -64,3 +64,34 @@ def test_by_name_and_names():
     assert v.names == ("TrainerOne", "TrainerTwo")
     assert v.by_name("TrainerTwo").level == 5
     assert v.by_name("Nobody") is None
+
+
+def test_reader_returns_unavailable_when_adb_fails(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("adb not found")
+    r = UiTreeReader(WH)
+    monkeypatch.setattr(r, "_run", boom)
+    v = r.read()
+    assert v.available is False and v.rows == ()
+
+
+def test_reader_returns_unavailable_on_uiautomator_error_text(monkeypatch):
+    r = UiTreeReader(WH)
+    monkeypatch.setattr(r, "_run", lambda *a, **k: b"ERROR: could not get idle state.")
+    assert r.read().available is False
+
+
+def test_reader_parses_a_real_dump(monkeypatch):
+    r = UiTreeReader(WH)
+    payload = (FIX / "accounts_open.xml").read_bytes()
+    monkeypatch.setattr(r, "_run", lambda *a, **k: payload)
+    assert r.read().active.name == "TrainerOne"
+
+
+def test_fake_reader_yields_queued_views_then_repeats_the_last():
+    a, b = view("overlay_closed.xml"), view("accounts_open.xml")
+    f = FakeTreeReader([a, b])
+    assert f.read().panel_open is False
+    assert f.read().panel_open is True
+    assert f.read().panel_open is True
+    assert f.reads == 3

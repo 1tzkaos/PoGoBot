@@ -17,10 +17,14 @@ offset, or a guess, because the failure mode is an irreversibly deleted account.
 
 from __future__ import annotations
 
+import logging
 import re
+import subprocess
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
+
+log = logging.getLogger("pogobot")
 
 #: Resource-id suffixes. Matched on suffix because the package prefix (`me.underw.hp`)
 #: is PGSharp's and may vary between builds.
@@ -35,6 +39,7 @@ _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
 @dataclass(frozen=True)
 class AccountRow:
+    """A single account entry in the PGSharp account list."""
     name: str
     active: bool
     level: Optional[int]
@@ -45,6 +50,7 @@ class AccountRow:
 
 @dataclass(frozen=True)
 class AccountView:
+    """The current state of the PGSharp account-list panel."""
     rows: tuple[AccountRow, ...] = ()
     launcher_norm: Optional[tuple[float, float]] = None
     accounts_tab_norm: Optional[tuple[float, float]] = None
@@ -144,3 +150,53 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         available=True,
         panel_open=close is not None,
     )
+
+
+DUMP_PATH = "/sdcard/pogobot_ui.xml"
+
+
+class UiTreeReader:
+    """Runs `uiautomator dump` and parses the result. The only adb caller in this module.
+
+    Blocking, roughly a second per call, so it is used during an account switch and never
+    per frame. Any failure - adb gone, the dump timing out because the UI never went idle,
+    a torn file - yields `available=False`, which the state machine treats as "could not
+    look", not as "there are no accounts".
+    """
+
+    def __init__(self, screen_wh: tuple[int, int], serial: Optional[str] = None,
+                 timeout: float = 20.0):
+        self.screen_wh = screen_wh
+        self.serial = serial
+        self.timeout = timeout
+
+    def _adb(self, *args: str) -> list[str]:
+        return ["adb"] + (["-s", self.serial] if self.serial else []) + list(args)
+
+    def _run(self) -> bytes:
+        subprocess.run(self._adb("shell", "uiautomator", "dump", DUMP_PATH),
+                       capture_output=True, timeout=self.timeout)
+        return subprocess.run(self._adb("shell", "cat", DUMP_PATH),
+                              capture_output=True, timeout=self.timeout).stdout
+
+    def read(self) -> AccountView:
+        try:
+            payload = self._run()
+        except (OSError, subprocess.SubprocessError) as exc:
+            log.debug("uiautomator dump failed: %s", exc)
+            return AccountView(available=False)
+        if not payload or b"<hierarchy" not in payload:
+            return AccountView(available=False)
+        return parse_dump(payload, self.screen_wh)
+
+
+class FakeTreeReader:
+    """Test double. Yields queued views, then repeats the last one forever."""
+
+    def __init__(self, views):
+        self._views = list(views) or [AccountView(available=False)]
+        self.reads = 0
+
+    def read(self) -> AccountView:
+        self.reads += 1
+        return self._views.pop(0) if len(self._views) > 1 else self._views[0]
