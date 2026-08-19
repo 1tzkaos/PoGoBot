@@ -11,6 +11,8 @@ Each of these has a failure mode that a green suite would otherwise hide:
   * `spins_exhausted` must describe the account we are actually on. Nothing asserted that
     before, which is how one wrong argument at that line could read as good standing.
 """
+import json
+import logging
 import time
 
 import pytest
@@ -110,6 +112,24 @@ def test_all_capped_but_the_current_one_frees_first_stays_put(tmp_path):
     q = SpinQuota(tmp_path / "s.jsonl", limit=1)
     q.record("TrainerOne", now=now - 23 * 3600)     # frees in 1h
     q.record("TrainerTwo", now=now - 1 * 3600)      # frees in 23h
+    r = make_runner(quota=q, tree_reader=FakeTreeReader([panel()]))
+    assert r.choose_next_account(panel(active="TrainerOne")) is None
+
+
+def test_an_account_with_room_left_is_never_swapped_for_a_capped_one(tmp_path):
+    """`usable == []` says every ALTERNATIVE is capped - it says nothing about where we are.
+
+    "Whose oldest spin ages out first" is a meaningless ranking for an account that can
+    still spin, and answering it under a clock rotation logs out of an account with room
+    onto one that will refuse every stop for hours. Not reachable through the quota
+    trigger, where `spins_exhausted` already guarantees the current account is capped,
+    which is exactly why nothing else here catches it.
+    """
+    now = time.time()
+    q = SpinQuota(tmp_path / "s.jsonl", limit=2)
+    q.record("TrainerOne", now=now - 5 * 3600)       # 1/2 used: room left, frees in 19h
+    q.record("TrainerTwo", now=now - 20 * 3600)      # 2/2 used: capped, frees in 4h
+    q.record("TrainerTwo", now=now - 20 * 3600)
     r = make_runner(quota=q, tree_reader=FakeTreeReader([panel()]))
     assert r.choose_next_account(panel(active="TrainerOne")) is None
 
@@ -356,6 +376,34 @@ def test_only_a_confirmed_outcome_rolls_the_session_over(tmp_path):
     assert not stats_path.exists()
 
 
+def test_an_unnamed_outgoing_session_is_still_recorded(tmp_path):
+    """A run whose startup tree read failed still did the work. Dropping its row loses those
+    hours from the history entirely - the counters do not carry into the new session
+    either - and `close()` records an unnamed session anyway, so skipping it here would
+    have the two paths disagree about the same object."""
+    stats_path = tmp_path / "sessions.jsonl"
+    r = make_runner(stats_path=stats_path, tree_reader=FakeTreeReader([panel()]))
+    r.stats.encounters = 9
+    assert r.stats.account is None
+    r._on_switch_confirmed("TrainerTwo")
+    rows = [json.loads(line) for line in stats_path.read_text().splitlines() if line.strip()]
+    assert [(row["account"], row["encounters"]) for row in rows] == [(None, 9)]
+
+
+def test_a_switch_ends_the_restock_it_interrupts():
+    """`restock_stops_at_start` is a mark on the OUTGOING counters. Left behind, `got` goes
+    negative against the fresh session and can never reach the target, so the restock only
+    ends when its 600s budget expires - logging a stop count below zero on the way out."""
+    r = make_runner()
+    r.stats.account = "TrainerOne"
+    r.stats.stops_collected = 137
+    r.ctx.restocking_until = r.ctx.now + 600.0
+    r.ctx.restock_stops_at_start = 137
+    r._on_switch_confirmed("TrainerTwo")
+    assert not r.ctx.restocking
+    assert r.ctx.restock_stops_at_start == 0
+
+
 def test_the_dashboard_follows_the_new_session():
     r = make_runner(tree_reader=FakeTreeReader([panel()]))
     r.dashboard = _Dash(r.stats)
@@ -395,6 +443,20 @@ def test_a_switch_does_not_carry_a_pending_tap_claim_into_the_overlay():
                               expected=BotState.POKESTOP, frame_seq=1)
     r._begin_switch("TrainerTwo")
     assert r.ctx.intent is None
+
+
+def test_the_abandoned_claim_is_logged_as_a_switch_not_a_pause(caplog):
+    """The same line serves both callers, so a hardcoded reason has a switch reporting a
+    pause that never happened - in the log a human reads to explain a missing tap."""
+    r = make_runner(tree_reader=FakeTreeReader([panel()]))
+    r.ctx.state = BotState.SCANNING
+    r.ctx.intent = fsm.Intent(ts=r.ctx.now, target_name="pokestop", confidence=0.9,
+                              tap_norm=(0.5, 0.6), xywhn=(0.5, 0.6, 0.1, 0.1),
+                              expected=BotState.POKESTOP, frame_seq=1)
+    with caplog.at_level(logging.INFO, logger="pogobot"):
+        r._begin_switch("TrainerTwo")
+    line = next(m for m in caplog.messages if "abandoning" in m)
+    assert "switch" in line and "paused" not in line
 
 
 # ------------------------------------------------------------------ the quota flag

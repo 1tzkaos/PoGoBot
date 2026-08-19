@@ -137,7 +137,9 @@ class Dashboard:
         t.add_column(justify="center")
         t.add_column(justify="right")
         if self.quota is not None:
-            q = self.quota.state()
+            # Named, because spins are booked against an account: the unattributed
+            # bucket reads 0/1200 forever once a run knows who it is.
+            q = self.quota.state(account=self.stats.account)
             style = "bold red" if q.exhausted else ("yellow" if q.remaining < 100 else "dim")
             spins = f"[{style}]spins {q.used}/{q.limit}[/]  "
         else:

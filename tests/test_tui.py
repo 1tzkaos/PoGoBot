@@ -99,6 +99,18 @@ def test_the_spin_quota_is_shown_when_one_is_tracked():
     assert "spins 300/1200" in _text(d, mkobs(on_map=True))
 
 
+def test_the_spin_quota_follows_the_account_the_session_belongs_to():
+    """Spins are booked against an account now, so a header that asks for the unattributed
+    bucket renders 0/1200 forever - never yellow, never red - on the one screen the quota
+    exists to disambiguate."""
+    from pogobot.quota import SpinQuota
+    d = _dash()
+    d.stats.account = "TrainerOne"
+    d.quota = SpinQuota(None, limit=1200)
+    d.quota.seed(300, spread_hours=6, account="TrainerOne")
+    assert "spins 300/1200" in _text(d, mkobs(on_map=True))
+
+
 def test_an_exhausted_quota_is_shown_too():
     from pogobot.quota import SpinQuota
     d = _dash()

@@ -249,8 +249,12 @@ class Runner:
                 return False
         return False
 
-    def _abandon_intent(self) -> None:
+    def _abandon_intent(self, reason: str) -> None:
         """Give up any tap whose answer we will not be there to see.
+
+        `reason` is the caller's, because two things take the screen away from a pending
+        tap - a pause and an account switch - and a log line that names the wrong one sends
+        whoever reads it looking for a pause that never happened.
 
         An Intent is a causal claim - "the screen changed BECAUSE of this tap" - and the
         ledger writes a training sample on the strength of it. Freezing the FSM clock keeps
@@ -269,8 +273,8 @@ class Runner:
         """
         if self.ctx.intent is None:
             return
-        log.info("abandoning the pending %s tap: paused before the screen answered",
-                 self.ctx.intent.target_name)
+        log.info("abandoning the pending %s tap: %s",
+                 self.ctx.intent.target_name, reason)
         self._resolve_intent(self.ctx.intent, IntentOutcome.EXPIRED)
         self.ctx.intent = None
 
@@ -296,7 +300,7 @@ class Runner:
         if want and not self._paused:
             self._paused = True
             self._paused_at = real
-            self._abandon_intent()
+            self._abandon_intent("paused before the screen answered")
             log.warning("PAUSED - no taps will be sent. %s",
                         "delete the pause file to resume" if self.pause_file
                         else "send SIGUSR1 again to resume")
@@ -470,6 +474,12 @@ class Runner:
         usable = [n for n in order if not self.quota.state(account=n).exhausted]
         if usable:
             return usable[0]
+        if not self.quota.state(account=current).exhausted:
+            # An empty `usable` says every ALTERNATIVE is capped; it says nothing about
+            # where we are. Staying on an account that can still spin beats any ranking by
+            # "whose oldest spin ages out first", which means nothing for an account that
+            # is not waiting on one.
+            return None
         # Every alternative is capped too, so the only question is who frees up first - and
         # the account we are already on is a candidate for that. Without it, two capped
         # accounts each name the other, the quota trigger stays due, and the bot spends the
@@ -511,7 +521,7 @@ class Runner:
         # Any tap still waiting for an answer dies here, for the reason _abandon_intent
         # spells out: SWITCHING owns the screen for up to 120s and fills it with post-login
         # screens, so anything that happens after is not evidence that our tap caused it.
-        self._abandon_intent()
+        self._abandon_intent("switching account before the screen answered")
         self.ctx.switch_target = name
         self.ctx.switch_phase = "open"
         self._switch_target = name
@@ -525,7 +535,11 @@ class Runner:
         two accounts describes neither.
         """
         old = self.stats
-        if self.stats_path is not None and old.account is not None:
+        if self.stats_path is not None:
+            # Written even when the account is unknown: those hours were still worked, the
+            # counters do not carry into the new session, and `close()` records an unnamed
+            # session anyway - two paths disagreeing about the same object is how a run
+            # silently vanishes from the history.
             try:
                 append_session(self.stats_path, old.summary())
             except Exception:
@@ -543,6 +557,12 @@ class Runner:
             # The dashboard holds the counters object, not the runner, so a TUI that is not
             # re-pointed keeps rendering the session that just ended.
             self.dashboard.stats = self.stats
+        # A restock is a claim about THIS bag - "throws are doing nothing, go collect" - and
+        # the new account brings its own. Its progress mark also points at the outgoing
+        # counters, so leaving it behind makes `got` negative against a fresh session,
+        # unreachable for the target, and the restock ends only when its 600s budget does.
+        self.ctx.restocking_until = 0.0
+        self.ctx.restock_stops_at_start = 0
         # Any rotation timer restarts here, so a quota switch and a clock switch cannot
         # stack into a second switch moments later.
         if self.cfg.switch_every_minutes > 0:
