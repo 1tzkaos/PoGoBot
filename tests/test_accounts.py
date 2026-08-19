@@ -1,3 +1,4 @@
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, call
 
@@ -222,7 +223,11 @@ def test_identify_account_taps_nothing_without_a_located_launcher():
 
 def test_identify_account_still_recloses_the_panel_with_no_account_marked_active():
     """Whatever the second read shows, the panel must be left as it was found - closed -
-    if a close control was located, even when no name was found to attribute anything to."""
+    if a close control was located, even when no name was found to attribute anything to.
+
+    `accounts_tab_norm=None` here also covers the "wrong tab, but nothing located to fix
+    it" branch: zero rows visible, no accounts tab control to tap, so no tab tap is
+    attempted - a missing node still means do nothing."""
     closed = view("overlay_closed.xml")
     opened_no_active = AccountView(rows=(), launcher_norm=closed.launcher_norm,
                                    accounts_tab_norm=None, close_norm=(0.05, 0.11),
@@ -242,3 +247,40 @@ def test_identify_account_closes_nothing_when_the_second_read_fails():
     assert identify_account(tr, act, settle=0) is None
     # Only the opening tap - never a close guessed without a location for it.
     assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm]
+
+
+def test_identify_account_selects_the_accounts_tab_when_the_panel_opens_on_another_tab():
+    """Measured live: PGSharp remembers the last-viewed tab. The panel opened on Cooldown
+    History, not Accounts, so the second read located a close control but zero rows -
+    exactly the shape this reproduces: closed -> open on the wrong tab -> open on the
+    Accounts tab with rows."""
+    closed = view("overlay_closed.xml")
+    opened_right_tab = view("accounts_open.xml")
+    opened_wrong_tab = replace(opened_right_tab, rows=())
+    tr = FakeTreeReader([closed, opened_wrong_tab, opened_right_tab])
+    act = _Act()
+    name = identify_account(tr, act, settle=0)
+    assert name == "TrainerOne"
+    assert [(t.x, t.y) for t in _taps(act)] == [
+        closed.launcher_norm,
+        opened_wrong_tab.accounts_tab_norm,
+        opened_right_tab.close_norm,
+    ]
+    # The row's delete button sits ~24px from its login button - the tab-tap sequence
+    # must not land on it either.
+    delete_coords = {r.delete_norm for r in opened_right_tab.rows if r.delete_norm}
+    tapped_coords = {(t.x, t.y) for t in _taps(act)}
+    assert not (tapped_coords & delete_coords)
+
+
+def test_identify_account_does_not_tap_the_accounts_tab_when_rows_are_already_visible():
+    """The common case - the panel already remembers the Accounts tab - must not pay for
+    a redundant tab tap and a third read it does not need."""
+    closed = view("overlay_closed.xml")
+    opened = view("accounts_open.xml")
+    tr = FakeTreeReader([closed, opened])
+    act = _Act()
+    name = identify_account(tr, act, settle=0)
+    assert name == "TrainerOne"
+    assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm, opened.close_norm]
+    assert tr.reads == 2

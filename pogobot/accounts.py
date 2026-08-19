@@ -212,9 +212,9 @@ class FakeTreeReader:
         return self._views.pop(0) if len(self._views) > 1 else self._views[0]
 
 
-#: Budget name for the two taps below, distinct from every FSM budget ("switch", "tap",
-#: ...) so a startup identification can never share - or be starved by - a live run's
-#: own rate-limit state for those budgets.
+#: Budget name for identify_account's taps, distinct from every FSM budget ("switch",
+#: "tap", ...) so a startup identification can never share - or be starved by - a live
+#: run's own rate-limit state for those budgets.
 IDENTIFY_BUDGET = "identify"
 
 
@@ -229,17 +229,25 @@ def identify_account(tree_reader: "UiTreeReader", actuator, settle: float = 1.0)
     one tap at a time (`pogobot/fsm.py`), run once at startup so the very first session
     can be attributed to a real account instead of the unattributed bucket.
 
+    PGSharp also remembers the last-viewed tab across openings, so the panel can open
+    already showing something other than the account list - Cooldown History, measured
+    live - with zero rows to find anyone active in. `Switching.step`'s "tab" phase
+    already handles exactly this by tapping `accounts_tab_norm`; mirrored here rather
+    than inventing a second shape for the same problem.
+
     Every coordinate comes from a location the tree itself just reported - `launcher_norm`
-    from the first read, `close_norm` from the second - never a constant, an offset, or a
-    row's `delete_norm`, which sits close enough to `login_norm` that a guessed tap is how
-    an account gets irreversibly deleted (see the module docstring).
+    from the first read, `accounts_tab_norm` from the second if it opened on the wrong
+    tab, `close_norm` from whichever read is current when it is time to close - never a
+    constant, an offset, or a row's `delete_norm`, which sits close enough to `login_norm`
+    that a guessed tap is how an account gets irreversibly deleted (see the module
+    docstring).
 
     A first read that is unavailable, or that does not locate the launcher, is left
-    strictly alone: nothing is tapped, and the function returns None. Whatever is found on
-    the second read, the panel is left as this function found it - closed - by tapping
-    `close_norm` if it was located; if that second read cannot be read at all, no close is
-    attempted either, for the same reason: never tap a coordinate this run did not just
-    see for itself.
+    strictly alone: nothing is tapped, and the function returns None. A control that was
+    not located - the accounts tab, or the close button - is simply not tapped; a missing
+    node still means do nothing, exactly as for the launcher. Whichever read is current by
+    the end, the panel is left as this function found it - closed - by tapping its
+    `close_norm` if one was located; an unavailable read never produces a guessed close.
     """
     view = tree_reader.read()
     if not view.available or view.launcher_norm is None:
@@ -251,6 +259,14 @@ def identify_account(tree_reader: "UiTreeReader", actuator, settle: float = 1.0)
     if settle:
         time.sleep(settle)
     opened = tree_reader.read()
+
+    if opened.available and not opened.rows and opened.accounts_tab_norm is not None:
+        actuator.apply(Tap(*opened.accounts_tab_norm, "identify: select the Accounts tab",
+                           budget=IDENTIFY_BUDGET))
+        if settle:
+            time.sleep(settle)
+        opened = tree_reader.read()
+
     name = None
     if opened.available and opened.active is not None:
         name = opened.active.name
