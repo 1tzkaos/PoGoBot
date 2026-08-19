@@ -10,9 +10,11 @@ in, as text, with an asterisk. That is ground truth. Every alternative - OCR of 
 bottom-left name, or a classifier - would be an inference about something the system can
 simply be told.
 
-Safety note that drives the whole module: each row's delete button sits ~24px from its
-login button. Every coordinate here is some node's OWN bounds. Nothing is a constant, an
-offset, or a guess, because the failure mode is an irreversibly deleted account.
+Safety note that drives the whole module: each row's delete button starts ~24px from the
+edge of its login button - 157px centre to centre, measured off
+tests/fixtures/uiautomator/accounts_open.xml. Every coordinate here is some node's OWN
+bounds. Nothing is a constant, an offset, or a guess, because the failure mode is an
+irreversibly deleted account.
 """
 
 from __future__ import annotations
@@ -49,7 +51,6 @@ class AccountRow:
     level: Optional[int]
     login_norm: tuple[float, float]
     delete_norm: Optional[tuple[float, float]]
-    row_norm: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -136,15 +137,12 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         if login_norm is None:
             continue
         delete_i = next((i for i, r in enumerate(ids) if r.endswith(ID_DELETE)), None)
-        row_rect = _rect(row)
         rows.append(AccountRow(
             name=name_text.lstrip("*").strip(),
             active=name_text.startswith("*"),
             level=int(digits[-1]) if digits else None,
             login_norm=login_norm,
             delete_norm=_centre_norm(kids[delete_i], w, h) if delete_i is not None else None,
-            row_norm=((row_rect[0] / w, row_rect[1] / h, row_rect[2] / w, row_rect[3] / h)
-                      if row_rect else (0.0, 0.0, 0.0, 0.0)),
         ))
 
     return AccountView(
@@ -153,7 +151,12 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         accounts_tab_norm=accounts_tab,
         close_norm=close,
         available=True,
-        panel_open=close is not None,
+        # Account rows are only ever in the tree while the panel is open, so either
+        # signal alone proves it. Hanging this on `hl_page_close` by itself made one
+        # PGSharp resource-id load-bearing: if it ever moves, `Switching.step` reads an
+        # open panel as closed and taps the launcher, which TOGGLES the overlay shut and
+        # then open again until the switch times out.
+        panel_open=close is not None or bool(rows),
     )
 
 
@@ -236,7 +239,11 @@ def identify_account(tree_reader: "UiTreeReader", actuator,
     reports `rows=()` and `active=None` even when PGSharp and the account list are both
     completely healthy. This is the one-shot equivalent of what `Switching` already does
     one tap at a time (`pogobot/fsm.py`), run once at startup so the very first session
-    can be attributed to a real account instead of the unattributed bucket.
+    can be attributed to a real account instead of the unattributed bucket, and so a
+    switch has a roster to choose a target from. Whether it runs at all is
+    `cli.prepare_accounts`'s decision, not this function's: these are three taps into the
+    panel that holds the delete buttons, which is a fair price for a run that is going to
+    drive that panel anyway and no price for a run that will never switch.
 
     PGSharp also remembers the last-viewed tab across openings, so the panel can open
     already showing something other than the account list - Cooldown History, measured

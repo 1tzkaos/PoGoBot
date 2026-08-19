@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .accounts import AccountView
-from .config import Config
+from .config import Config, Timings
 from .effects import (
     Back,
     BotState,
@@ -186,6 +186,11 @@ def pick_target(obs: Observation, ctx: Context):
 class Handler:
     state: BotState
     timeout_s: float = 30.0
+
+    def timeout(self, ctx: Context) -> float:
+        """The budget for this state, in seconds. Overridden where the budget belongs to
+        the Config rather than to the handler - see `Switching`."""
+        return self.timeout_s
 
     def on_timeout(self, obs: Observation, ctx: Context) -> list[Effect]:
         return [Transition(BotState.RECOVERING, IntentOutcome.EXPIRED,
@@ -401,11 +406,20 @@ class Switching(Handler):
     `_settle` waits out `Timings.switch_login_grace` before ever handing off to `verify`,
     and why a mismatch inside `verify` is never treated as final (see `_verify`) - "someone
     else is active" at one instant cannot be told apart from "not yet" from that instant
-    alone. Only the 120s state timeout is allowed to end a switch that never confirms.
+    alone. Only the state timeout (`Timings.switch_timeout`) is allowed to end a switch
+    that never confirms, and `Runner` records that expiry so the next attempt waits out a
+    backoff instead of re-tapping a control that has just refused us.
     """
 
     state = BotState.SWITCHING
-    timeout_s = 120.0
+    #: Declared so the import-time contract below still sees a numeric budget, and kept
+    #: equal to the config default so the two can never disagree. `timeout()` is what the
+    #: dispatcher actually asks, and it reads the LIVE config - `Timings.switch_timeout`
+    #: was configurable in name only while this number was the one that counted.
+    timeout_s = Timings().switch_timeout
+
+    def timeout(self, ctx):
+        return ctx.cfg.timings.switch_timeout
 
     def step(self, obs, ctx):
         if ctx.switch_phase == "settle":
@@ -429,8 +443,10 @@ class Switching(Handler):
             return [Tap(*v.accounts_tab_norm, "switch: select the Accounts tab", budget="switch")]
         if row.active:
             # Already on the target - no login tap is coming, so there is nothing for
-            # the grace period to wait out. Leaving `switch_login_ts` at its 0.0 default
-            # means `_settle` treats the grace as already satisfied.
+            # the grace period to wait out. `Runner._begin_switch` zeroes
+            # `switch_login_ts` at the start of every attempt, so leaving it alone here
+            # means `_settle` treats the grace as already satisfied - and means attempt 2
+            # can never inherit attempt 1's timestamp.
             return [SetFlag("switch_phase", "settle"),
                     Note(f"already logged into {row.name}; waiting for the map")]
         return [
@@ -471,7 +487,7 @@ class Switching(Handler):
         A mismatch here is never latched as final - see class docstring for why "someone
         else is active" cannot be told apart from "not yet" from a single read. It closes
         what it can and returns, and the next tick tries again from scratch; only the
-        120s state timeout is allowed to end a switch that never confirms.
+        state timeout is allowed to end a switch that never confirms.
         """
         cfg = ctx.cfg
         v = ctx.accounts
@@ -503,7 +519,7 @@ class Switching(Handler):
         # Someone else is active. The login is asynchronous, so this is not evidence of
         # failure by itself - only that it has not landed as of this read. A second login
         # tap here would be blind regardless, so close what we can and try again later;
-        # the 120s timeout, not this check, is what ends a switch that truly never lands.
+        # the state timeout, not this check, is what ends a switch that truly never lands.
         effects = [Note(f"switch to {ctx.switch_target} not yet confirmed; "
                         f"{v.active.name if v.active else 'no one'} still active", "info")]
         if v.close_norm is not None:
@@ -651,6 +667,6 @@ def step(obs: Observation, ctx: Context) -> list[Effect]:
         return [Transition(want, outcome, f"observation implies {want.value}")]
 
     handler = HANDLERS[ctx.state]
-    if ctx.elapsed > handler.timeout_s:
+    if ctx.elapsed > handler.timeout(ctx):
         return handler.on_timeout(obs, ctx)
     return handler.step(obs, ctx)

@@ -82,16 +82,27 @@ class Timings:
     switch_tap: float = 2.0
     #: gap between attempts to clear a post-login screen
     switch_clear: float = 2.5
-    #: measured: login tap -> post-login modal was ~14s. The budget is generous because
-    #: the alternative to waiting is tapping blindly at an unknown screen.
-    switch_timeout: float = 120.0
+    #: Budget for the whole SWITCHING state, read by `fsm.Switching.timeout`.
+    #:
+    #: Sized from the one switch that was fully observed end to end: ~2 minutes from the
+    #: login tap to an asterisk the overlay would confirm. That is the middle of the
+    #: state, not all of it - before the login tap the handler still has to open the
+    #: overlay and (sometimes) follow the Accounts tab, and after it the panel has to be
+    #: re-opened to read the asterisk, each of those taps gated by `switch_tap` and by the
+    #: ~2.5s tree-refresh cadence. `switch_login_grace` (30s) is spent INSIDE this budget
+    #: too. At 120s a healthy switch could therefore run out of time with the login
+    #: already landed - the worst outcome available, because it is indistinguishable from
+    #: the login being refused. 240s covers the observed 2 minutes plus the driving at
+    #: both ends with real headroom; the cost of being generous is bounded by the failure
+    #: backoff in `runner.py`, which is what stops a genuinely dead switch from repeating.
+    switch_timeout: float = 240.0
     #: measured: a login tap reaches the post-login modal in ~14s, but the OUTGOING
     #: account's map can still be on screen for a second or two after the tap - obs.on_map
     #: returning is NOT proof the login has landed. Verify must not act before this many
     #: seconds have passed since the login tap, or it reads the old account's asterisk and
     #: calls a login that is merely still in flight a failure. Real headroom over the 14s,
-    #: not a tight bound: waiting a bit too long costs a few seconds out of a 120s budget;
-    #: waiting too little burns the whole budget on a false negative.
+    #: not a tight bound: waiting a bit too long costs a few seconds out of the switch
+    #: budget above; waiting too little burns the whole budget on a false negative.
     switch_login_grace: float = 30.0
 
 

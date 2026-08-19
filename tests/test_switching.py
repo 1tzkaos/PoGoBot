@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 import pytest
 
 from pogobot import fsm
@@ -9,8 +11,7 @@ from tests.factories import obs
 
 def row(name, active=False, x=0.74, level=10):
     return AccountRow(name=name, active=active, level=level,
-                      login_norm=(x, 0.23), delete_norm=(0.89, 0.23),
-                      row_norm=(0.04, 0.20, 0.96, 0.26))
+                      login_norm=(x, 0.23), delete_norm=(0.89, 0.23))
 
 
 def panel(active="TrainerOne", open_=True):
@@ -21,8 +22,15 @@ def panel(active="TrainerOne", open_=True):
         close_norm=(0.06, 0.10), available=True, panel_open=open_)
 
 
+def budget(seconds: float) -> Config:
+    """A Config whose switch budget is nothing like the default, so a handler that reads
+    it can be told apart from one that hardcodes a number."""
+    return Config(timings=replace(Config().timings, switch_timeout=seconds))
+
+
 def ctx(**kw):
-    c = fsm.Context(cfg=Config(), state=BotState.SWITCHING, now=100.0, state_since=100.0)
+    c = fsm.Context(cfg=kw.pop("cfg", Config()), state=BotState.SWITCHING,
+                    now=100.0, state_since=100.0)
     c.switch_target = kw.pop("target", "TrainerTwo")
     c.switch_phase = kw.pop("phase", "open")
     c.accounts = kw.pop("accounts", panel())
@@ -56,8 +64,12 @@ def test_target_row_present_taps_its_login_button():
 
 
 def test_no_tap_ever_lands_on_a_delete_button():
-    """The delete button sits ~24px from login. This is the test that matters."""
-    for phase in ("open", "tab", "login", "settle", "verify"):
+    """The delete button sits ~24px from login. This is the test that matters.
+
+    Every phase `switch_phase` can actually hold - "tab" and "login" are steps WITHIN
+    "open", not phases, and naming them here only ran the "open" case three times.
+    """
+    for phase in ("open", "settle", "verify"):
         for on_map in (True, False):
             c = ctx(phase=phase)
             for t in taps(fsm.step(obs(on_map=on_map), c)):
@@ -142,12 +154,34 @@ def test_verify_waits_out_the_login_grace_period():
 
 
 def test_a_genuine_failure_still_ends_at_the_timeout():
-    """Without a terminal 'failed' phase, a switch that never lands must still be
-    bounded by the 120s state timeout rather than retrying forever."""
-    c = ctx(phase="verify", accounts=panel(active="TrainerOne"))
-    c.now = c.state_since + Config().timings.switch_timeout + 1
+    """Without a terminal 'failed' phase, a switch that never lands must still be bounded
+    by the state timeout rather than re-checking forever."""
+    c = ctx(phase="verify", accounts=panel(active="TrainerOne"), cfg=budget(17.0))
+    c.now = c.state_since + 18.0
     tr = [e for e in fsm.step(obs(on_map=True), c) if isinstance(e, Transition)][0]
     assert tr.to is BotState.RECOVERING and tr.outcome is IntentOutcome.EXPIRED
+
+
+def test_the_switch_budget_is_the_configured_one():
+    """`Timings.switch_timeout` was dead configuration - the handler hardcoded 120s while
+    the config said 120s, and every test computed its deadline FROM the config, so the
+    disconnect was invisible. These deadlines come from a budget nothing else in the
+    system uses, so a hardcoded number fails them whatever it is."""
+    short = ctx(phase="verify", accounts=panel(active="TrainerOne"), cfg=budget(17.0))
+    short.now = short.state_since + 16.0
+    assert not [e for e in fsm.step(obs(on_map=True), short) if isinstance(e, Transition)]
+    short.now = short.state_since + 18.0
+    assert [e for e in fsm.step(obs(on_map=True), short) if isinstance(e, Transition)]
+
+    long = ctx(phase="verify", accounts=panel(active="TrainerOne"), cfg=budget(900.0))
+    long.now = long.state_since + 300.0
+    assert not [e for e in fsm.step(obs(on_map=True), long) if isinstance(e, Transition)]
+
+
+def test_the_declared_budget_matches_the_config_default():
+    """The import-time contract checks `timeout_s`, so the class still has to declare one;
+    a declared number that disagrees with the config is the same lie in a smaller font."""
+    assert fsm.Switching.timeout_s == Config().timings.switch_timeout
 
 
 def test_a_rocket_looking_screen_cannot_hijack_a_switch():
@@ -162,7 +196,7 @@ def test_an_encounter_looking_screen_cannot_hijack_a_switch():
 
 
 def test_timeout_escalates_to_recovering():
-    c = ctx(phase="settle")
-    c.now = c.state_since + Config().timings.switch_timeout + 1
+    c = ctx(phase="settle", cfg=budget(17.0))
+    c.now = c.state_since + 18.0
     tr = [e for e in fsm.step(obs(on_map=False), c) if isinstance(e, Transition)][0]
     assert tr.to is BotState.RECOVERING and tr.outcome is IntentOutcome.EXPIRED

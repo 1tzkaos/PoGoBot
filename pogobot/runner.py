@@ -58,6 +58,30 @@ ENCOUNTER_RING_SECONDS = 6.0
 # happens during a switch and nowhere else.
 ACCOUNTS_REFRESH = 2.5
 
+# A switch that expires without confirming is not retried immediately.
+#
+# Observed live: the login tap is accepted, PGSharp closes its own panel, and the account
+# simply does not change - the suspected cause is a login throttle after several switches
+# within a few hours. None of that is visible to the stuck watchdog, which only asks
+# whether the map is up, and in this failure mode it IS up. So without a record of the
+# failure nothing stopped the next tick from starting the same attempt over: six attempts
+# in six cycles when it was driven through the real Runner, and a bot that catches nothing
+# for the rest of the run because it spends every couple of minutes driving an overlay.
+#
+# The first wait is 10 minutes. A HEALTHY switch was measured at up to ~2 minutes end to
+# end, so anything much shorter is barely longer than one attempt, and retrying an
+# external throttle faster than the thing that is throttling us cannot work by
+# construction. It doubles per consecutive failure so a throttle that outlives one wait is
+# not hammered by the next. Nothing is lost by waiting: the cap blocks stops, not catches,
+# so the bot keeps playing on the account it already has.
+SWITCH_BACKOFF_BASE = 600.0
+
+# Consecutive failures before the bot stops trying at all and says so. Three attempts
+# spread over half an hour that all ended the same way is evidence that the problem is not
+# the timing, and each further attempt costs a real screen - up to `switch_timeout` of not
+# catching anything - to re-test a hypothesis that has already been refuted twice.
+SWITCH_MAX_FAILURES = 3
+
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 
@@ -91,6 +115,10 @@ class Runner:
         self.roster = tuple(roster)
         self._accounts_read_at = 0.0
         self._switch_target: Optional[str] = None
+        #: consecutive switch attempts that expired without confirming, and the FSM-clock
+        #: instant before which no new attempt may start. Reset by a confirmed switch.
+        self._switch_failures = 0
+        self._switch_blocked_until = 0.0
         self._paused = False
         self._pause_requested = False    # toggled by SIGUSR1 and by the display key
         self._paused_at = 0.0
@@ -221,6 +249,12 @@ class Runner:
             # books or reset a counter. Last in this method because it REPLACES self.stats,
             # so every count above still lands on the outgoing account.
             self._on_switch_confirmed(self._switch_target)
+            self._switch_target = None
+        elif src is BotState.SWITCHING and e.outcome is IntentOutcome.EXPIRED:
+            # The only other way out of SWITCHING (`Switching.on_timeout`). Recorded here,
+            # in the one place transitions are already inspected, because nothing else in
+            # the loop can tell a switch that failed from one that was never started.
+            self._on_switch_failed(self._switch_target)
             self._switch_target = None
 
     def _halt(self, reason: str) -> None:
@@ -463,14 +497,15 @@ class Runner:
         except Exception:
             log.exception("account tree read failed")
 
-    def choose_next_account(self, view=None) -> Optional[str]:
+    def choose_next_account(self) -> Optional[str]:
         """Next usable account, round-robin from the current one.
 
         Named accounts come from the startup roster, and who we are from the session the
         counters belong to, because the live tree can only answer either question while
-        the PGSharp panel is open - which, outside a switch, it never is. A view that does
-        carry rows is preferred where one exists: during SWITCHING it is refreshed every
-        few seconds and is the more current of the two.
+        the PGSharp panel is open - which, outside a switch, it never is. It took a live
+        view as an alternative source once; nothing ever passed one, because the only
+        caller decides while the panel is shut, and a branch that cannot run is a branch
+        nothing keeps honest.
 
         A stale roster cannot produce a wrong tap. `Switching.step` looks the target up
         with `by_name` on a view read AFTER the switch began, so an account that is gone
@@ -480,16 +515,12 @@ class Runner:
         (`pick_target` skips only STOP_TARGETS when `spins_exhausted`). So we move to
         whichever account frees up first and keep catching there while it does.
         """
-        if view is not None and view.available and view.rows:
-            names = list(view.names)
-            current = view.active.name if view.active else None
-        else:
-            names = list(self.roster)
-            current = self.stats.account
+        names = list(self.roster)
+        current = self.stats.account
         # Anything less than a known origin inside a known roster is a guess, and the guess
-        # would be to log out of an account that was working: rows with no asterisk, a
-        # session that never learned its name, a name nothing enumerated, or nowhere else
-        # to go. A missing signal means do nothing.
+        # would be to log out of an account that was working: a session that never learned
+        # its name (or stopped being able to vouch for it after a failed switch), a name
+        # nothing enumerated, or nowhere else to go. A missing signal means do nothing.
         if current is None or current not in names or len(names) < 2:
             return None
         start = names.index(current) + 1
@@ -531,6 +562,14 @@ class Runner:
                      and self.ctx.now >= self._next_rotation)
         if not (due_quota or due_clock):
             return
+        # A trigger being due says nothing about whether an attempt can succeed. Both
+        # triggers stay due indefinitely - `spins_exhausted` for hours, and a missed
+        # rotation deadline forever, since only a CONFIRMED switch moves it - so the
+        # failure record, not the trigger, is what makes a refused switch stop repeating.
+        if self._switch_failures >= SWITCH_MAX_FAILURES:
+            return
+        if self.ctx.now < self._switch_blocked_until:
+            return
         # Decided from the cached roster, with no tree read at all. Probing here used to
         # cost a ~1s blocking dump and could never learn anything: with the panel shut the
         # tree lists no accounts, so the answer was always "nowhere to go".
@@ -541,19 +580,69 @@ class Runner:
 
     def _begin_switch(self, name: str) -> None:
         # Any tap still waiting for an answer dies here, for the reason _abandon_intent
-        # spells out: SWITCHING owns the screen for up to 120s and fills it with post-login
-        # screens, so anything that happens after is not evidence that our tap caused it.
+        # spells out: SWITCHING owns the screen for a whole `switch_timeout` and fills it
+        # with post-login screens, so anything that happens after is not evidence that our
+        # tap caused it.
         self._abandon_intent("switching account before the screen answered")
         # Whatever view we last held describes a panel that was shut, or a panel as it
         # looked during some earlier switch. Every tap in SWITCHING comes from a location
-        # the tree just reported - `login_norm` sits ~24px from `delete_norm` - so the
+        # the tree just reported - `login_norm` sits 157px from `delete_norm` - so the
         # handler starts from nothing and waits for the first refresh of this switch.
         self.ctx.accounts = None
         self.ctx.switch_target = name
         self.ctx.switch_phase = "open"
+        # Attempt 2 must not inherit attempt 1's login stamp: `_settle` waits out the
+        # grace period from it, and a stale value satisfies that wait immediately - so a
+        # verify could run against a login tap that had not happened yet. It is also what
+        # tells `_on_switch_failed` whether this attempt ever tapped a login at all.
+        self.ctx.switch_login_ts = 0.0
         self._switch_target = name
         log.info("switching account -> %s", name)
         self.enter_state(BotState.SWITCHING, IntentOutcome.CARRIED, f"switch to {name}")
+
+    def _on_switch_failed(self, name: Optional[str]) -> None:
+        """A switch expired without the overlay ever naming the target as active.
+
+        Two things have to be recorded, and neither was:
+
+        The attempt must not simply start again. Nothing else in the loop can stop it -
+        the trigger that started it is still due, `choose_next_account` still names the
+        same account, and the stuck watchdog cannot help because it refreshes on a visible
+        map and in this failure mode the map IS visible; the overlay closes and the
+        account just does not change. Live, that made the bot re-tap a control that had
+        already refused it, every couple of minutes, for the rest of the run.
+
+        And if a login WAS tapped, we no longer know who is logged in. The whole reason
+        `switch_login_grace` exists is that a login can land late, so an expiry is exactly
+        the case where the tap may have worked after we stopped looking. Keeping the
+        outgoing name would book this account's spins against an account we might not be
+        on, under-count the real one's 24h window and let the bot spin past a cap it
+        cannot see - the ambiguity `quota.py` exists to remove. `None` is what we can
+        support, and it books to the unattributed bucket until a switch confirms a name.
+        """
+        self._switch_failures += 1
+        wait = SWITCH_BACKOFF_BASE * (2 ** (self._switch_failures - 1))
+        self._switch_blocked_until = self.ctx.now + wait
+        who = name or "another account"
+        # 0.0 is `_begin_switch`'s "this attempt has not tapped a login" sentinel; the FSM
+        # clock is a perf_counter reading, so a real stamp is never zero.
+        if self.ctx.switch_login_ts:
+            self.stats.account = None
+            log.warning("the login for %s was tapped but never confirmed; the logged-in "
+                        "account is now unknown - spins go to the unattributed bucket "
+                        "until a switch confirms one", who)
+        if self._switch_failures >= SWITCH_MAX_FAILURES:
+            log.warning("%d account switches in a row never confirmed (last target: %s); "
+                        "giving up on switching for this run. The overlay accepts the "
+                        "login tap and the account does not change, which looks like a "
+                        "login throttle - restart once it has cleared.",
+                        self._switch_failures, who)
+        else:
+            # `Switching.on_timeout` has already said the switch never confirmed; this
+            # line only has to say what follows from it.
+            log.warning("that is switch attempt %d in a row to fail (target: %s); "
+                        "holding off the next one for %s",
+                        self._switch_failures, who, _hms(wait))
 
     def _on_switch_confirmed(self, name: str) -> None:
         """Close the outgoing account's session and start the incoming one's.
@@ -594,6 +683,11 @@ class Runner:
         # stack into a second switch moments later.
         if self.cfg.switch_every_minutes > 0:
             self._next_rotation = self.ctx.now + self.cfg.switch_every_minutes * 60.0
+        # Switching demonstrably works right now, so whatever earlier attempts ran into is
+        # over. Anything else makes one bad patch - a throttle that has since cleared -
+        # permanent for the rest of the run.
+        self._switch_failures = 0
+        self._switch_blocked_until = 0.0
 
     # ---------------------------------------------------------------- effects
 
@@ -633,7 +727,7 @@ class Runner:
                     if self.ctx.state is BotState.SWITCHING:
                         # The launcher tap TOGGLES the overlay, so a second decision taken
                         # from the same view closes the panel the first one opened and the
-                        # switch stalls until its 120s timeout. Drop the view here, where
+                        # switch stalls until it times out. Drop the view here, where
                         # every applied effect is already seen: the handler does nothing
                         # while it is None, and the next refresh reflects the tap.
                         self.ctx.accounts = None

@@ -1,7 +1,7 @@
 import logging
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -46,6 +46,18 @@ def test_login_and_delete_are_distinct_targets():
     assert row.login_norm != row.delete_norm
     # login is left of delete; a tap that drifts right destroys an account
     assert row.login_norm[0] < row.delete_norm[0]
+
+
+def test_rows_alone_prove_the_panel_is_open():
+    """`panel_open` used to hinge on one PGSharp resource-id. If `hl_page_close` ever
+    moves, `Switching.step` reads an open panel as closed and taps the launcher - which
+    TOGGLES the overlay shut, then open again, until the switch times out. Account rows
+    are only ever in the tree while the panel is open, so they prove it just as well."""
+    xml = (FIX / "accounts_open.xml").read_bytes().replace(b"hl_page_close",
+                                                           b"hl_page_dismiss")
+    v = parse_dump(xml, WH)
+    assert v.close_norm is None, "the close control is deliberately unrecognisable here"
+    assert v.rows and v.panel_open is True
 
 
 def test_closed_overlay_locates_the_launcher_but_lists_nothing():
