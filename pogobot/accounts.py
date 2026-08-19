@@ -40,6 +40,7 @@ _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 @dataclass(frozen=True)
 class AccountRow:
     """A single account entry in the PGSharp account list."""
+
     name: str
     active: bool
     level: Optional[int]
@@ -51,6 +52,7 @@ class AccountRow:
 @dataclass(frozen=True)
 class AccountView:
     """The current state of the PGSharp account-list panel."""
+
     rows: tuple[AccountRow, ...] = ()
     launcher_norm: Optional[tuple[float, float]] = None
     accounts_tab_norm: Optional[tuple[float, float]] = None
@@ -161,7 +163,8 @@ class UiTreeReader:
     Blocking, roughly a second per call, so it is used during an account switch and never
     per frame. Any failure - adb gone, the dump timing out because the UI never went idle,
     a torn file - yields `available=False`, which the state machine treats as "could not
-    look", not as "there are no accounts".
+    look", not as "there are no accounts". The timeout is applied per subprocess call, not
+    total for read(); worst case blocks for a multiple of it.
     """
 
     def __init__(self, screen_wh: tuple[int, int], serial: Optional[str] = None,
@@ -174,6 +177,10 @@ class UiTreeReader:
         return ["adb"] + (["-s", self.serial] if self.serial else []) + list(args)
 
     def _run(self) -> bytes:
+        # uiautomator can report success while writing nothing; delete the file first
+        # so a failed dump is indistinguishable from an empty file, not a stale read.
+        subprocess.run(self._adb("shell", "rm", "-f", DUMP_PATH),
+                       capture_output=True, timeout=self.timeout)
         subprocess.run(self._adb("shell", "uiautomator", "dump", DUMP_PATH),
                        capture_output=True, timeout=self.timeout)
         return subprocess.run(self._adb("shell", "cat", DUMP_PATH),

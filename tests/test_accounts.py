@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock, call
 
 import pytest
 
@@ -95,3 +96,71 @@ def test_fake_reader_yields_queued_views_then_repeats_the_last():
     assert f.read().panel_open is True
     assert f.read().panel_open is True
     assert f.reads == 3
+
+
+def test_run_deletes_file_before_dumping(monkeypatch):
+    """_run() must rm before dump to avoid reading stale files."""
+    mock_run = MagicMock()
+    mock_run.return_value = MagicMock(stdout=b"")
+    monkeypatch.setattr("pogobot.accounts.subprocess.run", mock_run)
+
+    r = UiTreeReader(WH)
+    r._run()
+
+    # Verify rm is called before dump. rm call should be first, dump second.
+    calls = mock_run.call_args_list
+    assert len(calls) >= 2
+    rm_call = calls[0]
+    dump_call = calls[1]
+    # rm should have rm -f DUMP_PATH as args
+    assert "rm" in rm_call[0][0]
+    assert "-f" in rm_call[0][0]
+    # dump should have uiautomator dump as args
+    assert "uiautomator" in dump_call[0][0]
+    assert "dump" in dump_call[0][0]
+
+
+def test_run_returns_unavailable_when_dump_produces_no_file(monkeypatch):
+    """A dump that succeeds but produces no file should return available=False."""
+    mock_run = MagicMock()
+    mock_run.return_value = MagicMock(stdout=b"")
+    monkeypatch.setattr("pogobot.accounts.subprocess.run", mock_run)
+
+    r = UiTreeReader(WH)
+    v = r.read()
+
+    assert v.available is False
+    assert v.rows == ()
+
+
+def test_run_parses_successful_dump_with_fixture_data(monkeypatch):
+    """A successful dump that produces valid XML should parse correctly."""
+    mock_run = MagicMock()
+    payload = (FIX / "accounts_open.xml").read_bytes()
+    mock_run.return_value = MagicMock(stdout=payload)
+    monkeypatch.setattr("pogobot.accounts.subprocess.run", mock_run)
+
+    r = UiTreeReader(WH)
+    v = r.read()
+
+    assert v.available is True
+    assert v.active.name == "TrainerOne"
+    assert len(v.rows) == 2
+
+
+def test_run_with_serial_includes_device_selector(monkeypatch):
+    """_run() should include -s <serial> in all adb commands when serial is set."""
+    mock_run = MagicMock()
+    mock_run.return_value = MagicMock(stdout=b"")
+    monkeypatch.setattr("pogobot.accounts.subprocess.run", mock_run)
+
+    r = UiTreeReader(WH, serial="device123")
+    r._run()
+
+    # All three calls should include -s device123
+    calls = mock_run.call_args_list
+    for call_obj in calls:
+        cmd = call_obj[0][0]
+        assert "-s" in cmd
+        idx = cmd.index("-s")
+        assert cmd[idx + 1] == "device123"
