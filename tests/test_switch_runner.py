@@ -527,7 +527,7 @@ def test_the_abandoned_claim_is_logged_as_a_switch_not_a_pause(caplog):
 
 # ------------------------------------------------------------------ failed switches
 
-def _fail_a_switch(r, start, *, tap_login):
+def _fail_a_switch(r, start, *, tap_login, view=None):
     """Drive one whole attempt through the real Runner and the real FSM, from the trigger
     to the state timeout and back to SCANNING. Returns whether an attempt was started.
 
@@ -536,14 +536,22 @@ def _fail_a_switch(r, start, *, tap_login):
       * `tap_login=False` - the overlay never opens. The handler taps the launcher, the
         panel stays shut, and the attempt dies without a login ever being tapped.
       * `tap_login=True` - what the phone actually did. The login tap is accepted, PGSharp
-        closes its own panel, and the account does not change.
+        closes its own panel, and the account does not change - so every read of the
+        panel keeps naming the OUTGOING account as active.
+
+    `view` overrides what the tree reports, for the case where no read ever names anybody.
+    The view is delivered through `_refresh_accounts`, not written onto the Context, so
+    what an attempt observed goes through the same path production uses.
     """
     r.ctx.now = start
     r.ctx.state = BotState.SCANNING
     r._maybe_switch(obs())
     if r.ctx.state is not BotState.SWITCHING:
         return False
-    r.ctx.accounts = panel() if tap_login else closed_panel()
+    r.tree_reader = FakeTreeReader([view if view is not None
+                                    else (panel() if tap_login else closed_panel())])
+    r._accounts_read_at = 0.0            # the read throttle is not what is under test
+    r._refresh_accounts(start)
     r.apply(fsm.step(obs(), r.ctx), obs())
     r.ctx.now = start + r.cfg.timings.switch_timeout + 1.0
     r.apply(fsm.step(obs(on_map=True), r.ctx), obs())
@@ -603,6 +611,20 @@ def test_a_failing_switch_is_not_retried_forever():
         f"consecutive failures must escalate the wait, not repeat it: {gaps}"
 
 
+def test_the_login_tapped_failure_gets_the_same_three_attempts(caplog):
+    """The failure the phone actually produces, driven end to end. Blanking the account
+    here used to destroy `choose_next_account`'s origin, so the run got ONE attempt and
+    then nothing - while the log promised a retry in ten minutes that could never come and
+    the "giving up" warning never fired."""
+    r = _quota_switcher()
+    with caplog.at_level(logging.WARNING, logger="pogobot"):
+        starts = _cycles(r, 24, tap_login=True)
+    assert len(starts) == runner_mod.SWITCH_MAX_FAILURES
+    gaps = [b - a for a, b in zip(starts, starts[1:])]
+    assert all(g >= runner_mod.SWITCH_BACKOFF_BASE for g in gaps) and gaps[-1] > gaps[0]
+    assert len([m for m in caplog.messages if "giving up" in m]) == 1
+
+
 def test_the_first_failure_alone_holds_off_the_next_attempt():
     r = _quota_switcher()
     t0 = r.ctx.now + 1.0
@@ -650,20 +672,69 @@ def test_a_confirmed_switch_forgives_the_earlier_failures():
         "a proven-working switch must not still be serving the old backoff"
 
 
-def test_a_timed_out_switch_that_tapped_a_login_leaves_the_account_unknown(tmp_path):
-    """`switch_login_grace` exists because a login can land late, so an expiry is exactly
-    the case where the tap may have worked after we stopped watching. Keeping the outgoing
-    name books this account's spins to an account we may not be on, under-counts the real
-    one's 24h window and lets the bot spin past a cap it cannot see."""
+def test_a_timed_out_login_is_attributed_to_whoever_the_overlay_last_named(tmp_path):
+    """`switch_login_grace` exists because a login can land late, so an expiry is the one
+    case where the outgoing name cannot simply be assumed. It is not a case of knowing
+    nothing, though: `verify` re-opens the panel and reads the asterisk right up to the
+    timeout - live, it named the outgoing account fourteen times, minutes after the tap.
+    Spending that read is what keeps the books, the 24h window and the round-robin origin
+    pointing at a real account."""
     q = SpinQuota(tmp_path / "s.jsonl", limit=10)
     r = _quota_switcher(quota=q)
     assert _fail_a_switch(r, r.ctx.now + 1.0, tap_login=True)
+    assert r.stats.account == "TrainerOne"
+
+    r.ctx.state = BotState.POKESTOP
+    r.apply([Transition(BotState.POPUP, IntentOutcome.CONFIRMED, "stop collected")], obs())
+    assert q.state("TrainerOne").used == 1
+    assert q.state().used == 0, "an unattributed bucket means the cap is tracked twice"
+
+
+def test_a_failed_switch_does_not_uncap_the_account(tmp_path, caplog):
+    """The regression that matters most. An unknown account reads the EMPTY unattributed
+    bucket, so `spins_exhausted` flips True -> False while the real account is still at
+    its cap: the FSM resumes targeting stops the game will refuse, and `_explain_refusal`
+    goes quiet because the "" bucket is not exhausted. That is the 152-refused-stops
+    misdiagnosis `quota.py` exists to prevent, reinstated by a failed switch."""
+    q = SpinQuota(tmp_path / "s.jsonl", limit=1)
+    q.record("TrainerOne")
+    r = _quota_switcher(quota=q)
+    r._update_spins_exhausted()
+    assert r.ctx.spins_exhausted is True
+
+    assert _fail_a_switch(r, r.ctx.now + 1.0, tap_login=True)
+    r._update_spins_exhausted()
+    assert r.ctx.spins_exhausted is True, "a failed switch un-capped a capped account"
+
+    r.stats.stops_out_of_range = 1          # the every-10th-refusal gate
+    with caplog.at_level(logging.WARNING, logger="pogobot"):
+        r._explain_refusal()
+    assert any("the cap, not distance" in m for m in caplog.messages)
+
+
+def test_only_a_login_nobody_ever_watched_leaves_the_account_unknown(tmp_path):
+    """No read during the attempt named an active account, so there is nothing to spend.
+    This is the case `None` is for - and it is the only one."""
+    q = SpinQuota(tmp_path / "s.jsonl", limit=10)
+    r = _quota_switcher(quota=q)
+    assert _fail_a_switch(r, r.ctx.now + 1.0, tap_login=True, view=panel(active=None))
     assert r.stats.account is None
 
     r.ctx.state = BotState.POKESTOP
     r.apply([Transition(BotState.POPUP, IntentOutcome.CONFIRMED, "stop collected")], obs())
     assert q.state("TrainerOne").used == 0, "booked to an account we cannot vouch for"
     assert q.state().used == 1, "the unattributed bucket is the honest home for it"
+
+
+def test_an_observation_from_one_attempt_is_not_spent_on_the_next():
+    """`_last_seen_active` is scoped to the attempt that observed it: carried forward, an
+    attempt that watched nothing would inherit the previous attempt's evidence."""
+    r = _quota_switcher()
+    assert _fail_a_switch(r, r.ctx.now + 1.0, tap_login=True)
+    assert r._last_seen_active == "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r._begin_switch("TrainerTwo")
+    assert r._last_seen_active is None
 
 
 def test_a_switch_that_never_tapped_a_login_keeps_the_account_name():

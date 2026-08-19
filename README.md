@@ -307,10 +307,19 @@ few hours — and re-tapping a control that is throttling you cannot make it ans
 switch that does confirm clears the record, so one bad patch does not disable switching
 for the rest of the run.
 
-If a login *was* tapped before the attempt expired, the account is treated as **unknown**
-from that point on. A login can land late — that is why the bot waits out a grace period
-before verifying at all — so after an expiry nobody can honestly say which account the
-phone is on. Spins go to the unattributed bucket until a switch confirms a name again.
+If a login *was* tapped before the attempt expired, the run is re-attributed to **whichever
+account the overlay last named as active during that attempt** — not to the account it set
+out from. A login can land late, which is why the bot waits out a grace period before
+verifying at all, so the outgoing name is no longer something to simply assume. It is not
+a guess either: verifying re-opens the panel and reads the asterisk every couple of
+seconds right up to the timeout, so a failed attempt has usually watched who is logged in
+many times over, minutes past the grace period. That reading is what the run is booked to,
+which keeps the 24-hour window pointed at the real account — a capped account stays capped
+and the "this is the cap, not distance" diagnostic keeps working — and keeps the rotation
+with an origin to rotate from, so the backoff above governs real retries.
+
+Only when no read during the attempt named anybody at all does the account become
+**unknown**, and spins go to the unattributed bucket until a switch confirms a name.
 
 **The account a run belongs to is read from the overlay, not guessed — when switching is
 on.** With `--switch-on-quota` or `--switch-every`, the bot opens the account panel once at

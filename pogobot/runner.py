@@ -119,6 +119,10 @@ class Runner:
         #: instant before which no new attempt may start. Reset by a confirmed switch.
         self._switch_failures = 0
         self._switch_blocked_until = 0.0
+        #: the account the tree named as active during the CURRENT attempt, if any read
+        #: managed to name one. Cleared when an attempt starts, so an observation from one
+        #: attempt can never be spent on the conclusions of another.
+        self._last_seen_active: Optional[str] = None
         self._paused = False
         self._pause_requested = False    # toggled by SIGUSR1 and by the display key
         self._paused_at = 0.0
@@ -496,6 +500,15 @@ class Runner:
             self.ctx.accounts = self.tree_reader.read()
         except Exception:
             log.exception("account tree read failed")
+            return
+        if self.ctx.accounts.available and self.ctx.accounts.active is not None:
+            # The asterisk is ground truth about who is logged in, and `verify` re-reads it
+            # every couple of seconds right up to the timeout - on the live failure it
+            # named the outgoing account fourteen times, the last of them minutes after the
+            # login tap. That is evidence, and `_on_switch_failed` is where it gets spent.
+            # Recorded here rather than read off `ctx.accounts` later because the handler
+            # drops that view after every tap it takes.
+            self._last_seen_active = self.ctx.accounts.active.name
 
     def choose_next_account(self) -> Optional[str]:
         """Next usable account, round-robin from the current one.
@@ -596,6 +609,7 @@ class Runner:
         # verify could run against a login tap that had not happened yet. It is also what
         # tells `_on_switch_failed` whether this attempt ever tapped a login at all.
         self.ctx.switch_login_ts = 0.0
+        self._last_seen_active = None
         self._switch_target = name
         log.info("switching account -> %s", name)
         self.enter_state(BotState.SWITCHING, IntentOutcome.CARRIED, f"switch to {name}")
@@ -612,13 +626,24 @@ class Runner:
         account just does not change. Live, that made the bot re-tap a control that had
         already refused it, every couple of minutes, for the rest of the run.
 
-        And if a login WAS tapped, we no longer know who is logged in. The whole reason
-        `switch_login_grace` exists is that a login can land late, so an expiry is exactly
-        the case where the tap may have worked after we stopped looking. Keeping the
-        outgoing name would book this account's spins against an account we might not be
-        on, under-count the real one's 24h window and let the bot spin past a cap it
-        cannot see - the ambiguity `quota.py` exists to remove. `None` is what we can
-        support, and it books to the unattributed bucket until a switch confirms a name.
+        And if a login WAS tapped, the outgoing name is no longer something we can simply
+        assume: `switch_login_grace` exists because a login can land late, so an expiry is
+        exactly the case where the tap may have worked after we stopped looking. But it is
+        not a case of knowing nothing either. `verify` re-opens the panel and reads the
+        asterisk every couple of seconds right up to the timeout, so this attempt has
+        usually WATCHED who is logged in, minutes past the grace period - and that read is
+        ground truth, not an assumption. The session is re-attributed to whatever the tree
+        last named, which is normally the outgoing account and occasionally the target.
+
+        `None` is reserved for the genuine no-evidence case: a login was tapped and no read
+        during the attempt named anybody. It is deliberately not the answer whenever a
+        login was tapped, because an unknown account reads the EMPTY unattributed bucket
+        for its quota - measured, `spins_exhausted` flipping True -> False while the real
+        account sat at its cap, the FSM resuming stop targeting the game would refuse, and
+        `_explain_refusal` going quiet because the "" bucket is not exhausted. That is the
+        152-refused-stops misdiagnosis `quota.py` was written to prevent. It also destroys
+        `choose_next_account`'s origin, so the backoff above would gate a retry that could
+        never be attempted anyway.
         """
         self._switch_failures += 1
         wait = SWITCH_BACKOFF_BASE * (2 ** (self._switch_failures - 1))
@@ -627,10 +652,16 @@ class Runner:
         # 0.0 is `_begin_switch`'s "this attempt has not tapped a login" sentinel; the FSM
         # clock is a perf_counter reading, so a real stamp is never zero.
         if self.ctx.switch_login_ts:
-            self.stats.account = None
-            log.warning("the login for %s was tapped but never confirmed; the logged-in "
-                        "account is now unknown - spins go to the unattributed bucket "
-                        "until a switch confirms one", who)
+            self.stats.account = self._last_seen_active
+            if self._last_seen_active is None:
+                log.warning("the login for %s was tapped, nothing confirmed it, and no "
+                            "read during the attempt named an active account - the "
+                            "logged-in account is now unknown and spins go to the "
+                            "unattributed bucket until a switch confirms one", who)
+            else:
+                log.warning("the login for %s was tapped but never confirmed; the overlay "
+                            "last read %s as the active account, so that is who this "
+                            "session is booked to", who, self._last_seen_active)
         if self._switch_failures >= SWITCH_MAX_FAILURES:
             log.warning("%d account switches in a row never confirmed (last target: %s); "
                         "giving up on switching for this run. The overlay accepts the "
