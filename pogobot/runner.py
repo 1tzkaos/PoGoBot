@@ -568,7 +568,10 @@ class Runner:
                         self.ledger.stage(frame, obs)
 
                 if self.quota is not None:
-                    self.ctx.spins_exhausted = self.quota.state(time.time()).exhausted
+                    # Keyword, not positional: quota.state()'s first positional slot is
+                    # now `account` (per-account quotas), so a bare timestamp here would
+                    # silently bind to the wrong parameter and never match any bucket.
+                    self.ctx.spins_exhausted = self.quota.state(now=time.time()).exhausted
                 if paused:
                     # Perception still runs so the display stays live and the trace keeps
                     # a record, but the machine does not advance and nothing is actuated.
