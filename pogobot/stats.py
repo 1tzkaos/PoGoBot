@@ -31,6 +31,8 @@ class SessionStats:
     started: float = field(default_factory=time.perf_counter)
     #: seconds spent paused, excluded from uptime so rates describe working time
     paused_seconds: float = 0.0
+    #: which account these counters belong to. None for a run that never read the tree.
+    account: Optional[str] = None
 
     # Verifiable: the bot observed the screen change, or issued the action itself.
     encounters: int = 0            # entered ENCOUNTER (a tap opened a real encounter)
@@ -117,6 +119,7 @@ class SessionStats:
             return None if r is None else round(r, 1)
 
         out = {
+            "account": self.account,
             "uptime_s": round(up, 1),
             "paused_s": round(self.paused_seconds, 1),
             "dry_run": bool(self.dry_run),
@@ -159,6 +162,9 @@ class SessionStats:
             v = s[key]
             return "" if v is None else f"{v}/h"
 
+        lines = []
+        if self.account is not None:
+            lines.append(f"  account: {self.account}")
         rows = [
             ("uptime (working)", s["uptime"], ""),
             ("paused", _hms(self.paused_seconds), ""),
@@ -176,8 +182,8 @@ class SessionStats:
             ("halts", s["halts"], ""),
         ]
         width = max(len(r[0]) for r in rows)
-        lines = [f"  {name:<{width}}  {str(value):>7}  {rate}".rstrip()
-                 for name, value, rate in rows]
+        lines.extend([f"  {name:<{width}}  {str(value):>7}  {rate}".rstrip()
+                 for name, value, rate in rows])
         lines.append("")
         lines.append("  catch attempts counts encounters where a ball was thrown, not")
         lines.append("  confirmed catches - a catch and a flee are indistinguishable to")
@@ -240,7 +246,7 @@ def append_session(path, summary: dict) -> None:
         fh.write(lead + json.dumps(rec) + "\n")
 
 
-def load_lifetime(path) -> Optional[dict]:
+def load_lifetime(path, account: Optional[str] = None) -> Optional[dict]:
     """Sum every recorded session. Returns None when there is no history yet, or when the
     history cannot be read - this only feeds an informational line, so an unreadable,
     wrong-type or half-written file must never stop the bot from running. It used to:
@@ -278,6 +284,8 @@ def load_lifetime(path) -> Optional[dict]:
             counts = [int(rec.get(k, 0) or 0) for k in COUNTER_FIELDS]
         except (TypeError, ValueError):
             continue          # a record with a non-numeric counter is skipped, not fatal
+        if account is not None and rec.get("account") != account:
+            continue
         if rec.get("dry_run"):
             # A dry run and a replay decide but send nothing, so their counters are not
             # things the bot did. Counted, not silently discarded.

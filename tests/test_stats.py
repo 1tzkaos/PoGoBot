@@ -415,3 +415,27 @@ def test_report_surfaces_a_halt():
     s = SessionStats(started=0.0)
     s.halts = 1
     assert "halts" in s.report(now=300.0)
+
+
+def test_summary_carries_the_account():
+    s = SessionStats(account="TrainerOne")
+    assert s.summary()["account"] == "TrainerOne"
+
+
+def test_lifetime_can_be_filtered_by_account(tmp_path):
+    p = tmp_path / "sessions.jsonl"
+    a = SessionStats(account="TrainerOne"); a.encounters = 10
+    b = SessionStats(account="TrainerTwo"); b.encounters = 4
+    append_session(p, a.summary(now=a.started + 600))
+    append_session(p, b.summary(now=b.started + 600))
+    assert load_lifetime(p)["encounters"] == 14
+    assert load_lifetime(p, account="TrainerOne")["encounters"] == 10
+    assert load_lifetime(p, account="TrainerTwo")["encounters"] == 4
+
+
+def test_records_without_an_account_are_kept_in_the_unfiltered_total(tmp_path):
+    p = tmp_path / "sessions.jsonl"
+    s = SessionStats(); s.encounters = 7
+    append_session(p, s.summary(now=s.started + 600))
+    assert load_lifetime(p)["encounters"] == 7
+    assert load_lifetime(p, account="TrainerOne") is None
