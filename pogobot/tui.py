@@ -57,13 +57,14 @@ class Dashboard:
     """Owns the rich Live display. A no-op if rich is unavailable."""
 
     def __init__(self, stats: SessionStats, lifetime: Optional[dict] = None,
-                 log_capacity: int = 400, quota=None):
+                 log_capacity: int = 400, quota=None, pause_file=None):
         from rich.console import Console
         from rich.live import Live
 
         self.stats = stats
         self.lifetime = lifetime
         self.quota = quota
+        self.pause_file = pause_file
         self.console = Console()
         self.pane = LogPane(log_capacity)
         self.pane.setFormatter(logging.Formatter("%(asctime)s %(message)s", "%H:%M:%S"))
@@ -146,9 +147,15 @@ class Dashboard:
             life = (f"lifetime {self.lifetime['sessions']} runs  "
                     f"enc {self.lifetime['encounters']}  "
                     f"stops {self.lifetime['stops_collected']}")
-        label = (f"[bold black on yellow] PAUSED [/] {state.value}"
-                 if getattr(self, "_paused", False)
-                 else f"[{STATE_STYLE.get(state, 'white')}]{state.value}[/]")
+        if getattr(self, "_paused", False):
+            # Say how to get out of it: the pause file is a latch, so a stale one is the
+            # likeliest reason a run "will not start".
+            how = (f"rm {self.pause_file}" if getattr(self, "pause_file", None)
+                   else "press p")
+            label = f"[bold black on yellow] PAUSED [/] [dim]{how}[/]"
+        else:
+            label = f"[{STATE_STYLE.get(state, 'white')}]{state.value}[/]"
+
         t.add_row(
             label,
             f"[bold]PoGoBot[/]  {self.stats.hud_line()}",
