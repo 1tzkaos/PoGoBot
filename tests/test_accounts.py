@@ -3,7 +3,9 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from pogobot.accounts import AccountView, FakeTreeReader, UiTreeReader, parse_dump
+from pogobot.accounts import (AccountView, FakeTreeReader, UiTreeReader,
+                              identify_account, parse_dump)
+from pogobot.effects import Tap
 
 FIX = Path(__file__).parent / "fixtures" / "uiautomator"
 WH = (1080, 2340)
@@ -164,3 +166,79 @@ def test_run_with_serial_includes_device_selector(monkeypatch):
         assert "-s" in cmd
         idx = cmd.index("-s")
         assert cmd[idx + 1] == "device123"
+
+
+class _Act:
+    """Records every effect handed to apply(), like the fake actuator every other test
+    file in this suite defines locally (tests/test_switch_runner.py, tests/test_pause.py)
+    rather than sharing one - each file states the device it is pretending to have."""
+
+    def __init__(self):
+        self.applied = []
+
+    def apply(self, effect, now=None):
+        self.applied.append(effect)
+        return True
+
+
+def _taps(act):
+    return [e for e in act.applied if isinstance(e, Tap)]
+
+
+def test_identify_account_opens_reads_and_recloses_the_panel():
+    closed, opened = view("overlay_closed.xml"), view("accounts_open.xml")
+    tr = FakeTreeReader([closed, opened])
+    act = _Act()
+    name = identify_account(tr, act, settle=0)
+    assert name == "TrainerOne"
+    assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm, opened.close_norm]
+
+
+def test_identify_account_never_taps_a_delete_button():
+    """The delete button sits ~24px from login on every row - this is the assertion
+    that matters, not just that identification works."""
+    closed, opened = view("overlay_closed.xml"), view("accounts_open.xml")
+    tr = FakeTreeReader([closed, opened])
+    act = _Act()
+    identify_account(tr, act, settle=0)
+    delete_coords = {r.delete_norm for r in opened.rows if r.delete_norm}
+    tapped_coords = {(t.x, t.y) for t in _taps(act)}
+    assert not (tapped_coords & delete_coords)
+
+
+def test_identify_account_taps_nothing_when_the_first_read_is_unavailable():
+    tr = FakeTreeReader([AccountView(available=False)])
+    act = _Act()
+    assert identify_account(tr, act, settle=0) is None
+    assert act.applied == []
+
+
+def test_identify_account_taps_nothing_without_a_located_launcher():
+    tr = FakeTreeReader([AccountView(available=True, launcher_norm=None)])
+    act = _Act()
+    assert identify_account(tr, act, settle=0) is None
+    assert act.applied == []
+
+
+def test_identify_account_still_recloses_the_panel_with_no_account_marked_active():
+    """Whatever the second read shows, the panel must be left as it was found - closed -
+    if a close control was located, even when no name was found to attribute anything to."""
+    closed = view("overlay_closed.xml")
+    opened_no_active = AccountView(rows=(), launcher_norm=closed.launcher_norm,
+                                   accounts_tab_norm=None, close_norm=(0.05, 0.11),
+                                   available=True, panel_open=True)
+    tr = FakeTreeReader([closed, opened_no_active])
+    act = _Act()
+    name = identify_account(tr, act, settle=0)
+    assert name is None
+    assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm,
+                                                opened_no_active.close_norm]
+
+
+def test_identify_account_closes_nothing_when_the_second_read_fails():
+    closed = view("overlay_closed.xml")
+    tr = FakeTreeReader([closed, AccountView(available=False)])
+    act = _Act()
+    assert identify_account(tr, act, settle=0) is None
+    # Only the opening tap - never a close guessed without a location for it.
+    assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm]

@@ -185,21 +185,19 @@ def main(argv=None) -> int:
         actuator = Actuator(screen_wh, dry_run=cfg.dry_run, serial=a.serial)
         keyboard = KeyboardPoller(serial=a.serial).start()
 
-        # One read to identify who is logged in. Not per tick - a uiautomator dump blocks
-        # for ~1s - and not required to start: a failed read just means per-account
-        # tracking (the spin quota, session stats, legacy attribution) falls back to the
-        # unattributed bucket for this run, same as before this feature existed.
-        from .accounts import UiTreeReader
+        # Open the account panel, read who is active, close it again - the one-shot
+        # equivalent of what SWITCHING already does one tap at a time. Not required to
+        # start: a failed identification just means per-account tracking (the spin
+        # quota, session stats, legacy attribution) falls back to the unattributed
+        # bucket for this run, same as before this feature existed.
+        # `identify_account` logs its own outcome; an explicit --account always wins
+        # over whatever it finds.
+        from .accounts import UiTreeReader, identify_account
         tree_reader = UiTreeReader(screen_wh, serial=a.serial)
-        view = tree_reader.read()
-        if view.available and view.active is not None:
-            account = a.account or view.active.name
-            log.info("logged in as %s (L%s), %d account(s) available",
-                     view.active.name, view.active.level, len(view.rows))
-        else:
-            log.warning("could not identify the logged-in account from the PGSharp "
-                        "overlay; per-account tracking is disabled for this run"
-                        + (f" (using --account {account})" if account else ""))
+        found = identify_account(tree_reader, actuator)
+        account = a.account or found
+        if found is None and account:
+            log.info("using --account %s (the overlay did not confirm it)", account)
 
     perceptor = Perceptor(cfg, det_model=det, cls_model=cls, device=dev,
                           square_cls_input=True)

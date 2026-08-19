@@ -20,9 +20,12 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from typing import Optional
+
+from .effects import Tap
 
 log = logging.getLogger("pogobot")
 
@@ -207,3 +210,59 @@ class FakeTreeReader:
     def read(self) -> AccountView:
         self.reads += 1
         return self._views.pop(0) if len(self._views) > 1 else self._views[0]
+
+
+#: Budget name for the two taps below, distinct from every FSM budget ("switch", "tap",
+#: ...) so a startup identification can never share - or be starved by - a live run's
+#: own rate-limit state for those budgets.
+IDENTIFY_BUDGET = "identify"
+
+
+def identify_account(tree_reader: "UiTreeReader", actuator, settle: float = 1.0) -> Optional[str]:
+    """Best-effort, one-shot: open the PGSharp account panel, read who is active, close
+    it again. Returns the active account's name, or None.
+
+    `parse_dump` only ever sees account rows while the panel is open (see
+    `AccountRow`/`AccountView` above) - a bare `tree_reader.read()` with the panel closed
+    reports `rows=()` and `active=None` even when PGSharp and the account list are both
+    completely healthy. This is the one-shot equivalent of what `Switching` already does
+    one tap at a time (`pogobot/fsm.py`), run once at startup so the very first session
+    can be attributed to a real account instead of the unattributed bucket.
+
+    Every coordinate comes from a location the tree itself just reported - `launcher_norm`
+    from the first read, `close_norm` from the second - never a constant, an offset, or a
+    row's `delete_norm`, which sits close enough to `login_norm` that a guessed tap is how
+    an account gets irreversibly deleted (see the module docstring).
+
+    A first read that is unavailable, or that does not locate the launcher, is left
+    strictly alone: nothing is tapped, and the function returns None. Whatever is found on
+    the second read, the panel is left as this function found it - closed - by tapping
+    `close_norm` if it was located; if that second read cannot be read at all, no close is
+    attempted either, for the same reason: never tap a coordinate this run did not just
+    see for itself.
+    """
+    view = tree_reader.read()
+    if not view.available or view.launcher_norm is None:
+        log.warning("could not locate the PGSharp overlay; per-account tracking is "
+                    "unavailable unless --account is given")
+        return None
+    actuator.apply(Tap(*view.launcher_norm, "identify: open the PGSharp overlay",
+                       budget=IDENTIFY_BUDGET))
+    if settle:
+        time.sleep(settle)
+    opened = tree_reader.read()
+    name = None
+    if opened.available and opened.active is not None:
+        name = opened.active.name
+        log.info("logged in as %s (L%s), %d account(s) available",
+                 name, opened.active.level, len(opened.rows))
+    elif opened.available:
+        log.warning("PGSharp overlay opened but no account is marked active; "
+                    "per-account tracking is unavailable unless --account is given")
+    else:
+        log.warning("PGSharp overlay did not respond after opening; per-account "
+                    "tracking is unavailable unless --account is given")
+    if opened.available and opened.close_norm is not None:
+        actuator.apply(Tap(*opened.close_norm, "identify: close the PGSharp overlay",
+                           budget=IDENTIFY_BUDGET))
+    return name
