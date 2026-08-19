@@ -56,6 +56,16 @@ def test_cli_call_sites_bind_to_the_real_signature(name):
             pytest.fail(f"cli.py calls {name}(...) with arguments it does not accept: {exc}")
 
 
+def test_cli_hands_the_runner_what_account_switching_needs():
+    """Both are startup-only. The roster can never be re-read during a run - the PGSharp
+    panel is shut, so a live read lists no accounts - and without the reader a switch
+    cannot be driven or confirmed. Dropping either from the call leaves switching inert
+    with every other test still green, which is how it shipped inert once already."""
+    keywords, _ = _calls("Runner")[0]
+    assert "tree_reader" in keywords, "the runner cannot drive a switch without it"
+    assert "roster" in keywords, "the runner cannot name a target without it"
+
+
 def test_every_parser_flag_is_reachable():
     """A flag that main() never reads is a lie in --help."""
     src = CLI.read_text()

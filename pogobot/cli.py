@@ -169,6 +169,7 @@ def main(argv=None) -> int:
 
     tree_reader = None
     account = a.account
+    roster: tuple[str, ...] = ()
     if a.replay:
         source = ReplaySource(a.replay, interval=a.replay_interval)
         actuator = NullActuator()
@@ -194,7 +195,12 @@ def main(argv=None) -> int:
         # over whatever it finds.
         from .accounts import UiTreeReader, identify_account
         tree_reader = UiTreeReader(screen_wh, serial=a.serial)
-        found = identify_account(tree_reader, actuator)
+        panel = identify_account(tree_reader, actuator)
+        # The roster is cached from this one read and never re-enumerated: the panel is
+        # closed for the rest of the run, so a live read would list no accounts at all.
+        # An account added to PGSharp mid-run is therefore not noticed until a restart.
+        found = panel.active.name if panel is not None and panel.active else None
+        roster = panel.names if panel is not None else ()
         account = a.account or found
         if found is None and account:
             log.info("using --account %s (the overlay did not confirm it)", account)
@@ -256,7 +262,8 @@ def main(argv=None) -> int:
                     trace_path=trace, display=not a.no_display, stats_path=stats_path,
                     dashboard=dashboard, encounter_dump=a.collect_encounters,
                     dialogue_dump=a.collect_dialogues,
-                    quota=quota, pause_file=a.pause_file, tree_reader=tree_reader)
+                    quota=quota, pause_file=a.pause_file, tree_reader=tree_reader,
+                    roster=roster)
     if dashboard is None:
         # No dashboard means Runner kept the SessionStats it built itself; name it here
         # so the very first session's spins are booked under the identified account rather

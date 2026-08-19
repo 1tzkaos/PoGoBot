@@ -9,7 +9,11 @@ Each of these has a failure mode that a green suite would otherwise hide:
   * only a CONFIRMED switch rolls the session over, so an attempt that times out cannot
     invent a session row or reset a counter;
   * `spins_exhausted` must describe the account we are actually on. Nothing asserted that
-    before, which is how one wrong argument at that line could read as good standing.
+    before, which is how one wrong argument at that line could read as good standing;
+  * and the decision to switch must survive the shape the tree actually has during a run -
+    `available=True, panel_open=False, rows=0` - because the PGSharp panel is closed
+    except while SWITCHING is driving it. Deciding from live rows made the whole feature
+    inert on the phone: 45 SCANNING ticks, 0 switches.
 """
 import json
 import logging
@@ -82,6 +86,16 @@ def make_runner(cfg=DEFAULT, **kw):
 #: different screen - `obs(on_map=False)` is still on the map.
 def off_map():
     return obs(screen="Menu", conf=0.99)
+
+
+def closed_panel():
+    """What the tree reports during a normal run, measured on the device: the overlay is
+    there, its panel is shut, and no account row is visible to anyone."""
+    return AccountView(rows=(), launcher_norm=(0.12, 0.05), accounts_tab_norm=None,
+                       close_norm=None, available=True, panel_open=False)
+
+
+ROSTER = ("TrainerOne", "TrainerTwo")
 
 
 # ------------------------------------------------------------------ selection
@@ -159,10 +173,39 @@ def test_one_account_is_never_a_switch_target(tmp_path):
     assert r.choose_next_account(single) is None
 
 
-def test_a_view_we_could_not_read_is_not_a_reason_to_switch():
-    r = make_runner(tree_reader=FakeTreeReader([AccountView(available=False)]))
-    assert r.choose_next_account(AccountView(available=False)) is None
-    assert r.choose_next_account(None) is None
+def test_a_view_without_rows_falls_back_to_the_cached_roster():
+    """A live view is a bonus, not the source of truth: it only carries rows while the
+    panel is open, which during a run it is not."""
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    assert r.choose_next_account(closed_panel()) == "TrainerTwo"
+    assert r.choose_next_account(AccountView(available=False)) == "TrainerTwo"
+    assert r.choose_next_account(None) == "TrainerTwo"
+
+
+def test_an_empty_roster_is_never_a_guess():
+    """Nothing was ever enumerated, so there is no second account to name."""
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]))
+    r.stats.account = "TrainerOne"
+    assert r.choose_next_account(closed_panel()) is None
+    assert r.choose_next_account() is None
+
+
+def test_an_account_the_roster_does_not_contain_is_no_origin_to_rotate_from():
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "SomebodyElse"
+    assert r.choose_next_account() is None
+    r.stats.account = None
+    assert r.choose_next_account() is None
+
+
+def test_the_quota_rules_apply_to_the_cached_roster_too(tmp_path):
+    """The roster changes where the names come from, nothing about which one is usable."""
+    q = SpinQuota(tmp_path / "s.jsonl", limit=1)
+    q.record("TrainerTwo")
+    r = make_runner(quota=q, tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    assert r.choose_next_account() is None
 
 
 # ------------------------------------------------------------------ refresh cost
@@ -228,6 +271,18 @@ def test_a_stale_view_cannot_toggle_the_overlay_shut():
     assert [t.reason for t in taps] == ["switch: open the PGSharp overlay"]
 
 
+def test_a_begun_switch_forgets_whatever_view_it_had():
+    """Every tap in SWITCHING comes from a location the tree reported; a view read before
+    the switch started describes a panel that was shut, and its coordinates are a guess by
+    the time the handler acts. The handler waits while the view is None."""
+    r = make_runner(tree_reader=FakeTreeReader([panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.accounts = panel()
+    r._begin_switch("TrainerTwo")
+    assert r.ctx.accounts is None
+
+
 def test_an_actuation_outside_a_switch_keeps_the_view():
     r = make_runner(tree_reader=FakeTreeReader([panel()]))
     r.ctx.state = BotState.SCANNING
@@ -239,7 +294,8 @@ def test_an_actuation_outside_a_switch_keeps_the_view():
 # ------------------------------------------------------------------ triggers
 
 def test_switching_stays_off_by_default():
-    r = make_runner(tree_reader=FakeTreeReader([panel()]))
+    r = make_runner(tree_reader=FakeTreeReader([panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
     r.ctx.spins_exhausted = True
     r._maybe_switch(obs())
@@ -248,7 +304,8 @@ def test_switching_stays_off_by_default():
 
 def test_switching_is_never_started_outside_scanning():
     r = make_runner(DEFAULT.scaled(switch_on_quota=True),
-                    tree_reader=FakeTreeReader([panel()]))
+                    tree_reader=FakeTreeReader([panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
     for state in (BotState.ENCOUNTER, BotState.ROCKET, BotState.POKESTOP,
                   BotState.TARGETING, BotState.POPUP, BotState.RECOVERING):
         r.ctx.state = state
@@ -261,7 +318,8 @@ def test_a_switch_never_begins_without_the_map():
     """SCANNING is reachable without the map - Recovering gives up into it - and the first
     thing a switch does is tap an overlay we can only trust when the map is up."""
     reader = FakeTreeReader([panel()])
-    r = make_runner(DEFAULT.scaled(switch_on_quota=True), tree_reader=reader)
+    r = make_runner(DEFAULT.scaled(switch_on_quota=True), tree_reader=reader, roster=ROSTER)
+    r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
     r.ctx.spins_exhausted = True
     r._maybe_switch(off_map())
@@ -269,47 +327,56 @@ def test_a_switch_never_begins_without_the_map():
     assert reader.reads == 0
 
 
-def test_the_quota_trigger_starts_a_switch_from_scanning():
-    reader = FakeTreeReader([panel(active="TrainerOne")])
-    r = make_runner(DEFAULT.scaled(switch_on_quota=True), tree_reader=reader)
+def test_a_trigger_fires_from_the_cached_roster_while_the_panel_is_closed():
+    """The bug the live run found. The tree only lists accounts while the panel is open,
+    and the panel is closed for the whole run - so a decision that needed live rows never
+    fired once in 3.5 minutes of SCANNING. The roster comes from the startup read instead,
+    and costs no dump at all."""
+    reader = FakeTreeReader([closed_panel()])
+    r = make_runner(DEFAULT.scaled(switch_on_quota=True), tree_reader=reader, roster=ROSTER)
+    r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
+    r.ctx.accounts = closed_panel()          # what a live refresh would have left behind
     r.ctx.spins_exhausted = True
     r._maybe_switch(obs())
     assert r.ctx.state is BotState.SWITCHING
     assert r.ctx.switch_target == "TrainerTwo"
     assert r.ctx.switch_phase == "open"
-    assert reader.reads == 1
+    assert reader.reads == 0, "the decision must not pay for a ~1s blocking dump"
 
 
 def test_no_tree_reader_means_no_switching():
-    r = make_runner(DEFAULT.scaled(switch_on_quota=True))
+    r = make_runner(DEFAULT.scaled(switch_on_quota=True), roster=ROSTER)
+    r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
     r.ctx.spins_exhausted = True
     r._maybe_switch(obs())
     assert r.ctx.state is BotState.SCANNING
 
 
-def test_an_unsatisfiable_trigger_does_not_dump_the_tree_every_frame(tmp_path):
-    """`spins_exhausted` stays true for hours, and selection can legitimately answer None
-    the whole time. Forcing the ~1s dump on every one of those ticks stalls an 8fps loop."""
+def test_a_trigger_that_can_never_be_satisfied_never_reads_the_tree(tmp_path):
+    """`spins_exhausted` stays true for hours and selection can answer None the whole
+    time. That used to force a ~1s blocking dump - throttled to every 30s, but still a
+    stall in an 8fps loop - and it never learned anything: the panel is shut."""
     q = SpinQuota(tmp_path / "s.jsonl", limit=1)
     q.record("TrainerTwo")                      # the only alternative is capped
-    reader = FakeTreeReader([panel(active="TrainerOne")])
-    r = make_runner(DEFAULT.scaled(switch_on_quota=True), quota=q, tree_reader=reader)
+    reader = FakeTreeReader([closed_panel()])
+    r = make_runner(DEFAULT.scaled(switch_on_quota=True), quota=q, tree_reader=reader,
+                    roster=ROSTER)
+    r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
     r.ctx.spins_exhausted = True
     for _ in range(20):
         r._maybe_switch(obs())
     assert r.ctx.state is BotState.SCANNING
-    assert reader.reads == 1
-    r._real += runner_mod.SWITCH_PROBE_EVERY + 1.0
-    r._maybe_switch(obs())
-    assert reader.reads == 2, "the probe must resume eventually, just not every frame"
+    assert reader.reads == 0
 
 
 def test_the_clock_trigger_waits_out_its_first_interval():
-    reader = FakeTreeReader([panel(active="TrainerOne")])
-    r = make_runner(DEFAULT.scaled(switch_every_minutes=1.0), tree_reader=reader)
+    reader = FakeTreeReader([closed_panel()])
+    r = make_runner(DEFAULT.scaled(switch_every_minutes=1.0), tree_reader=reader,
+                    roster=ROSTER)
+    r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
     r._maybe_switch(obs())
     assert r.ctx.state is BotState.SCANNING, "a rotation is not due in the first tick"

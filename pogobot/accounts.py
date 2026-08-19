@@ -218,9 +218,18 @@ class FakeTreeReader:
 IDENTIFY_BUDGET = "identify"
 
 
-def identify_account(tree_reader: "UiTreeReader", actuator, settle: float = 1.0) -> Optional[str]:
-    """Best-effort, one-shot: open the PGSharp account panel, read who is active, close
-    it again. Returns the active account's name, or None.
+def identify_account(tree_reader: "UiTreeReader", actuator,
+                     settle: float = 1.0) -> Optional[AccountView]:
+    """Best-effort, one-shot: open the PGSharp account panel, read it, close it again.
+    Returns the panel AS READ - who is active AND which accounts exist - or None when it
+    could not be read at all.
+
+    The roster matters as much as the active name, which is why the whole view comes back
+    rather than one string: the panel is shut for the rest of the run, so this is the only
+    enumeration of the accounts there are. `Runner` decides which account to switch to
+    from that cache, because a live read at any other moment reports `rows=()` however
+    healthy PGSharp is - measured on the device as `available=True, panel_open=False,
+    rows=0`, which is what made account switching never fire at all.
 
     `parse_dump` only ever sees account rows while the panel is open (see
     `AccountRow`/`AccountView` above) - a bare `tree_reader.read()` with the panel closed
@@ -267,18 +276,25 @@ def identify_account(tree_reader: "UiTreeReader", actuator, settle: float = 1.0)
             time.sleep(settle)
         opened = tree_reader.read()
 
-    name = None
-    if opened.available and opened.active is not None:
-        name = opened.active.name
-        log.info("logged in as %s (L%s), %d account(s) available",
-                 name, opened.active.level, len(opened.rows))
-    elif opened.available:
-        log.warning("PGSharp overlay opened but no account is marked active; "
-                    "per-account tracking is unavailable unless --account is given")
-    else:
+    if not opened.available:
         log.warning("PGSharp overlay did not respond after opening; per-account "
                     "tracking is unavailable unless --account is given")
-    if opened.available and opened.close_norm is not None:
+        return None
+    if opened.active is not None:
+        log.info("logged in as %s (L%s), %d account(s) available",
+                 opened.active.name, opened.active.level, len(opened.rows))
+    elif not opened.panel_open:
+        # Never report an opening that did not happen. A dry run suppresses the tap, so
+        # the panel is exactly as it was found, and "opened but nobody is active" would
+        # describe a screen nobody ever saw.
+        log.warning("the PGSharp overlay did not open%s; per-account tracking is "
+                    "unavailable unless --account is given",
+                    " (taps are suppressed in a dry run)"
+                    if getattr(actuator, "dry_run", False) else "")
+    else:
+        log.warning("PGSharp overlay opened but no account is marked active; "
+                    "per-account tracking is unavailable unless --account is given")
+    if opened.close_norm is not None:
         actuator.apply(Tap(*opened.close_norm, "identify: close the PGSharp overlay",
                            budget=IDENTIFY_BUDGET))
-    return name
+    return opened

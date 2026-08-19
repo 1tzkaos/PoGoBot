@@ -58,12 +58,6 @@ ENCOUNTER_RING_SECONDS = 6.0
 # happens during a switch and nowhere else.
 ACCOUNTS_REFRESH = 2.5
 
-# How often a switch trigger that is due but cannot be satisfied may pay for a tree read.
-# `spins_exhausted` stays true for hours and selection can legitimately answer "nowhere
-# useful to go" the whole time, so without this the forced probe below is a ~1s blocking
-# dump on every tick of an 8fps loop.
-SWITCH_PROBE_EVERY = 30.0
-
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
 
@@ -75,7 +69,8 @@ class Runner:
                  dashboard=None, encounter_dump: Optional[Path] = None,
                  dialogue_dump: Optional[Path] = None,
                  quota: Optional[SpinQuota] = None,
-                 pause_file: Optional[Path] = None, tree_reader=None):
+                 pause_file: Optional[Path] = None, tree_reader=None,
+                 roster: tuple[str, ...] = ()):
         self.cfg = cfg
         self.source = source
         self.actuator = actuator
@@ -90,8 +85,11 @@ class Runner:
         self.quota = quota
         self.pause_file = pause_file
         self.tree_reader = tree_reader
+        # The accounts that exist, enumerated once at startup with the panel open. It is
+        # not refreshed because it cannot be: outside a switch the panel is shut and the
+        # tree lists no rows at all, so a live read would only ever shrink this to nothing.
+        self.roster = tuple(roster)
         self._accounts_read_at = 0.0
-        self._switch_probe_at = 0.0
         self._switch_target: Optional[str] = None
         self._paused = False
         self._pause_requested = False    # toggled by SIGUSR1 and by the display key
@@ -448,17 +446,16 @@ class Runner:
 
     # ---------------------------------------------------------------- accounts
 
-    def _refresh_accounts(self, real: float, force: bool = False) -> None:
-        """Re-read the UI tree. Only during a switch: the dump blocks for ~1s.
+    def _refresh_accounts(self, real: float) -> None:
+        """Re-read the UI tree. Only during a switch: the dump blocks for ~1s, and it is
+        only during a switch that the panel is open for it to see anything.
 
         Paced on the REAL clock, like every other pacing decision in the loop: a paused run
         freezes `ctx.now`, and a frozen clock never reaches its own next deadline.
         """
-        if self.tree_reader is None:
+        if self.tree_reader is None or self.ctx.state is not BotState.SWITCHING:
             return
-        if not force and self.ctx.state is not BotState.SWITCHING:
-            return
-        if not force and real - self._accounts_read_at < ACCOUNTS_REFRESH:
+        if real - self._accounts_read_at < ACCOUNTS_REFRESH:
             return
         self._accounts_read_at = real
         try:
@@ -466,22 +463,35 @@ class Runner:
         except Exception:
             log.exception("account tree read failed")
 
-    def choose_next_account(self, view) -> Optional[str]:
+    def choose_next_account(self, view=None) -> Optional[str]:
         """Next usable account, round-robin from the current one.
+
+        Named accounts come from the startup roster, and who we are from the session the
+        counters belong to, because the live tree can only answer either question while
+        the PGSharp panel is open - which, outside a switch, it never is. A view that does
+        carry rows is preferred where one exists: during SWITCHING it is refreshed every
+        few seconds and is the more current of the two.
+
+        A stale roster cannot produce a wrong tap. `Switching.step` looks the target up
+        with `by_name` on a view read AFTER the switch began, so an account that is gone
+        is simply not found, nothing is tapped, and the attempt times out.
 
         Everyone capped is not a reason to stop: the cap blocks stops, not catches
         (`pick_target` skips only STOP_TARGETS when `spins_exhausted`). So we move to
         whichever account frees up first and keep catching there while it does.
         """
-        if view is None or not view.available or len(view.rows) < 2:
+        if view is not None and view.available and view.rows:
+            names = list(view.names)
+            current = view.active.name if view.active else None
+        else:
+            names = list(self.roster)
+            current = self.stats.account
+        # Anything less than a known origin inside a known roster is a guess, and the guess
+        # would be to log out of an account that was working: rows with no asterisk, a
+        # session that never learned its name, a name nothing enumerated, or nowhere else
+        # to go. A missing signal means do nothing.
+        if current is None or current not in names or len(names) < 2:
             return None
-        if view.active is None:
-            # Rows but no asterisk: we do not know which account we are on, so there is no
-            # defensible origin to rotate from, and guessing one could switch away from an
-            # account that was working. A missing signal means do nothing.
-            return None
-        names = list(view.names)
-        current = view.active.name
         start = names.index(current) + 1
         order = [n for n in names[start:] + names[:start] if n != current]
         if not order:
@@ -521,15 +531,10 @@ class Runner:
                      and self.ctx.now >= self._next_rotation)
         if not (due_quota or due_clock):
             return
-        # A due trigger can be unsatisfiable for hours (every account capped, or an
-        # unreadable overlay), so the forced read is rate-limited rather than paid for on
-        # every tick. A switch that actually proceeds is unaffected - it only ever needs
-        # the one read.
-        if self._real - self._switch_probe_at < SWITCH_PROBE_EVERY:
-            return
-        self._switch_probe_at = self._real
-        self._refresh_accounts(self._real, force=True)
-        target = self.choose_next_account(self.ctx.accounts)
+        # Decided from the cached roster, with no tree read at all. Probing here used to
+        # cost a ~1s blocking dump and could never learn anything: with the panel shut the
+        # tree lists no accounts, so the answer was always "nowhere to go".
+        target = self.choose_next_account()
         if target is None:
             return
         self._begin_switch(target)
@@ -539,6 +544,11 @@ class Runner:
         # spells out: SWITCHING owns the screen for up to 120s and fills it with post-login
         # screens, so anything that happens after is not evidence that our tap caused it.
         self._abandon_intent("switching account before the screen answered")
+        # Whatever view we last held describes a panel that was shut, or a panel as it
+        # looked during some earlier switch. Every tap in SWITCHING comes from a location
+        # the tree just reported - `login_norm` sits ~24px from `delete_norm` - so the
+        # handler starts from nothing and waits for the first refresh of this switch.
+        self.ctx.accounts = None
         self.ctx.switch_target = name
         self.ctx.switch_phase = "open"
         self._switch_target = name

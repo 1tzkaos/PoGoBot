@@ -1,3 +1,4 @@
+import logging
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import MagicMock, call
@@ -174,8 +175,11 @@ class _Act:
     file in this suite defines locally (tests/test_switch_runner.py, tests/test_pause.py)
     rather than sharing one - each file states the device it is pretending to have."""
 
-    def __init__(self):
+    def __init__(self, dry_run=False):
         self.applied = []
+        # The real Actuator returns True in a dry run and sends nothing, so a caller that
+        # wants to know whether the screen actually changed has to read this.
+        self.dry_run = dry_run
 
     def apply(self, effect, now=None):
         self.applied.append(effect)
@@ -190,8 +194,11 @@ def test_identify_account_opens_reads_and_recloses_the_panel():
     closed, opened = view("overlay_closed.xml"), view("accounts_open.xml")
     tr = FakeTreeReader([closed, opened])
     act = _Act()
-    name = identify_account(tr, act, settle=0)
-    assert name == "TrainerOne"
+    read = identify_account(tr, act, settle=0)
+    assert read.active.name == "TrainerOne"
+    # The roster leaves with it: the panel is shut for the rest of the run, so this one
+    # read is the only chance to learn which accounts exist.
+    assert read.names == ("TrainerOne", "TrainerTwo")
     assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm, opened.close_norm]
 
 
@@ -234,8 +241,8 @@ def test_identify_account_still_recloses_the_panel_with_no_account_marked_active
                                    available=True, panel_open=True)
     tr = FakeTreeReader([closed, opened_no_active])
     act = _Act()
-    name = identify_account(tr, act, settle=0)
-    assert name is None
+    read = identify_account(tr, act, settle=0)
+    assert read.active is None and read.names == ()
     assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm,
                                                 opened_no_active.close_norm]
 
@@ -259,8 +266,8 @@ def test_identify_account_selects_the_accounts_tab_when_the_panel_opens_on_anoth
     opened_wrong_tab = replace(opened_right_tab, rows=())
     tr = FakeTreeReader([closed, opened_wrong_tab, opened_right_tab])
     act = _Act()
-    name = identify_account(tr, act, settle=0)
-    assert name == "TrainerOne"
+    read = identify_account(tr, act, settle=0)
+    assert read.active.name == "TrainerOne"
     assert [(t.x, t.y) for t in _taps(act)] == [
         closed.launcher_norm,
         opened_wrong_tab.accounts_tab_norm,
@@ -280,7 +287,21 @@ def test_identify_account_does_not_tap_the_accounts_tab_when_rows_are_already_vi
     opened = view("accounts_open.xml")
     tr = FakeTreeReader([closed, opened])
     act = _Act()
-    name = identify_account(tr, act, settle=0)
-    assert name == "TrainerOne"
+    read = identify_account(tr, act, settle=0)
+    assert read.active.name == "TrainerOne"
     assert [(t.x, t.y) for t in _taps(act)] == [closed.launcher_norm, opened.close_norm]
     assert tr.reads == 2
+
+
+def test_identify_account_does_not_claim_to_have_opened_a_panel_it_never_opened(caplog):
+    """In a dry run every tap is suppressed, so the panel stays shut and the second read
+    is the same closed overlay. Reporting that as "overlay opened but no account is marked
+    active" asserts an action that never happened."""
+    closed = view("overlay_closed.xml")
+    tr = FakeTreeReader([closed, closed])
+    act = _Act(dry_run=True)
+    with caplog.at_level(logging.WARNING, logger="pogobot"):
+        read = identify_account(tr, act, settle=0)
+    assert read.active is None
+    assert not any("overlay opened" in m for m in caplog.messages)
+    assert any("did not open" in m and "dry run" in m for m in caplog.messages)
