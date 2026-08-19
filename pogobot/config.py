@@ -78,6 +78,14 @@ class Timings:
     frame_max_age: float = 2.0
     stuck_watchdog: float = 120.0
 
+    #: gap between taps while driving the PGSharp overlay
+    switch_tap: float = 2.0
+    #: gap between attempts to clear a post-login screen
+    switch_clear: float = 2.5
+    #: measured: login tap -> post-login modal was ~14s. The budget is generous because
+    #: the alternative to waiting is tapping blindly at an unknown screen.
+    switch_timeout: float = 120.0
+
 
 @dataclass(frozen=True)
 class Cooldowns:
@@ -161,6 +169,11 @@ class Config:
     restock_max_seconds: float = 600.0
     auto_rotate: bool = True
     dry_run: bool = False
+
+    #: switch accounts when the current one exhausts its 24h spin cap
+    switch_on_quota: bool = False
+    #: rotate accounts every N minutes regardless of state (0 disables)
+    switch_every_minutes: float = 0.0
 
     range_scale: float = 1.0
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+from .accounts import AccountView
 from .config import Config
 from .effects import (
     Back,
@@ -77,6 +78,10 @@ class Context:
     #: set by the runner from the rolling 24h spin quota
     spins_exhausted: bool = False
     taps_in_state: int = 0
+    #: refreshed by the runner from the UI tree; None until first read
+    accounts: Optional[AccountView] = None
+    switch_target: Optional[str] = None
+    switch_phase: str = "open"
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
@@ -364,6 +369,76 @@ class Rocket(Handler):
         ]
 
 
+class Switching(Handler):
+    """Log into another account through the PGSharp overlay.
+
+    Phases advance through `switch_phase` on the Context rather than through nested
+    conditionals, so each tick makes exactly one decision from observable state.
+
+    The `settle` phase does NOT identify the screens that appear after a login. It cannot:
+    Willow's dialogue classifies as Rocket @0.66, and the optical signal that separates a
+    dialogue box fires on 5/5 ChooseParty frames, which is a real Rocket screen. What
+    justifies clearing them is context - we just tapped a login button, so whatever is on
+    screen is between us and the map. That claim expires with the state timeout.
+    """
+
+    state = BotState.SWITCHING
+    timeout_s = 120.0
+
+    def step(self, obs, ctx):
+        if ctx.switch_phase == "settle":
+            return self._settle(obs, ctx)
+        cfg = ctx.cfg
+        v = ctx.accounts
+        if v is None or not v.available:
+            return []                    # could not look; the timeout owns the outcome
+        if not ctx.ready("switch", cfg.timings.switch_tap):
+            return []
+        if not v.panel_open:
+            if v.launcher_norm is None:
+                return []
+            return [Tap(*v.launcher_norm, "switch: open the PGSharp overlay", budget="switch")]
+        row = v.by_name(ctx.switch_target) if ctx.switch_target else None
+        if row is None:
+            if v.accounts_tab_norm is None:
+                return []
+            return [Tap(*v.accounts_tab_norm, "switch: select the Accounts tab", budget="switch")]
+        if row.active:
+            return [SetFlag("switch_phase", "settle"),
+                    Note(f"already logged into {row.name}; waiting for the map")]
+        return [
+            SetFlag("switch_phase", "settle"),
+            Note(f"switching to {row.name}", "info"),
+            Tap(*row.login_norm, f"switch: log into {row.name}", budget="switch"),
+        ]
+
+    def _settle(self, obs, ctx):
+        cfg = ctx.cfg
+        v = ctx.accounts
+        confirmed = (v is not None and v.available
+                     and v.active is not None and v.active.name == ctx.switch_target)
+        if obs.on_map and confirmed:
+            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                               f"logged into {ctx.switch_target}")]
+        if obs.on_map:
+            return []                    # map is back; waiting for the tree to agree
+        if obs.close_button_xy is not None and ctx.ready("close", cfg.timings.close_menu):
+            return [Tap(*obs.close_button_xy, "switch: close a post-login overlay",
+                        budget="close")]
+        if ctx.ready("back", cfg.timings.switch_clear):
+            # Measured: one BACK dismissed the post-login news modal. BACK carries no
+            # coordinate at all, which is why it is preferred to tapping a screen whose
+            # layout we have exactly one example of.
+            return [Back("switch: dismiss a post-login screen")]
+        return []
+
+    def on_timeout(self, obs, ctx):
+        return [
+            Note(f"account switch to {ctx.switch_target} never confirmed", "warn"),
+            Transition(BotState.RECOVERING, IntentOutcome.EXPIRED, "switch timeout"),
+        ]
+
+
 class Popup(Handler):
     """Close a closable overlay. Only ever taps a button it actually located."""
 
@@ -414,7 +489,8 @@ class Halted(Handler):
 
 
 HANDLERS = {h.state: h() for h in
-            (Boot, Scanning, Targeting, Encounter, Pokestop, Rocket, Popup, Recovering, Halted)}
+            (Boot, Scanning, Targeting, Encounter, Pokestop, Rocket, Switching, Popup,
+             Recovering, Halted)}
 
 # Startup contract: a state without a handler, timeout, or on_timeout is a bug, not a livelock.
 for _s in BotState:
@@ -449,6 +525,11 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     """
     cfg = ctx.cfg
     if ctx.state is BotState.HALTED:
+        return None
+    if ctx.state is BotState.SWITCHING:
+        # A switch owns the screen until it confirms or times out. Post-login screens
+        # look like Rocket and like encounters; following them abandons the switch
+        # half-done, logged into neither account cleanly.
         return None
     # While a Rocket fight is in progress, an encounter-looking screen is almost always
     # part of the fight. Only the map may pull us out; the reward encounter is picked up
