@@ -82,6 +82,9 @@ class Context:
     accounts: Optional[AccountView] = None
     switch_target: Optional[str] = None
     switch_phase: str = "open"
+    #: ctx.now at the moment the current login tap landed; 0.0 means none has (yet, or at
+    #: all - the target was already active and no login was ever tapped)
+    switch_login_ts: float = 0.0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
@@ -375,9 +378,8 @@ class Switching(Handler):
     Phases advance through `switch_phase` on the Context rather than through nested
     conditionals, so each tick makes exactly one decision from observable state: "open"
     drives the overlay to the target's login button, "settle" waits out whatever the
-    login produces until the map is back, "verify" re-opens the overlay to read the
-    asterisk, and "failed" is terminal - a login that did not take, left for the state
-    timeout to own rather than retried blind.
+    login produces until the map is back AND the login has had time to land, and "verify"
+    re-opens the overlay to read the asterisk before confirming anything.
 
     `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
     dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
@@ -385,14 +387,21 @@ class Switching(Handler):
     clearing them is context - we just tapped a login button, so whatever is on screen is
     between us and the map. That claim expires with the state timeout.
 
-    The map coming back is not proof the switch worked, either. PGSharp shuts its own
-    panel as part of logging in, so every post-login read of the account list comes back
-    `rows=0` regardless of whether the login succeeded - measured live, polling every few
-    seconds from the login tap through the full 120s timeout never once saw a row, so a
-    version that trusted `obs.on_map` alone confirmed nothing and expired into RECOVERING
-    on every real run while the device sat logged into the new account. `verify` is the
-    fix: it re-opens the panel and reads the asterisk, the only ground truth for who is
-    actually logged in, before anything is confirmed.
+    The map coming back is not proof the switch worked, either, for two SEPARATE reasons
+    that both had to be fixed. First: PGSharp shuts its own panel as part of logging in,
+    so every post-login read of the account list comes back `rows=0` regardless of
+    whether the login succeeded - `verify` exists to re-open it and read the asterisk,
+    the only ground truth for who is actually logged in. Second, and more subtly: the
+    OUTGOING account's map can still be on screen for a second or two after the login tap
+    - the game has not torn it down yet - so `obs.on_map` can turn true well before the
+    login has actually landed (measured: ~14s tap-to-modal). A version that raced this
+    re-opened the panel at +6s, correctly read the OUTGOING account still active, and
+    concluded the switch had failed - when attempt 2 immediately after confirmed almost
+    instantly, proving attempt 1 had simply not been given time to finish. That is why
+    `_settle` waits out `Timings.switch_login_grace` before ever handing off to `verify`,
+    and why a mismatch inside `verify` is never treated as final (see `_verify`) - "someone
+    else is active" at one instant cannot be told apart from "not yet" from that instant
+    alone. Only the 120s state timeout is allowed to end a switch that never confirms.
     """
 
     state = BotState.SWITCHING
@@ -403,8 +412,6 @@ class Switching(Handler):
             return self._settle(obs, ctx)
         if ctx.switch_phase == "verify":
             return self._verify(obs, ctx)
-        if ctx.switch_phase == "failed":
-            return []                    # login did not take; the timeout owns the outcome
         cfg = ctx.cfg
         v = ctx.accounts
         if v is None or not v.available:
@@ -421,10 +428,14 @@ class Switching(Handler):
                 return []
             return [Tap(*v.accounts_tab_norm, "switch: select the Accounts tab", budget="switch")]
         if row.active:
+            # Already on the target - no login tap is coming, so there is nothing for
+            # the grace period to wait out. Leaving `switch_login_ts` at its 0.0 default
+            # means `_settle` treats the grace as already satisfied.
             return [SetFlag("switch_phase", "settle"),
                     Note(f"already logged into {row.name}; waiting for the map")]
         return [
             SetFlag("switch_phase", "settle"),
+            SetFlag("switch_login_ts", ctx.now),
             Note(f"switching to {row.name}", "info"),
             Tap(*row.login_norm, f"switch: log into {row.name}", budget="switch"),
         ]
@@ -441,9 +452,13 @@ class Switching(Handler):
                 # layout we have exactly one example of.
                 return [Back("switch: dismiss a post-login screen")]
             return []
-        # The map is back, but that proves nothing on its own (see class docstring).
-        # Hand off to verify in the same tick rather than spending one just to flip the
-        # phase - `_verify` reads whatever view is on the Context right now.
+        if ctx.now - ctx.switch_login_ts < cfg.timings.switch_login_grace:
+            # The outgoing account's map can reappear before the login has actually
+            # landed (see class docstring) - on_map alone is not the signal to act on.
+            return []
+        # The map is back and the login has had time to land. Hand off to verify in the
+        # same tick rather than spending one just to flip the phase - `_verify` reads
+        # whatever view is on the Context right now.
         return [SetFlag("switch_phase", "verify")] + self._verify(obs, ctx)
 
     def _verify(self, obs, ctx):
@@ -452,6 +467,11 @@ class Switching(Handler):
         after every tap taken while SWITCHING, so a `None` or an already-stale-looking
         view here just means the next refresh has not landed yet, and doing nothing is
         the correct response either way.
+
+        A mismatch here is never latched as final - see class docstring for why "someone
+        else is active" cannot be told apart from "not yet" from a single read. It closes
+        what it can and returns, and the next tick tries again from scratch; only the
+        120s state timeout is allowed to end a switch that never confirms.
         """
         cfg = ctx.cfg
         v = ctx.accounts
@@ -480,15 +500,14 @@ class Switching(Handler):
             effects.append(Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
                                       f"logged into {ctx.switch_target}"))
             return effects
-        # Someone else is active: the login did not take. A second login tap here would
-        # be blind - close what we can and let the 120s timeout own the outcome.
-        effects = [
-            SetFlag("switch_phase", "failed"),
-            Note(f"switch to {ctx.switch_target} did not take; "
-                f"{v.active.name if v.active else 'no one'} is active", "warn"),
-        ]
+        # Someone else is active. The login is asynchronous, so this is not evidence of
+        # failure by itself - only that it has not landed as of this read. A second login
+        # tap here would be blind regardless, so close what we can and try again later;
+        # the 120s timeout, not this check, is what ends a switch that truly never lands.
+        effects = [Note(f"switch to {ctx.switch_target} not yet confirmed; "
+                        f"{v.active.name if v.active else 'no one'} still active", "info")]
         if v.close_norm is not None:
-            effects.append(Tap(*v.close_norm, "switch: close overlay after a failed verify",
+            effects.append(Tap(*v.close_norm, "switch: close overlay; will re-check",
                                budget="switch"))
         return effects
 

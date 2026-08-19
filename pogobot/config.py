@@ -85,6 +85,14 @@ class Timings:
     #: measured: login tap -> post-login modal was ~14s. The budget is generous because
     #: the alternative to waiting is tapping blindly at an unknown screen.
     switch_timeout: float = 120.0
+    #: measured: a login tap reaches the post-login modal in ~14s, but the OUTGOING
+    #: account's map can still be on screen for a second or two after the tap - obs.on_map
+    #: returning is NOT proof the login has landed. Verify must not act before this many
+    #: seconds have passed since the login tap, or it reads the old account's asterisk and
+    #: calls a login that is merely still in flight a failure. Real headroom over the 14s,
+    #: not a tight bound: waiting a bit too long costs a few seconds out of a 120s budget;
+    #: waiting too little burns the whole budget on a false negative.
+    switch_login_grace: float = 30.0
 
 
 @dataclass(frozen=True)

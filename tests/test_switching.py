@@ -57,7 +57,7 @@ def test_target_row_present_taps_its_login_button():
 
 def test_no_tap_ever_lands_on_a_delete_button():
     """The delete button sits ~24px from login. This is the test that matters."""
-    for phase in ("open", "tab", "login", "settle", "verify", "failed"):
+    for phase in ("open", "tab", "login", "settle", "verify"):
         for on_map in (True, False):
             c = ctx(phase=phase)
             for t in taps(fsm.step(obs(on_map=on_map), c)):
@@ -116,13 +116,38 @@ def test_verify_confirms_when_the_reopened_panel_shows_the_target_active():
     assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
 
 
-def test_verify_does_not_confirm_or_retap_login_when_someone_else_is_active():
+def test_a_mismatch_does_not_end_the_switch():
+    """The login is asynchronous: 'someone else is active' at one instant means only
+    that it has not landed yet, not that it failed. Closing the panel and re-checking -
+    not latching a terminal phase - is what makes a later confirm possible."""
     c = ctx(phase="verify", accounts=panel(active="TrainerOne"))
-    effects = fsm.step(obs(on_map=True), c)
-    assert not any(isinstance(e, Transition) for e in effects)
-    assert any(isinstance(e, SetFlag) and e.value == "failed" for e in effects)
+    first = fsm.step(obs(on_map=True), c)
+    assert not any(isinstance(e, Transition) for e in first)
+    assert not any(isinstance(e, SetFlag) and e.name == "switch_phase" for e in first)
     login_norm = c.accounts.by_name("TrainerTwo").login_norm
-    assert not any((t.x, t.y) == login_norm for t in taps(effects))
+    assert not any((t.x, t.y) == login_norm for t in taps(first))
+    c.accounts = panel(active="TrainerTwo")          # the login has landed since
+    second = fsm.step(obs(on_map=True), c)
+    tr = [e for e in second if isinstance(e, Transition)][0]
+    assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
+
+
+def test_verify_waits_out_the_login_grace_period():
+    """Regression guard for the exact race the live run hit: the outgoing account's map
+    can reappear within a second or two of the login tap, long before the login itself
+    has landed (~14s measured). obs.on_map alone must not trigger a verify."""
+    c = ctx(phase="settle", switch_login_ts=100.0)
+    c.now = 100.0 + Config().timings.switch_login_grace - 1     # inside the grace window
+    assert fsm.step(obs(on_map=True), c) == []
+
+
+def test_a_genuine_failure_still_ends_at_the_timeout():
+    """Without a terminal 'failed' phase, a switch that never lands must still be
+    bounded by the 120s state timeout rather than retrying forever."""
+    c = ctx(phase="verify", accounts=panel(active="TrainerOne"))
+    c.now = c.state_since + Config().timings.switch_timeout + 1
+    tr = [e for e in fsm.step(obs(on_map=True), c) if isinstance(e, Transition)][0]
+    assert tr.to is BotState.RECOVERING and tr.outcome is IntentOutcome.EXPIRED
 
 
 def test_a_rocket_looking_screen_cannot_hijack_a_switch():
