@@ -245,6 +245,62 @@ def test_accounts_lists_only_accounts_with_records():
     assert q.accounts() == ("A", "B")
 
 
+def test_accounts_excludes_the_unidentified_bucket():
+    """A bare record() lands in the "" bucket, but "" is not a real account name - a
+    caller iterating "known accounts" must never see it alongside real ones."""
+    q = SpinQuota(None, limit=10)
+    q.record()           # bare: goes into the "" bucket
+    q.record("A")
+    assert q.accounts() == ("A",)
+
+
+# ------------------------------------------------------------------ attribute_legacy persistence
+#
+# attribute_legacy's whole point is that reassignment survives a reload - the legacy
+# bucket design is worthless if a restart could silently un-attribute what was already
+# claimed. Constructing a *fresh* SpinQuota from the same path in each of these is
+# deliberate: asserting on the in-memory object that called attribute_legacy would pass
+# even if _rewrite never actually wrote the file.
+
+def test_attribute_legacy_persists_across_a_reload(tmp_path):
+    p = tmp_path / "spins.jsonl"
+    p.write_text("\n".join(json.dumps({"ts": time.time()}) for _ in range(5)) + "\n")
+    q = SpinQuota(p, limit=10)
+    assert q.attribute_legacy("A") == 5
+    fresh = SpinQuota(p, limit=10)
+    assert fresh.state("A").used == 5
+    assert fresh.legacy_count == 0
+
+
+def test_attribute_legacy_does_not_double_move(tmp_path):
+    p = tmp_path / "spins.jsonl"
+    p.write_text("\n".join(json.dumps({"ts": time.time()}) for _ in range(5)) + "\n")
+    q = SpinQuota(p, limit=10)
+    assert q.attribute_legacy("A") == 5
+    assert q.attribute_legacy("A") == 0, "already claimed; nothing left to move"
+    assert q.state("A").used == 5, "and the second call must not have inflated the count"
+
+
+def test_mixed_buckets_survive_a_forced_rewrite(tmp_path):
+    """A legacy record (no "account" key), an unidentified ("") record, and a named
+    account's record must still land in three distinct buckets after a forced
+    _rewrite() writes them all back out and a fresh instance reloads the file - the
+    property that would break if _rewrite's output ever stopped being symmetric with
+    what _load expects."""
+    p = tmp_path / "spins.jsonl"
+    p.write_text(json.dumps({"ts": time.time()}) + "\n")   # legacy: no "account" key
+    q = SpinQuota(p, limit=10)
+    assert q.legacy_count == 1
+    q.record()          # "" bucket
+    q.record("B")        # named bucket
+    q._rewrite()
+
+    fresh = SpinQuota(p, limit=10)
+    assert fresh.legacy_count == 1
+    assert fresh.state().used == 1
+    assert fresh.state("B").used == 1
+
+
 def test_a_wrong_typed_account_fails_loudly_instead_of_reporting_zero():
     """A float key can never match a bucket, so state() would otherwise report
     used=0/exhausted=False - a confident wrong answer indistinguishable from a healthy

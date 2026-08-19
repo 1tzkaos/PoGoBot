@@ -217,8 +217,10 @@ class SpinQuota:
 
     def accounts(self) -> tuple[str, ...]:
         """Named accounts with at least one recorded spin, sorted. Excludes the legacy
-        bucket, which is not an account until `attribute_legacy` says whose it is."""
-        return tuple(sorted(k for k in self._stamps if k != LEGACY_KEY))
+        bucket (not an account until `attribute_legacy` says whose it is) and the ""
+        bucket (an unidentified-but-tracked run, not a real account name a caller
+        iterating "known accounts" should ever see)."""
+        return tuple(sorted(k for k in self._stamps if k not in (LEGACY_KEY, "")))
 
     def soonest_reset(self, names, now: Optional[float] = None) -> Optional[str]:
         """Of `names`, the account whose oldest in-window spin ages out first.
