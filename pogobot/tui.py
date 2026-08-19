@@ -144,6 +144,9 @@ class Dashboard:
             spins = f"[{style}]spins {q.used}/{q.limit}[/]  "
         else:
             spins = ""
+        # Beside the quota it disambiguates: a spin count with no name attached is exactly
+        # the ambiguity a multi-account run needs resolved on screen.
+        who = f"[bold]{self.stats.account}[/]  " if self.stats.account else ""
         life = ""
         if self.lifetime:
             life = (f"lifetime {self.lifetime['sessions']} runs  "
@@ -161,7 +164,7 @@ class Dashboard:
         t.add_row(
             label,
             f"[bold]PoGoBot[/]  {self.stats.hud_line()}",
-            f"{spins}[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
+            f"{who}{spins}[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
         )
         return Panel(t, border_style="grey42")
 

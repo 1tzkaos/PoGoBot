@@ -35,6 +35,7 @@ machine, and acts through `adb`.
 - **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
 - **Runs out of balls gracefully** — gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting to restock
 - **Tracks the 24h spin cap** — a rolling window that survives restarts, so a refused PokéStop is correctly blamed on the quota rather than on distance
+- **Account switching** — optionally logs into another PGSharp account once the current one is spun out, or on a clock; off by default
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
@@ -264,7 +265,62 @@ stops the bot targeting stops it could actually use:
 python3 -m pogobot --reset-spins
 ```
 
-This is the counter an account-switching mechanism would key off.
+Every account tracked keeps its own independent version of this window — see
+[Account switching](#account-switching).
+
+## Account switching
+
+The bot can log into another PGSharp account once the current one has nothing left to do,
+instead of sitting on a spent quota until a human intervenes.
+
+**Requires the PGSharp account list to be reachable.** Who is logged in comes from a
+second perception channel — real Android views read with `uiautomator`, not pixels (see
+`pogobot/accounts.py`) — because the account list states, as text with an asterisk, which
+account is active. That is ground truth; inferring it from the map would be a guess. A
+switch opens the panel itself via the floating PGSharp launcher, so PGSharp has to be
+installed and its overlay present on screen; if it is not, the read simply fails and the
+run continues without it.
+
+**Off by default, behind two separate flags:**
+
+```bash
+python3 -m pogobot --switch-on-quota      # switch once this account exhausts its 24h cap
+python3 -m pogobot --switch-every 240     # also rotate every 240 minutes, regardless of state
+```
+
+Neither changes anything by itself — an invocation with neither flag behaves exactly as it
+did before this feature existed. They can be combined. `--switch-on-quota` fires only once
+every PokéStop is refused for the day; `--switch-every` fires on a plain clock. A trigger
+that is due but cannot be satisfied — every account capped, or the overlay unreadable — is
+left pending rather than retried on every tick, and the bot keeps catching Pokémon while it
+waits.
+
+**The account a run belongs to is read from the overlay, not guessed.** At startup the bot
+makes one `uiautomator` read to see who is logged in and how many accounts are configured:
+
+```
+logged in as TrainerOne (L42), 3 account(s) available
+```
+
+That read only succeeds if the account panel happens to already be open on screen; if it
+is not, the bot says so and starts anyway — the run is not refused over it. What is lost
+is attribution: spins, session stats and the pre-switching legacy log stay in an
+unidentified bucket until an actual switch opens the panel and confirms a name. Pass
+`--account NAME` to name the account explicitly up front instead of depending on that read.
+
+**The 24-hour spin cap is per account.** Each account keeps its own independent rolling
+window (see [The 24-hour spin cap](#the-24-hour-spin-cap)) — one account spinning out never
+blocks another — and `--seed-spins` / `--reset-spins` can target a single account by name:
+
+```bash
+python3 -m pogobot --seed-spins 1200 --account TrainerOne
+python3 -m pogobot --reset-spins TrainerOne     # clear one account's window
+python3 -m pogobot --reset-spins                # clear every account's window, as before
+```
+
+`--seed-spins` refuses to run without a known account — identified from the overlay, or
+passed with `--account` — rather than seeding a nameless bucket that could later be
+mistaken for a real account's history.
 
 ## Pausing
 
@@ -376,8 +432,12 @@ report how many were left out.
 | `--restock-stops` | `5` | PokéStops to collect before resuming normal targeting |
 | `--spin-limit` | `1200` | PokéStop spins per rolling 24h (`0` disables the check) |
 | `--seed-spins N` | – | record N spins this bot did not perform, so the quota reflects the account |
-| `--reset-spins` | – | clear the window, e.g. once a soft ban has lifted |
+| `--reset-spins [ACCOUNT]` | – | clear the window; omit `ACCOUNT` to clear every account |
 | `--quota-file PATH` | `logs/spins.jsonl` | rolling spin log, spans restarts |
+| `--account NAME` | – | account this run belongs to; read from the overlay when omitted |
+| `--switch-on-quota` | off | log into another account once this one exhausts its 24h cap |
+| `--switch-every MINUTES` | off | rotate accounts every `MINUTES` regardless of state |
+| `--collect-dialogues DIR` | – | save post-login screens here, for labelling a Dialogue class |
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |

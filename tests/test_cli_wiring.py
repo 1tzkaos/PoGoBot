@@ -14,13 +14,17 @@ import pytest
 
 from pogobot import runner as runner_mod
 from pogobot import tui
+from pogobot.accounts import UiTreeReader
 from pogobot.cli import build_parser
+from pogobot.stats import SessionStats
 
 CLI = pathlib.Path(runner_mod.__file__).parent / "cli.py"
 
 TARGETS = {
     "Dashboard": tui.Dashboard.__init__,
     "Runner": runner_mod.Runner.__init__,
+    "SessionStats": SessionStats.__init__,
+    "UiTreeReader": UiTreeReader.__init__,
 }
 
 
@@ -65,3 +69,51 @@ def test_every_parser_flag_is_reachable():
         if f"a.{action.dest}" not in src and f'"{action.dest}"' not in src:
             unread.append(action.dest)
     assert not unread, f"flags declared but never read by main(): {unread}"
+
+
+def test_switch_flags_are_wired_through_to_config():
+    from pogobot.cli import build_parser, config_from_args
+    a = build_parser().parse_args(["--switch-on-quota", "--switch-every", "45"])
+    cfg = config_from_args(a)
+    assert cfg.switch_on_quota is True
+    assert cfg.switch_every_minutes == 45
+
+
+def test_switching_is_off_unless_asked_for():
+    from pogobot.cli import build_parser, config_from_args
+    cfg = config_from_args(build_parser().parse_args([]))
+    assert cfg.switch_on_quota is False and cfg.switch_every_minutes == 0
+
+
+def test_account_and_collect_dialogues_flags_parse():
+    a = build_parser().parse_args(["--account", "TrainerOne",
+                                   "--collect-dialogues", "/tmp/dlg"])
+    assert a.account == "TrainerOne"
+    assert a.collect_dialogues == pathlib.Path("/tmp/dlg")
+
+
+def test_account_and_collect_dialogues_default_to_none():
+    a = build_parser().parse_args([])
+    assert a.account is None
+    assert a.collect_dialogues is None
+
+
+def test_reset_spins_defaults_to_untouched():
+    a = build_parser().parse_args([])
+    assert a.reset_spins is None
+
+
+def test_reset_spins_alone_still_means_every_account():
+    """`--reset-spins` with no value must keep clearing every account's window, exactly
+    as it did before it could also target one - a previously valid invocation must not
+    silently start doing something narrower."""
+    bare = build_parser().parse_args(["--reset-spins"]).reset_spins
+    named = build_parser().parse_args(["--reset-spins", "TrainerOne"]).reset_spins
+    assert bare is not None
+    assert bare != "TrainerOne"
+    assert named == "TrainerOne"
+
+
+def test_seed_spins_flag_still_parses():
+    a = build_parser().parse_args(["--seed-spins", "300"])
+    assert a.seed_spins == 300

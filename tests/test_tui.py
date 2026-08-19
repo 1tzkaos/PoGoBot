@@ -117,3 +117,17 @@ def test_an_exhausted_quota_is_shown_too():
     d.quota = SpinQuota(None, limit=1200)
     d.quota.seed(1200, spread_hours=20)
     assert "spins 1200/1200" in _text(d, mkobs(on_map=True))
+
+
+def test_the_header_names_the_account_the_session_belongs_to():
+    """A run that identified its account should say so on the one screen a trainer
+    running several accounts watches to tell them apart."""
+    d = _dash()
+    d.stats.account = "TrainerOne"
+    assert "TrainerOne" in _text(d, mkobs(on_map=True))
+
+
+def test_the_header_still_renders_with_no_account_known():
+    d = _dash()
+    assert d.stats.account is None
+    assert "PoGoBot" in _text(d, mkobs(on_map=True))
