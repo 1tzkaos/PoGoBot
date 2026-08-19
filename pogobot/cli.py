@@ -62,8 +62,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--spin-limit", type=int, default=None, metavar="N",
                    help="PokeStop spins allowed per rolling 24h (0 disables the check)")
     p.add_argument("--account", default=None, metavar="NAME",
-                   help="account this run belongs to; read from the PGSharp overlay "
-                        "when omitted")
+                   help="account this run belongs to. Read from the PGSharp overlay "
+                        "instead when account switching is on, and the overlay wins if "
+                        "the two disagree")
     p.add_argument("--switch-on-quota", action="store_true",
                    help="log into another account when this one exhausts its 24h spin cap")
     p.add_argument("--switch-every", type=float, default=None, metavar="MINUTES",
@@ -81,6 +82,83 @@ def build_parser() -> argparse.ArgumentParser:
                         "(targets the identified account, or --account)")
     p.add_argument("-v", "--verbose", action="store_true")
     return p
+
+
+def switching_enabled(cfg: Config) -> bool:
+    """Whether either account-switch trigger is armed."""
+    return bool(cfg.switch_on_quota or cfg.switch_every_minutes > 0)
+
+
+def _pause_file_present(pause_file) -> bool:
+    try:
+        return pause_file is not None and pause_file.exists()
+    except OSError:
+        return False
+
+
+def prepare_accounts(cfg: Config, *, requested, pause_file, make_reader, actuator,
+                     settle: float = 1.0):
+    """Decide who this run belongs to, and hand back what a switch will need.
+
+    Returns `(tree_reader, account, roster)`; a `None` reader means switching is not
+    available this run, which `Runner` already treats as "never switch".
+
+    Identifying costs three taps INTO the account panel, and every row there carries a
+    delete button ~157px from its login button. That is a fine price for a run that is
+    going to drive that panel anyway, and no price a run that will never switch should
+    pay - so it happens only when a trigger is armed. Without switching, `--account NAME`
+    is how a run gets attributed, and without that the account is simply unknown and the
+    spins go to the unattributed bucket, exactly as they did before switching existed.
+
+    It is also skipped while the pause file is present. Those taps go through the actuator
+    directly, not through `Runner.apply`, so nothing else in the system would honour the
+    pause - and the README's promise is unconditional: while that file exists the bot
+    perceives but sends no input.
+
+    When the overlay does answer and contradicts `--account`, the overlay wins. It is the
+    only party that can see who is logged in; `--account` is a claim made before the
+    process started and goes stale the moment anyone touches the phone. Believing it
+    against the evidence books every spin to the wrong account, under-counts the real
+    one's 24h window - so the bot spins past a cap it cannot see - and starts the
+    round-robin from the wrong origin. `quota._normalize_account` raises rather than guess
+    for the same reason; here there is a right answer, so it is used, loudly.
+    """
+    log = logging.getLogger("pogobot")
+    if not switching_enabled(cfg):
+        if not requested:
+            log.info("account switching is off, so the PGSharp account panel is left "
+                     "alone; spins are recorded unattributed (pass --account NAME to "
+                     "book them to an account)")
+        return None, requested, ()
+    if _pause_file_present(pause_file):
+        log.warning("paused at startup (%s exists), so the account panel is not opened "
+                    "and account switching is unavailable this run - a switch has no "
+                    "roster to pick a target from. Remove the file and restart to "
+                    "enable it.", pause_file)
+        return None, requested, ()
+
+    from .accounts import identify_account
+    # Open the account panel, read who is active, close it again - the one-shot
+    # equivalent of what SWITCHING already does one tap at a time. Not required to
+    # start: a failed identification just means per-account tracking (the spin quota,
+    # session stats, legacy attribution) falls back to the unattributed bucket for this
+    # run. `identify_account` logs its own outcome.
+    reader = make_reader()
+    panel = identify_account(reader, actuator, settle=settle)
+    # The roster is cached from this one read and never re-enumerated: the panel is
+    # closed for the rest of the run, so a live read would list no accounts at all.
+    # An account added to PGSharp mid-run is therefore not noticed until a restart.
+    found = panel.active.name if panel is not None and panel.active else None
+    roster = panel.names if panel is not None else ()
+    if found and requested and requested != found:
+        log.warning("--account %s contradicts the PGSharp overlay, which says %s is "
+                    "logged in; going with %s. The overlay is the only thing that can "
+                    "see who is actually signed in - drop --account, or pass the name "
+                    "the phone is really on.", requested, found, found)
+    account = found or requested
+    if found is None and account:
+        log.info("using --account %s (the overlay did not confirm it)", account)
+    return reader, account, roster
 
 
 def resolve_device(name: str):
@@ -186,24 +264,11 @@ def main(argv=None) -> int:
         actuator = Actuator(screen_wh, dry_run=cfg.dry_run, serial=a.serial)
         keyboard = KeyboardPoller(serial=a.serial).start()
 
-        # Open the account panel, read who is active, close it again - the one-shot
-        # equivalent of what SWITCHING already does one tap at a time. Not required to
-        # start: a failed identification just means per-account tracking (the spin
-        # quota, session stats, legacy attribution) falls back to the unattributed
-        # bucket for this run, same as before this feature existed.
-        # `identify_account` logs its own outcome; an explicit --account always wins
-        # over whatever it finds.
-        from .accounts import UiTreeReader, identify_account
-        tree_reader = UiTreeReader(screen_wh, serial=a.serial)
-        panel = identify_account(tree_reader, actuator)
-        # The roster is cached from this one read and never re-enumerated: the panel is
-        # closed for the rest of the run, so a live read would list no accounts at all.
-        # An account added to PGSharp mid-run is therefore not noticed until a restart.
-        found = panel.active.name if panel is not None and panel.active else None
-        roster = panel.names if panel is not None else ()
-        account = a.account or found
-        if found is None and account:
-            log.info("using --account %s (the overlay did not confirm it)", account)
+        from .accounts import UiTreeReader
+        tree_reader, account, roster = prepare_accounts(
+            cfg, requested=a.account, pause_file=a.pause_file,
+            make_reader=lambda: UiTreeReader(screen_wh, serial=a.serial),
+            actuator=actuator)
 
     perceptor = Perceptor(cfg, det_model=det, cls_model=cls, device=dev,
                           square_cls_input=True)

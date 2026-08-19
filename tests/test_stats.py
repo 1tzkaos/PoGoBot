@@ -422,20 +422,13 @@ def test_summary_carries_the_account():
     assert s.summary()["account"] == "TrainerOne"
 
 
-def test_lifetime_can_be_filtered_by_account(tmp_path):
+def test_the_lifetime_total_spans_every_account(tmp_path):
+    """Lifetime is the whole history of this bot, named accounts and unnamed runs alike -
+    per-account totals are what the session rows and the spin quota are for."""
     p = tmp_path / "sessions.jsonl"
     a = SessionStats(account="TrainerOne"); a.encounters = 10
     b = SessionStats(account="TrainerTwo"); b.encounters = 4
-    append_session(p, a.summary(now=a.started + 600))
-    append_session(p, b.summary(now=b.started + 600))
-    assert load_lifetime(p)["encounters"] == 14
-    assert load_lifetime(p, account="TrainerOne")["encounters"] == 10
-    assert load_lifetime(p, account="TrainerTwo")["encounters"] == 4
-
-
-def test_records_without_an_account_are_kept_in_the_unfiltered_total(tmp_path):
-    p = tmp_path / "sessions.jsonl"
-    s = SessionStats(); s.encounters = 7
-    append_session(p, s.summary(now=s.started + 600))
-    assert load_lifetime(p)["encounters"] == 7
-    assert load_lifetime(p, account="TrainerOne") is None
+    c = SessionStats(); c.encounters = 7
+    for st in (a, b, c):
+        append_session(p, st.summary(now=st.started + 600))
+    assert load_lifetime(p)["encounters"] == 21

@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-262%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -41,7 +41,7 @@ machine, and acts through `adb`.
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
 - **Pause and resume** — stops sending input, and stops recording, without stopping perception or ageing the state machine
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **262 tests in under 10 seconds**, no device required
+- **The whole suite runs in under 10 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -93,7 +93,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 262 tests, no device required |
+| `python3 -m pytest tests/ -q` | the whole suite, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -291,22 +291,51 @@ python3 -m pogobot --switch-every 240     # also rotate every 240 minutes, regar
 Neither changes anything by itself — an invocation with neither flag behaves exactly as it
 did before this feature existed. They can be combined. `--switch-on-quota` fires only once
 every PokéStop is refused for the day; `--switch-every` fires on a plain clock. A trigger
-that is due but cannot be satisfied — every account capped, or the overlay unreadable — is
-left pending rather than retried on every tick, and the bot keeps catching Pokémon while it
-waits.
+that is due but cannot be satisfied — every account capped, or no second account
+enumerated to switch to — is left pending rather than retried on every tick, and the bot
+keeps catching Pokémon while it waits.
 
-**The account a run belongs to is read from the overlay, not guessed.** At startup the bot
-makes one `uiautomator` read to see who is logged in and how many accounts are configured:
+**A switch that never confirms is not retried straight away.** A switch counts as
+confirmed only when the panel is re-opened and the asterisk names the target; an attempt
+that has not managed that within `Timings.switch_timeout` is recorded as failed. The next
+attempt is then held off for ten minutes, doubling with each consecutive failure, and
+after three in a row the bot stops switching for the rest of the run and says which
+account it was trying to reach. This is deliberate rather than defensive: the failure a
+real device produced was PGSharp accepting the login tap, closing its own panel, and the
+account simply not changing — most likely a login throttle after several switches within a
+few hours — and re-tapping a control that is throttling you cannot make it answer. A
+switch that does confirm clears the record, so one bad patch does not disable switching
+for the rest of the run.
+
+If a login *was* tapped before the attempt expired, the account is treated as **unknown**
+from that point on. A login can land late — that is why the bot waits out a grace period
+before verifying at all — so after an expiry nobody can honestly say which account the
+phone is on. Spins go to the unattributed bucket until a switch confirms a name again.
+
+**The account a run belongs to is read from the overlay, not guessed — when switching is
+on.** With `--switch-on-quota` or `--switch-every`, the bot opens the account panel once at
+startup, reads who is active and which accounts exist, and closes it again:
 
 ```
 logged in as TrainerOne (L42), 3 account(s) available
 ```
 
-That read only succeeds if the account panel happens to already be open on screen; if it
-is not, the bot says so and starts anyway — the run is not refused over it. What is lost
-is attribution: spins, session stats and the pre-switching legacy log stay in an
-unidentified bucket until an actual switch opens the panel and confirms a name. Pass
-`--account NAME` to name the account explicitly up front instead of depending on that read.
+That one read is also the roster a later switch picks its target from; the panel is shut
+for the rest of the run, so an account added to PGSharp mid-run is not noticed until a
+restart. It costs three taps into a panel where every row's delete button sits beside its
+login button, so it is not done at all unless a switch trigger is armed — and not while
+the [pause file](#pausing) is present, because those taps would otherwise be sent by a bot
+that has promised to send nothing.
+
+Without switching, pass `--account NAME` to attribute the run. With neither, the account is
+simply unknown: spins, session stats and the pre-switching legacy log stay in an
+unidentified bucket, exactly as they did before this feature existed.
+
+When the read succeeds and disagrees with `--account`, **the overlay wins**, loudly, naming
+both. `--account` is a claim made before the process started; the overlay is the only thing
+that can see who is signed in now, and believing a stale name books every spin to the wrong
+account, under-counts the real one's 24-hour window and starts the rotation from the wrong
+place. When the read fails, `--account` is used as given.
 
 **The 24-hour spin cap is per account.** Each account keeps its own independent rolling
 window (see [The 24-hour spin cap](#the-24-hour-spin-cap)) — one account spinning out never
@@ -318,9 +347,9 @@ python3 -m pogobot --reset-spins TrainerOne     # clear one account's window
 python3 -m pogobot --reset-spins                # clear every account's window, as before
 ```
 
-`--seed-spins` refuses to run without a known account — identified from the overlay, or
-passed with `--account` — rather than seeding a nameless bucket that could later be
-mistaken for a real account's history.
+`--seed-spins` refuses to run without a known account — passed with `--account`, or read
+from the overlay on a run where switching is armed — rather than seeding a nameless bucket
+that could later be mistaken for a real account's history.
 
 ## Pausing
 
@@ -434,7 +463,7 @@ report how many were left out.
 | `--seed-spins N` | – | record N spins this bot did not perform, so the quota reflects the account |
 | `--reset-spins [ACCOUNT]` | – | clear the window; omit `ACCOUNT` to clear every account |
 | `--quota-file PATH` | `logs/spins.jsonl` | rolling spin log, spans restarts |
-| `--account NAME` | – | account this run belongs to; read from the overlay when omitted |
+| `--account NAME` | – | account this run belongs to; read from the overlay instead when switching is on |
 | `--switch-on-quota` | off | log into another account once this one exhausts its 24h cap |
 | `--switch-every MINUTES` | off | rotate accounts every `MINUTES` regardless of state |
 | `--collect-dialogues DIR` | – | save post-login screens here, for labelling a Dialogue class |
@@ -461,7 +490,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       262 tests, no device required
+tests/       the whole suite, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```

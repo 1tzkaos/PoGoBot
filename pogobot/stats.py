@@ -246,7 +246,7 @@ def append_session(path, summary: dict) -> None:
         fh.write(lead + json.dumps(rec) + "\n")
 
 
-def load_lifetime(path, account: Optional[str] = None) -> Optional[dict]:
+def load_lifetime(path) -> Optional[dict]:
     """Sum every recorded session. Returns None when there is no history yet, or when the
     history cannot be read - this only feeds an informational line, so an unreadable,
     wrong-type or half-written file must never stop the bot from running. It used to:
@@ -284,8 +284,6 @@ def load_lifetime(path, account: Optional[str] = None) -> Optional[dict]:
             counts = [int(rec.get(k, 0) or 0) for k in COUNTER_FIELDS]
         except (TypeError, ValueError):
             continue          # a record with a non-numeric counter is skipped, not fatal
-        if account is not None and rec.get("account") != account:
-            continue
         if rec.get("dry_run"):
             # A dry run and a replay decide but send nothing, so their counters are not
             # things the bot did. Counted, not silently discarded.

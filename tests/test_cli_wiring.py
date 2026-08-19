@@ -8,15 +8,19 @@ cli.py against the real signatures, without loading a model or touching a device
 """
 import ast
 import inspect
+import logging
 import pathlib
 
 import pytest
 
 from pogobot import runner as runner_mod
 from pogobot import tui
-from pogobot.accounts import UiTreeReader
-from pogobot.cli import build_parser
+from pogobot.accounts import AccountView, FakeTreeReader, UiTreeReader
+from pogobot.cli import build_parser, prepare_accounts
+from pogobot.config import DEFAULT
+from pogobot.effects import Tap
 from pogobot.stats import SessionStats
+from tests.test_switching import panel
 
 CLI = pathlib.Path(runner_mod.__file__).parent / "cli.py"
 
@@ -127,3 +131,114 @@ def test_reset_spins_alone_still_means_every_account():
 def test_seed_spins_flag_still_parses():
     a = build_parser().parse_args(["--seed-spins", "300"])
     assert a.seed_spins == 300
+
+
+# ------------------------------------------------------------------ startup accounts
+
+class _Act:
+    """Records what would have gone to the phone. Local, like every other runner-shaped
+    fake in this suite."""
+
+    def __init__(self):
+        self.applied = []
+        self.dry_run = False
+
+    def apply(self, effect, now=None):
+        self.applied.append(effect)
+        return True
+
+
+def _closed():
+    return AccountView(available=True, launcher_norm=(0.12, 0.05), panel_open=False)
+
+
+def _factory(views):
+    """A reader factory that records whether it was ever asked for a reader."""
+    made = []
+
+    def make():
+        made.append(FakeTreeReader(views))
+        return made[-1]
+
+    return make, made
+
+
+def _prepare(cfg=DEFAULT, requested=None, pause_file=None, views=None, act=None):
+    make, made = _factory(views if views is not None else [_closed(), panel(active="TrainerTwo")])
+    act = act if act is not None else _Act()
+    result = prepare_accounts(cfg, requested=requested, pause_file=pause_file,
+                              make_reader=make, actuator=act, settle=0)
+    return result, made, act
+
+
+SWITCHING = DEFAULT.scaled(switch_on_quota=True)
+
+
+def test_identification_is_skipped_when_no_switch_trigger_is_armed():
+    """It costs three taps INTO the panel whose rows carry irreversible delete buttons,
+    and a run that will never switch has no use for the roster it produces. Without
+    switching, --account is how a run gets attributed and an unnamed one stays in the
+    unattributed bucket - exactly the behaviour that predates this feature."""
+    (reader, account, roster), made, act = _prepare(requested="TrainerOne")
+    assert made == [], "the panel must not even be read"
+    assert act.applied == []
+    assert (reader, account, roster) == (None, "TrainerOne", ())
+
+
+def test_an_unswitched_run_without_an_account_stays_unattributed():
+    (reader, account, roster), made, act = _prepare()
+    assert (reader, account, roster) == (None, None, ())
+    assert act.applied == []
+
+
+def test_identification_is_skipped_while_the_pause_file_exists(tmp_path):
+    """Those taps go through the actuator directly, not through `Runner.apply`, so
+    nothing else honours the pause. The README's promise has no exceptions: while the file
+    exists the bot perceives but sends no input."""
+    pause = tmp_path / "PAUSE"
+    pause.touch()
+    (reader, account, roster), made, act = _prepare(SWITCHING, requested="TrainerOne",
+                                                    pause_file=pause)
+    assert made == [] and act.applied == []
+    assert (reader, account, roster) == (None, "TrainerOne", ())
+
+
+def test_identification_runs_once_a_trigger_is_armed(tmp_path):
+    pause = tmp_path / "PAUSE"          # named but absent: nothing to honour
+    (reader, account, roster), made, act = _prepare(SWITCHING, pause_file=pause)
+    assert reader is made[0]
+    assert account == "TrainerTwo"
+    assert roster == ("TrainerOne", "TrainerTwo")
+
+    opened = panel(active="TrainerTwo")
+    deletes = {r.delete_norm for r in opened.rows if r.delete_norm}
+    tapped = {(t.x, t.y) for t in act.applied if isinstance(t, Tap)}
+    assert tapped and not (tapped & deletes), "a startup read must never delete an account"
+
+
+def test_the_overlay_outranks_a_contradicting_account_flag(caplog):
+    """--account is a claim made before the process started; the overlay can see who is
+    actually logged in. Believing the flag books every spin to the wrong account,
+    under-counts the real one's window - so the bot spins past a cap it cannot see - and
+    starts the round-robin from the wrong origin."""
+    with caplog.at_level(logging.WARNING, logger="pogobot"):
+        (_, account, _), _, _ = _prepare(SWITCHING, requested="TrainerOne")
+    assert account == "TrainerTwo"
+    warned = [m for m in caplog.messages if "contradicts" in m]
+    assert len(warned) == 1
+    assert "TrainerOne" in warned[0] and "TrainerTwo" in warned[0]
+
+
+def test_an_agreeing_account_flag_is_not_a_contradiction(caplog):
+    with caplog.at_level(logging.WARNING, logger="pogobot"):
+        (_, account, _), _, _ = _prepare(SWITCHING, requested="TrainerTwo")
+    assert account == "TrainerTwo"
+    assert not [m for m in caplog.messages if "contradicts" in m]
+
+
+def test_the_account_flag_still_names_a_run_the_overlay_could_not_read():
+    """The overlay is preferred where it answers - it is not a requirement."""
+    (_, account, roster), _, act = _prepare(SWITCHING, requested="TrainerOne",
+                                            views=[AccountView(available=False)])
+    assert account == "TrainerOne" and roster == ()
+    assert act.applied == [], "an unreadable overlay is never tapped at a guess"
