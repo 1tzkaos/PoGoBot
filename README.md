@@ -10,7 +10,7 @@
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-156%20passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
+[![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
 [![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -35,12 +35,13 @@ machine, and acts through `adb`.
 - **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
 - **Runs out of balls gracefully** — gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting to restock
 - **Tracks the 24h spin cap** — a rolling window that survives restarts, so a refused PokéStop is correctly blamed on the quota rather than on distance
+- **Account switching** — optionally logs into another PGSharp account once the current one is spun out, or on a clock; off by default
 - **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
 - **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
 - **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
 - **Pause and resume** — stops sending input, and stops recording, without stopping perception or ageing the state machine
 - **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **156 tests in under 8 seconds**, no device required
+- **The whole suite runs in under 10 seconds**, no device required
 - **Replay mode** — run the entire bot against saved frames with nothing plugged in
 
 ## Interface
@@ -92,7 +93,7 @@ python3 -m pogobot
 | `python3 -m pogobot` | run against a connected phone |
 | `python3 -m pogobot --dry-run` | perceive and decide, never touch the device |
 | `python3 -m pogobot --replay <dir>` | run against saved frames, no phone at all |
-| `python3 -m pytest tests/ -q` | 156 tests, no device required |
+| `python3 -m pytest tests/ -q` | the whole suite, no device required |
 
 > [!IMPORTANT]
 > Turn **off** the *Pointer location* developer option. It draws a white readout across
@@ -264,7 +265,100 @@ stops the bot targeting stops it could actually use:
 python3 -m pogobot --reset-spins
 ```
 
-This is the counter an account-switching mechanism would key off.
+Every account tracked keeps its own independent version of this window — see
+[Account switching](#account-switching).
+
+## Account switching
+
+The bot can log into another PGSharp account once the current one has nothing left to do,
+instead of sitting on a spent quota until a human intervenes.
+
+**Requires the PGSharp account list to be reachable.** Who is logged in comes from a
+second perception channel — real Android views read with `uiautomator`, not pixels (see
+`pogobot/accounts.py`) — because the account list states, as text with an asterisk, which
+account is active. That is ground truth; inferring it from the map would be a guess. A
+switch opens the panel itself via the floating PGSharp launcher, so PGSharp has to be
+installed and its overlay present on screen; if it is not, the read simply fails and the
+run continues without it.
+
+**Off by default, behind two separate flags:**
+
+```bash
+python3 -m pogobot --switch-on-quota      # switch once this account exhausts its 24h cap
+python3 -m pogobot --switch-every 240     # also rotate every 240 minutes, regardless of state
+```
+
+Neither changes anything by itself — an invocation with neither flag behaves exactly as it
+did before this feature existed. They can be combined. `--switch-on-quota` fires only once
+every PokéStop is refused for the day; `--switch-every` fires on a plain clock. A trigger
+that is due but cannot be satisfied — every account capped, or no second account
+enumerated to switch to — is left pending rather than retried on every tick, and the bot
+keeps catching Pokémon while it waits.
+
+**A switch that never confirms is not retried straight away.** A switch counts as
+confirmed only when the panel is re-opened and the asterisk names the target; an attempt
+that has not managed that within `Timings.switch_timeout` is recorded as failed. The next
+attempt is then held off for ten minutes, doubling with each consecutive failure, and
+after three in a row the bot stops switching for the rest of the run and says which
+account it was trying to reach. This is deliberate rather than defensive: the failure a
+real device produced was PGSharp accepting the login tap, closing its own panel, and the
+account simply not changing — most likely a login throttle after several switches within a
+few hours — and re-tapping a control that is throttling you cannot make it answer. A
+switch that does confirm clears the record, so one bad patch does not disable switching
+for the rest of the run.
+
+If a login *was* tapped before the attempt expired, the run is re-attributed to **whichever
+account the overlay last named as active during that attempt** — not to the account it set
+out from. A login can land late, which is why the bot waits out a grace period before
+verifying at all, so the outgoing name is no longer something to simply assume. It is not
+a guess either: verifying re-opens the panel and reads the asterisk every couple of
+seconds right up to the timeout, so a failed attempt has usually watched who is logged in
+many times over, minutes past the grace period. That reading is what the run is booked to,
+which keeps the 24-hour window pointed at the real account — a capped account stays capped
+and the "this is the cap, not distance" diagnostic keeps working — and keeps the rotation
+with an origin to rotate from, so the backoff above governs real retries.
+
+Only when no read during the attempt named anybody at all does the account become
+**unknown**, and spins go to the unattributed bucket until a switch confirms a name.
+
+**The account a run belongs to is read from the overlay, not guessed — when switching is
+on.** With `--switch-on-quota` or `--switch-every`, the bot opens the account panel once at
+startup, reads who is active and which accounts exist, and closes it again:
+
+```
+logged in as TrainerOne (L42), 3 account(s) available
+```
+
+That one read is also the roster a later switch picks its target from; the panel is shut
+for the rest of the run, so an account added to PGSharp mid-run is not noticed until a
+restart. It costs three taps into a panel where every row's delete button sits beside its
+login button, so it is not done at all unless a switch trigger is armed — and not while
+the [pause file](#pausing) is present, because those taps would otherwise be sent by a bot
+that has promised to send nothing.
+
+Without switching, pass `--account NAME` to attribute the run. With neither, the account is
+simply unknown: spins, session stats and the pre-switching legacy log stay in an
+unidentified bucket, exactly as they did before this feature existed.
+
+When the read succeeds and disagrees with `--account`, **the overlay wins**, loudly, naming
+both. `--account` is a claim made before the process started; the overlay is the only thing
+that can see who is signed in now, and believing a stale name books every spin to the wrong
+account, under-counts the real one's 24-hour window and starts the rotation from the wrong
+place. When the read fails, `--account` is used as given.
+
+**The 24-hour spin cap is per account.** Each account keeps its own independent rolling
+window (see [The 24-hour spin cap](#the-24-hour-spin-cap)) — one account spinning out never
+blocks another — and `--seed-spins` / `--reset-spins` can target a single account by name:
+
+```bash
+python3 -m pogobot --seed-spins 1200 --account TrainerOne
+python3 -m pogobot --reset-spins TrainerOne     # clear one account's window
+python3 -m pogobot --reset-spins                # clear every account's window, as before
+```
+
+`--seed-spins` refuses to run without a known account — passed with `--account`, or read
+from the overlay on a run where switching is armed — rather than seeding a nameless bucket
+that could later be mistaken for a real account's history.
 
 ## Pausing
 
@@ -376,8 +470,12 @@ report how many were left out.
 | `--restock-stops` | `5` | PokéStops to collect before resuming normal targeting |
 | `--spin-limit` | `1200` | PokéStop spins per rolling 24h (`0` disables the check) |
 | `--seed-spins N` | – | record N spins this bot did not perform, so the quota reflects the account |
-| `--reset-spins` | – | clear the window, e.g. once a soft ban has lifted |
+| `--reset-spins [ACCOUNT]` | – | clear the window; omit `ACCOUNT` to clear every account |
 | `--quota-file PATH` | `logs/spins.jsonl` | rolling spin log, spans restarts |
+| `--account NAME` | – | account this run belongs to; read from the overlay instead when switching is on |
+| `--switch-on-quota` | off | log into another account once this one exhausts its 24h cap |
+| `--switch-every MINUTES` | off | rotate accounts every `MINUTES` regardless of state |
+| `--collect-dialogues DIR` | – | save post-login screens here, for labelling a Dialogue class |
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
@@ -401,7 +499,7 @@ sweeps `--max-size` from 1920 down to 540, asserting the signals hold.
 
 ```
 pogobot/     the bot
-tests/       156 tests, no device required
+tests/       the whole suite, no device required
 tools/       dataset review and model selection
 legacy/      previous generations, unmaintained
 ```

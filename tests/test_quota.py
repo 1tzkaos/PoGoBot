@@ -35,10 +35,10 @@ def test_spins_older_than_the_window_drop_out():
     now = time.time()
     q = SpinQuota(None, limit=10)
     for i in range(6):
-        q.record(now - WINDOW_SECONDS - 100 - i)   # yesterday
+        q.record(now=now - WINDOW_SECONDS - 100 - i)   # yesterday
     for _ in range(3):
-        q.record(now)
-    s = q.state(now)
+        q.record(now=now)
+    s = q.state(now=now)
     assert s.used == 3, "stale spins must age out"
     assert not s.exhausted
 
@@ -46,8 +46,8 @@ def test_spins_older_than_the_window_drop_out():
 def test_it_reports_when_the_oldest_spin_ages_out():
     now = time.time()
     q = SpinQuota(None, limit=5)
-    q.record(now - WINDOW_SECONDS + 3600)          # ages out in an hour
-    s = q.state(now)
+    q.record(now=now - WINDOW_SECONDS + 3600)          # ages out in an hour
+    s = q.state(now=now)
     assert s.resets_in == pytest.approx(3600, abs=5)
     assert "1h00m" in s.line()
 
@@ -96,7 +96,10 @@ def test_a_torn_line_does_not_lose_the_rest(tmp_path):
     now = time.time()
     p.write_text(json.dumps({"ts": now}) + "\n" + '{"ts": ' + "\n" +
                  json.dumps({"ts": now}) + "\n")
-    assert SpinQuota(p, limit=100).state().used == 2
+    # These records have no "account" key, so per the account-keying rework below they
+    # are legacy - counted, but not visible via state() until attribute_legacy claims
+    # them. legacy_count is the correct place to see the 2 surviving records land.
+    assert SpinQuota(p, limit=100).legacy_count == 2
 
 
 def test_an_unreadable_file_does_not_stop_the_bot(tmp_path):
@@ -164,3 +167,146 @@ def test_reset_clears_the_window(tmp_path):
 def test_reset_on_an_empty_window_is_harmless(tmp_path):
     q = SpinQuota(tmp_path / "spins.jsonl", limit=1200)
     assert q.reset() == 0
+
+
+# ------------------------------------------------------------------ per-account quotas
+#
+# The cap belongs to the account, not the phone. With multiple accounts one shared list
+# is wrong: two accounts spinning the same stop at different points in the day must not
+# exhaust each other's allowance. `account` is optional (defaults to `None`, normalized
+# to the "" bucket) so every pre-existing bare call above keeps working unchanged.
+
+def test_windows_are_independent_per_account():
+    q = SpinQuota(None, limit=3)
+    for _ in range(3):
+        q.record("A")
+    assert q.state("A").exhausted is True
+    assert q.state("B").exhausted is False
+    assert q.state("B").remaining == 3
+
+
+def test_records_round_trip_with_their_account(tmp_path):
+    p = tmp_path / "spins.jsonl"
+    q = SpinQuota(p, limit=10)
+    q.record("A"); q.record("B"); q.record("A")
+    assert SpinQuota(p, limit=10).state("A").used == 2
+    assert SpinQuota(p, limit=10).state("B").used == 1
+
+
+def test_legacy_records_are_unattributed_until_told(tmp_path):
+    """A record with no "account" key predates this feature. It must not silently count
+    against a named account, or an account that never spun could read as exhausted."""
+    p = tmp_path / "spins.jsonl"
+    p.write_text("\n".join(json.dumps({"ts": time.time()}) for _ in range(5)) + "\n")
+    q = SpinQuota(p, limit=10)
+    assert q.state("A").used == 0
+    assert q.legacy_count == 5
+    assert q.attribute_legacy("A") == 5
+    assert q.state("A").used == 5
+
+
+def test_unidentified_runs_do_not_inherit_legacy_spins(tmp_path):
+    """The "" bucket (an unidentified-but-tracked run) must stay separate from the
+    legacy bucket (records that predate accounts). Otherwise a fresh run that has not
+    yet identified its account would read pre-existing legacy spins as its own and
+    could make a false exhaustion decision."""
+    p = tmp_path / "spins.jsonl"
+    p.write_text("\n".join(json.dumps({"ts": time.time()}) for _ in range(5)) + "\n")
+    q = SpinQuota(p, limit=10)
+    assert q.state().used == 0
+    assert q.legacy_count == 5
+
+
+def test_reset_targets_one_account_or_all(tmp_path):
+    q = SpinQuota(tmp_path / "s.jsonl", limit=10)
+    q.record("A"); q.record("B")
+    assert q.reset("A") == 1
+    assert q.state("A").used == 0 and q.state("B").used == 1
+    assert q.reset() == 1
+
+
+def test_soonest_reset_picks_the_account_that_frees_up_first():
+    now = time.time()
+    q = SpinQuota(None, limit=1)
+    q.record("A", now=now - 23 * 3600)      # ages out in ~1h
+    q.record("B", now=now - 1 * 3600)       # ages out in ~23h
+    assert q.soonest_reset(("A", "B"), now=now) == "A"
+
+
+def test_soonest_reset_of_an_untouched_account_is_immediate():
+    q = SpinQuota(None, limit=1)
+    q.record("A")
+    assert q.soonest_reset(("A", "B")) == "B", "B has never spun, so it is free right now"
+
+
+def test_accounts_lists_only_accounts_with_records():
+    q = SpinQuota(None, limit=10)
+    q.record("B"); q.record("A")
+    assert q.accounts() == ("A", "B")
+
+
+def test_accounts_excludes_the_unidentified_bucket():
+    """A bare record() lands in the "" bucket, but "" is not a real account name - a
+    caller iterating "known accounts" must never see it alongside real ones."""
+    q = SpinQuota(None, limit=10)
+    q.record()           # bare: goes into the "" bucket
+    q.record("A")
+    assert q.accounts() == ("A",)
+
+
+# ------------------------------------------------------------------ attribute_legacy persistence
+#
+# attribute_legacy's whole point is that reassignment survives a reload - the legacy
+# bucket design is worthless if a restart could silently un-attribute what was already
+# claimed. Constructing a *fresh* SpinQuota from the same path in each of these is
+# deliberate: asserting on the in-memory object that called attribute_legacy would pass
+# even if _rewrite never actually wrote the file.
+
+def test_attribute_legacy_persists_across_a_reload(tmp_path):
+    p = tmp_path / "spins.jsonl"
+    p.write_text("\n".join(json.dumps({"ts": time.time()}) for _ in range(5)) + "\n")
+    q = SpinQuota(p, limit=10)
+    assert q.attribute_legacy("A") == 5
+    fresh = SpinQuota(p, limit=10)
+    assert fresh.state("A").used == 5
+    assert fresh.legacy_count == 0
+
+
+def test_attribute_legacy_does_not_double_move(tmp_path):
+    p = tmp_path / "spins.jsonl"
+    p.write_text("\n".join(json.dumps({"ts": time.time()}) for _ in range(5)) + "\n")
+    q = SpinQuota(p, limit=10)
+    assert q.attribute_legacy("A") == 5
+    assert q.attribute_legacy("A") == 0, "already claimed; nothing left to move"
+    assert q.state("A").used == 5, "and the second call must not have inflated the count"
+
+
+def test_mixed_buckets_survive_a_forced_rewrite(tmp_path):
+    """A legacy record (no "account" key), an unidentified ("") record, and a named
+    account's record must still land in three distinct buckets after a forced
+    _rewrite() writes them all back out and a fresh instance reloads the file - the
+    property that would break if _rewrite's output ever stopped being symmetric with
+    what _load expects."""
+    p = tmp_path / "spins.jsonl"
+    p.write_text(json.dumps({"ts": time.time()}) + "\n")   # legacy: no "account" key
+    q = SpinQuota(p, limit=10)
+    assert q.legacy_count == 1
+    q.record()          # "" bucket
+    q.record("B")        # named bucket
+    q._rewrite()
+
+    fresh = SpinQuota(p, limit=10)
+    assert fresh.legacy_count == 1
+    assert fresh.state().used == 1
+    assert fresh.state("B").used == 1
+
+
+def test_a_wrong_typed_account_fails_loudly_instead_of_reporting_zero():
+    """A float key can never match a bucket, so state() would otherwise report
+    used=0/exhausted=False - a confident wrong answer indistinguishable from a healthy
+    account. That is exactly the misdiagnosis this module exists to prevent."""
+    q = SpinQuota(None, limit=10)
+    with pytest.raises(TypeError):
+        q.state(1234.5)
+    with pytest.raises(TypeError):
+        q.record(1234.5)

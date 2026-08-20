@@ -415,3 +415,20 @@ def test_report_surfaces_a_halt():
     s = SessionStats(started=0.0)
     s.halts = 1
     assert "halts" in s.report(now=300.0)
+
+
+def test_summary_carries_the_account():
+    s = SessionStats(account="TrainerOne")
+    assert s.summary()["account"] == "TrainerOne"
+
+
+def test_the_lifetime_total_spans_every_account(tmp_path):
+    """Lifetime is the whole history of this bot, named accounts and unnamed runs alike -
+    per-account totals are what the session rows and the spin quota are for."""
+    p = tmp_path / "sessions.jsonl"
+    a = SessionStats(account="TrainerOne"); a.encounters = 10
+    b = SessionStats(account="TrainerTwo"); b.encounters = 4
+    c = SessionStats(); c.encounters = 7
+    for st in (a, b, c):
+        append_session(p, st.summary(now=st.started + 600))
+    assert load_lifetime(p)["encounters"] == 21

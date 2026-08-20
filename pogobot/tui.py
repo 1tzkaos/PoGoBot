@@ -137,11 +137,16 @@ class Dashboard:
         t.add_column(justify="center")
         t.add_column(justify="right")
         if self.quota is not None:
-            q = self.quota.state()
+            # Named, because spins are booked against an account: the unattributed
+            # bucket reads 0/1200 forever once a run knows who it is.
+            q = self.quota.state(account=self.stats.account)
             style = "bold red" if q.exhausted else ("yellow" if q.remaining < 100 else "dim")
             spins = f"[{style}]spins {q.used}/{q.limit}[/]  "
         else:
             spins = ""
+        # Beside the quota it disambiguates: a spin count with no name attached is exactly
+        # the ambiguity a multi-account run needs resolved on screen.
+        who = f"[bold]{self.stats.account}[/]  " if self.stats.account else ""
         life = ""
         if self.lifetime:
             life = (f"lifetime {self.lifetime['sessions']} runs  "
@@ -159,7 +164,7 @@ class Dashboard:
         t.add_row(
             label,
             f"[bold]PoGoBot[/]  {self.stats.hud_line()}",
-            f"{spins}[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
+            f"{who}{spins}[dim]{life}[/]  [cyan]{fps:.1f} fps[/]",
         )
         return Panel(t, border_style="grey42")
 

@@ -17,7 +17,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .config import Config
+from .accounts import AccountView
+from .config import Config, Timings
 from .effects import (
     Back,
     BotState,
@@ -77,6 +78,13 @@ class Context:
     #: set by the runner from the rolling 24h spin quota
     spins_exhausted: bool = False
     taps_in_state: int = 0
+    #: refreshed by the runner from the UI tree; None until first read
+    accounts: Optional[AccountView] = None
+    switch_target: Optional[str] = None
+    switch_phase: str = "open"
+    #: ctx.now at the moment the current login tap landed; 0.0 means none has (yet, or at
+    #: all - the target was already active and no login was ever tapped)
+    switch_login_ts: float = 0.0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
@@ -178,6 +186,11 @@ def pick_target(obs: Observation, ctx: Context):
 class Handler:
     state: BotState
     timeout_s: float = 30.0
+
+    def timeout(self, ctx: Context) -> float:
+        """The budget for this state, in seconds. Overridden where the budget belongs to
+        the Config rather than to the handler - see `Switching`."""
+        return self.timeout_s
 
     def on_timeout(self, obs: Observation, ctx: Context) -> list[Effect]:
         return [Transition(BotState.RECOVERING, IntentOutcome.EXPIRED,
@@ -364,6 +377,163 @@ class Rocket(Handler):
         ]
 
 
+class Switching(Handler):
+    """Log into another account through the PGSharp overlay.
+
+    Phases advance through `switch_phase` on the Context rather than through nested
+    conditionals, so each tick makes exactly one decision from observable state: "open"
+    drives the overlay to the target's login button, "settle" waits out whatever the
+    login produces until the map is back AND the login has had time to land, and "verify"
+    re-opens the overlay to read the asterisk before confirming anything.
+
+    `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
+    dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
+    box fires on 5/5 ChooseParty frames, which is a real Rocket screen. What justifies
+    clearing them is context - we just tapped a login button, so whatever is on screen is
+    between us and the map. That claim expires with the state timeout.
+
+    The map coming back is not proof the switch worked, either, for two SEPARATE reasons
+    that both had to be fixed. First: PGSharp shuts its own panel as part of logging in,
+    so every post-login read of the account list comes back `rows=0` regardless of
+    whether the login succeeded - `verify` exists to re-open it and read the asterisk,
+    the only ground truth for who is actually logged in. Second, and more subtly: the
+    OUTGOING account's map can still be on screen for a second or two after the login tap
+    - the game has not torn it down yet - so `obs.on_map` can turn true well before the
+    login has actually landed (measured: ~14s tap-to-modal). A version that raced this
+    re-opened the panel at +6s, correctly read the OUTGOING account still active, and
+    concluded the switch had failed - when attempt 2 immediately after confirmed almost
+    instantly, proving attempt 1 had simply not been given time to finish. That is why
+    `_settle` waits out `Timings.switch_login_grace` before ever handing off to `verify`,
+    and why a mismatch inside `verify` is never treated as final (see `_verify`) - "someone
+    else is active" at one instant cannot be told apart from "not yet" from that instant
+    alone. Only the state timeout (`Timings.switch_timeout`) is allowed to end a switch
+    that never confirms, and `Runner` records that expiry so the next attempt waits out a
+    backoff instead of re-tapping a control that has just refused us.
+    """
+
+    state = BotState.SWITCHING
+    #: Declared so the import-time contract below still sees a numeric budget, and kept
+    #: equal to the config default so the two can never disagree. `timeout()` is what the
+    #: dispatcher actually asks, and it reads the LIVE config - `Timings.switch_timeout`
+    #: was configurable in name only while this number was the one that counted.
+    timeout_s = Timings().switch_timeout
+
+    def timeout(self, ctx):
+        return ctx.cfg.timings.switch_timeout
+
+    def step(self, obs, ctx):
+        if ctx.switch_phase == "settle":
+            return self._settle(obs, ctx)
+        if ctx.switch_phase == "verify":
+            return self._verify(obs, ctx)
+        cfg = ctx.cfg
+        v = ctx.accounts
+        if v is None or not v.available:
+            return []                    # could not look; the timeout owns the outcome
+        if not ctx.ready("switch", cfg.timings.switch_tap):
+            return []
+        if not v.panel_open:
+            if v.launcher_norm is None:
+                return []
+            return [Tap(*v.launcher_norm, "switch: open the PGSharp overlay", budget="switch")]
+        row = v.by_name(ctx.switch_target) if ctx.switch_target else None
+        if row is None:
+            if v.accounts_tab_norm is None:
+                return []
+            return [Tap(*v.accounts_tab_norm, "switch: select the Accounts tab", budget="switch")]
+        if row.active:
+            # Already on the target - no login tap is coming, so there is nothing for
+            # the grace period to wait out. `Runner._begin_switch` zeroes
+            # `switch_login_ts` at the start of every attempt, so leaving it alone here
+            # means `_settle` treats the grace as already satisfied - and means attempt 2
+            # can never inherit attempt 1's timestamp.
+            return [SetFlag("switch_phase", "settle"),
+                    Note(f"already logged into {row.name}; waiting for the map")]
+        return [
+            SetFlag("switch_phase", "settle"),
+            SetFlag("switch_login_ts", ctx.now),
+            Note(f"switching to {row.name}", "info"),
+            Tap(*row.login_norm, f"switch: log into {row.name}", budget="switch"),
+        ]
+
+    def _settle(self, obs, ctx):
+        cfg = ctx.cfg
+        if not obs.on_map:
+            if obs.close_button_xy is not None and ctx.ready("close", cfg.timings.close_menu):
+                return [Tap(*obs.close_button_xy, "switch: close a post-login overlay",
+                            budget="close")]
+            if ctx.ready("back", cfg.timings.switch_clear):
+                # Measured: one BACK dismissed the post-login news modal. BACK carries no
+                # coordinate at all, which is why it is preferred to tapping a screen whose
+                # layout we have exactly one example of.
+                return [Back("switch: dismiss a post-login screen")]
+            return []
+        if ctx.now - ctx.switch_login_ts < cfg.timings.switch_login_grace:
+            # The outgoing account's map can reappear before the login has actually
+            # landed (see class docstring) - on_map alone is not the signal to act on.
+            return []
+        # The map is back and the login has had time to land. Hand off to verify in the
+        # same tick rather than spending one just to flip the phase - `_verify` reads
+        # whatever view is on the Context right now.
+        return [SetFlag("switch_phase", "verify")] + self._verify(obs, ctx)
+
+    def _verify(self, obs, ctx):
+        """Re-open the overlay and read the asterisk - the only ground truth for who is
+        logged in. Never adds its own staleness tracking: the runner drops `ctx.accounts`
+        after every tap taken while SWITCHING, so a `None` or an already-stale-looking
+        view here just means the next refresh has not landed yet, and doing nothing is
+        the correct response either way.
+
+        A mismatch here is never latched as final - see class docstring for why "someone
+        else is active" cannot be told apart from "not yet" from a single read. It closes
+        what it can and returns, and the next tick tries again from scratch; only the
+        state timeout is allowed to end a switch that never confirms.
+        """
+        cfg = ctx.cfg
+        v = ctx.accounts
+        if v is None or not v.available:
+            return []                    # could not look; wait for the next refresh
+        if not ctx.ready("switch", cfg.timings.switch_tap):
+            return []
+        if not v.panel_open:
+            if v.launcher_norm is None:
+                return []
+            return [Tap(*v.launcher_norm, "switch: re-open the overlay to verify",
+                        budget="switch")]
+        if not v.rows:
+            # PGSharp remembers the last-viewed tab, so the panel can reopen on Cooldown
+            # History rather than the account list. identify_account (accounts.py)
+            # mirrors this same tab-follow for the same reason; not a third shape.
+            if v.accounts_tab_norm is None:
+                return []
+            return [Tap(*v.accounts_tab_norm, "switch: follow the Accounts tab",
+                        budget="switch")]
+        if v.active is not None and v.active.name == ctx.switch_target:
+            effects = []
+            if v.close_norm is not None:
+                effects.append(Tap(*v.close_norm, "switch: close overlay after verifying",
+                                   budget="switch"))
+            effects.append(Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                                      f"logged into {ctx.switch_target}"))
+            return effects
+        # Someone else is active. The login is asynchronous, so this is not evidence of
+        # failure by itself - only that it has not landed as of this read. A second login
+        # tap here would be blind regardless, so close what we can and try again later;
+        # the state timeout, not this check, is what ends a switch that truly never lands.
+        effects = [Note(f"switch to {ctx.switch_target} not yet confirmed; "
+                        f"{v.active.name if v.active else 'no one'} still active", "info")]
+        if v.close_norm is not None:
+            effects.append(Tap(*v.close_norm, "switch: close overlay; will re-check",
+                               budget="switch"))
+        return effects
+
+    def on_timeout(self, obs, ctx):
+        return [
+            Note(f"account switch to {ctx.switch_target} never confirmed", "warn"),
+            Transition(BotState.RECOVERING, IntentOutcome.EXPIRED, "switch timeout"),
+        ]
+
+
 class Popup(Handler):
     """Close a closable overlay. Only ever taps a button it actually located."""
 
@@ -414,7 +584,8 @@ class Halted(Handler):
 
 
 HANDLERS = {h.state: h() for h in
-            (Boot, Scanning, Targeting, Encounter, Pokestop, Rocket, Popup, Recovering, Halted)}
+            (Boot, Scanning, Targeting, Encounter, Pokestop, Rocket, Switching, Popup,
+             Recovering, Halted)}
 
 # Startup contract: a state without a handler, timeout, or on_timeout is a bug, not a livelock.
 for _s in BotState:
@@ -449,6 +620,11 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     """
     cfg = ctx.cfg
     if ctx.state is BotState.HALTED:
+        return None
+    if ctx.state is BotState.SWITCHING:
+        # A switch owns the screen until it confirms or times out. Post-login screens
+        # look like Rocket and like encounters; following them abandons the switch
+        # half-done, logged into neither account cleanly.
         return None
     # While a Rocket fight is in progress, an encounter-looking screen is almost always
     # part of the fight. Only the map may pull us out; the reward encounter is picked up
@@ -491,6 +667,6 @@ def step(obs: Observation, ctx: Context) -> list[Effect]:
         return [Transition(want, outcome, f"observation implies {want.value}")]
 
     handler = HANDLERS[ctx.state]
-    if ctx.elapsed > handler.timeout_s:
+    if ctx.elapsed > handler.timeout(ctx):
         return handler.on_timeout(obs, ctx)
     return handler.step(obs, ctx)

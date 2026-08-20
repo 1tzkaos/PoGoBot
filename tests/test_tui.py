@@ -99,9 +99,35 @@ def test_the_spin_quota_is_shown_when_one_is_tracked():
     assert "spins 300/1200" in _text(d, mkobs(on_map=True))
 
 
+def test_the_spin_quota_follows_the_account_the_session_belongs_to():
+    """Spins are booked against an account now, so a header that asks for the unattributed
+    bucket renders 0/1200 forever - never yellow, never red - on the one screen the quota
+    exists to disambiguate."""
+    from pogobot.quota import SpinQuota
+    d = _dash()
+    d.stats.account = "TrainerOne"
+    d.quota = SpinQuota(None, limit=1200)
+    d.quota.seed(300, spread_hours=6, account="TrainerOne")
+    assert "spins 300/1200" in _text(d, mkobs(on_map=True))
+
+
 def test_an_exhausted_quota_is_shown_too():
     from pogobot.quota import SpinQuota
     d = _dash()
     d.quota = SpinQuota(None, limit=1200)
     d.quota.seed(1200, spread_hours=20)
     assert "spins 1200/1200" in _text(d, mkobs(on_map=True))
+
+
+def test_the_header_names_the_account_the_session_belongs_to():
+    """A run that identified its account should say so on the one screen a trainer
+    running several accounts watches to tell them apart."""
+    d = _dash()
+    d.stats.account = "TrainerOne"
+    assert "TrainerOne" in _text(d, mkobs(on_map=True))
+
+
+def test_the_header_still_renders_with_no_account_known():
+    d = _dash()
+    assert d.stats.account is None
+    assert "PoGoBot" in _text(d, mkobs(on_map=True))

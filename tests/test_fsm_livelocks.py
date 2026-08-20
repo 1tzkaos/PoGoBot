@@ -127,6 +127,10 @@ def test_every_state_declares_a_timeout_and_an_escape():
     for s in BotState:
         assert s in fsm.HANDLERS
         assert isinstance(fsm.HANDLERS[s].timeout_s, (int, float))
+        # The dispatcher asks `timeout(ctx)`, not the attribute, so that a budget that
+        # belongs to the Config can be read from it. A handler that overrides it and
+        # returns something the comparison cannot use is the same livelock in a new place.
+        assert isinstance(fsm.HANDLERS[s].timeout(ctx(s)), (int, float))
 
 
 def test_at_most_one_interrupt_per_tick_and_it_never_transitions():
