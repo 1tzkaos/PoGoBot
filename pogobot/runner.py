@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import fsm
+from . import perception
 from .config import Config
 from .effects import (
     Back,
@@ -84,7 +85,8 @@ SWITCH_BACKOFF_BASE = 600.0
 SWITCH_MAX_FAILURES = 3
 
 # States whose per-visit bookkeeping must reset on entry.
-_RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps", "switch_goplus_attempts")
+_RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps", "switch_goplus_attempts",
+                   "switch_clear_presses")
 
 
 class Runner:
@@ -566,6 +568,18 @@ class Runner:
             # Recorded here rather than read off `ctx.accounts` later because the handler
             # drops that view after every tap it takes.
             self._last_seen_active = self.ctx.accounts.active.name
+        # Refresh the AutoWalk icon colour reading in lockstep with the view that just
+        # supplied its bounds - see perception.autowalk_active_signal,
+        # fsm.Switching._autowalk_menu, and fsm.Context.switch_autowalk_active for why
+        # this needs no reset of its own between switch attempts. Uses `self._last_frame`,
+        # the SAME frame `perceptor.observe` already ran on this tick (set at the top of
+        # the read loop, before this method is ever called): the uiautomator dump just
+        # read above supplies the icon's bounds, the frame supplies its colour.
+        icon_rect = (self.ctx.accounts.autowalk_icon_rect_norm
+                    if self.ctx.accounts.available else None)
+        self.ctx.switch_autowalk_active = (
+            perception.autowalk_active_signal(self._last_frame.bgr, icon_rect, self.cfg)
+            if self._last_frame is not None else Tristate.UNKNOWN)
 
     def choose_next_account(self) -> Optional[str]:
         """Next usable account, round-robin from the current one.
@@ -666,6 +680,10 @@ class Runner:
         # verify could run against a login tap that had not happened yet. It is also what
         # tells `_on_switch_failed` whether this attempt ever tapped a login at all.
         self.ctx.switch_login_ts = 0.0
+        # Same reasoning, same shape: a stale non-zero value here would make
+        # `Switching._autowalk_deadline` believe attempt 2's AutoWalk ladder has already
+        # been running since attempt 1's, and could time it out before it ever starts.
+        self.ctx.switch_autowalk_since = 0.0
         self._last_seen_active = None
         self._switch_target = name
         log.info("switching account -> %s", name)
@@ -822,6 +840,14 @@ class Runner:
                         # only an ACCEPTED tap may advance the bound that keeps a stuck
                         # toggle from spending unlimited attempts.
                         self.ctx.switch_goplus_attempts += 1
+                    elif budget == "switch_clear" and isinstance(e, Back):
+                        # Same reasoning as switch_zoom_reps/switch_goplus_attempts just
+                        # above: `_settle` is pure and cannot know whether its Back
+                        # actually reached the device, so only an ACCEPTED press may
+                        # advance the bound that stops it hammering BACK into a
+                        # legitimate multi-minute LOADING screen (see
+                        # config.Timings.switch_clear_max).
+                        self.ctx.switch_clear_presses += 1
                     self.ctx.last_action[budget] = self.ctx.now
                     self.ctx.taps_in_state += 1
                     if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag)):

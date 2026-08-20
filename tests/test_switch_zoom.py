@@ -84,21 +84,25 @@ def test_zoom_repeats_exactly_the_configured_number_of_times():
     assert fired == reps
 
 
-def test_zoom_confirms_only_after_every_repeat_has_fired():
+def test_zoom_hands_off_to_autowalk_only_after_every_repeat_has_fired():
+    """`_zoom` no longer confirms the switch itself - it hands off to "goplus", which
+    (obs() defaults `goplus` to absent) cascades straight on to "autowalk_open" in the
+    same tick (see test_goplus.py for that chain, tests/test_autowalk.py for what
+    "autowalk_open" itself does). What this proves still holds: the hand-off fires
+    exactly once, and only once every zoom repeat has actually fired - not before, and
+    not a second time."""
     c = ctx(phase="zoom")
     reps = c.cfg.zoom.repeats
-    transitions = []
+    reached = []
     for _ in range(reps + 1):
         effects = fsm.step(obs(on_map=True), c)
         for e in effects:
             if isinstance(e, DoubleTapDrag):
                 c.switch_zoom_reps += 1
-            elif isinstance(e, Transition):
-                transitions.append(e)
-    assert len(transitions) == 1
-    tr = transitions[0]
-    assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
-    assert tr.reason.endswith(c.switch_target)
+            elif isinstance(e, SetFlag) and e.name == "switch_phase" and e.value == "autowalk_open":
+                reached.append(e)
+        assert not any(isinstance(e, Transition) for e in effects)
+    assert len(reached) == 1
 
 
 def test_zoom_gesture_coordinates_never_land_on_a_delete_button():

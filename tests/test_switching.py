@@ -71,6 +71,19 @@ def test_target_row_present_taps_its_login_button():
     assert any(isinstance(e, SetFlag) and e.value == "settle" for e in effects)
 
 
+def panel_with_autowalk(active="TrainerOne"):
+    """`panel()` plus the star/shortcut-menu/AutoWalk-dialog fields, all populated at
+    once - a dump that could never really show an open account panel AND an open
+    AutoWalk dialog together, but exercising the delete-guard against every coordinate
+    this module can ever produce, together, is the point of the test below: it proves
+    none of them is ever confused with a delete button, however unrealistic the
+    combination that would require."""
+    return replace(panel(active), star_norm=(0.08, 0.23),
+                   autowalk_menu_norm=(0.30, 0.46), autowalk_dialog_open=True,
+                   autowalk_continue_last_norm=(0.30, 0.90),
+                   autowalk_ok_norm=(0.80, 0.90))
+
+
 def test_no_tap_ever_lands_on_a_delete_button():
     """The delete button sits ~24px from login. This is the test that matters.
 
@@ -80,21 +93,38 @@ def test_no_tap_ever_lands_on_a_delete_button():
     are still coordinates this handler emits, and this is the test that matters for those.
     "goplus" needs `obs.goplus=FALSE` forced on top of the loop's own `obs()` call - with
     the suite-wide default of UNKNOWN that phase never taps at all, and a guard that never
-    exercises the tap it exists to check proves nothing.
+    exercises the tap it exists to check proves nothing. The four "autowalk_*" phases need
+    the same care: `switch_autowalk_since` has to be non-zero (as it would be by the time
+    any phase past "autowalk_open" is reached) or the wall-clock deadline
+    (`fsm.Switching._autowalk_deadline`) fires first and no tap - the thing under test -
+    is ever emitted. "autowalk_menu" is run TWICE: once as every other phase is, and once
+    more with `switch_autowalk_active=Tristate.TRUE` - the "already active" skip chains
+    straight into `_autowalk_close` and emits its OWN star tap in the same tick, a
+    coordinate this guard did not exercise before that rule existed.
     """
     from pogobot.observation import Tristate
-    for phase in ("open", "settle", "verify", "zoom", "goplus"):
+    autowalk_phases = ("autowalk_open", "autowalk_menu", "autowalk_dialog", "autowalk_close")
+
+    def _check(phase, on_map, **extra):
+        c = ctx(phase=phase, accounts=panel_with_autowalk(), **extra)
+        kw = {"goplus": Tristate.FALSE} if phase == "goplus" else {}
+        effects = fsm.step(obs(on_map=on_map, **kw), c)
+        points = [(t.x, t.y) for t in taps(effects)]
+        points += [(d.x1, d.y1) for d in effects if isinstance(d, DoubleTapDrag)]
+        points += [(d.x2, d.y2) for d in effects if isinstance(d, DoubleTapDrag)]
+        for x, y in points:
+            for row in c.accounts.rows:
+                assert (x, y) != row.delete_norm
+                assert abs(x - row.delete_norm[0]) > 0.02 or abs(y - row.delete_norm[1]) > 0.02
+
+    for phase in ("open", "settle", "verify", "zoom", "goplus", *autowalk_phases):
         for on_map in (True, False):
-            c = ctx(phase=phase)
-            kw = {"goplus": Tristate.FALSE} if phase == "goplus" else {}
-            effects = fsm.step(obs(on_map=on_map, **kw), c)
-            points = [(t.x, t.y) for t in taps(effects)]
-            points += [(d.x1, d.y1) for d in effects if isinstance(d, DoubleTapDrag)]
-            points += [(d.x2, d.y2) for d in effects if isinstance(d, DoubleTapDrag)]
-            for x, y in points:
-                for r in c.accounts.rows:
-                    assert (x, y) != r.delete_norm
-                    assert abs(x - r.delete_norm[0]) > 0.02 or abs(y - r.delete_norm[1]) > 0.02
+            extra = {"switch_autowalk_since": 100.0} if phase in autowalk_phases[1:] else {}
+            _check(phase, on_map, **extra)
+
+    for on_map in (True, False):
+        _check("autowalk_menu", on_map, switch_autowalk_since=100.0,
+              switch_autowalk_active=Tristate.TRUE)
 
 
 def test_unavailable_view_does_nothing_rather_than_guessing():
@@ -115,6 +145,53 @@ def test_settle_prefers_a_located_close_button_over_back():
     effects = fsm.step(obs(on_map=False, screen="Menu", conf=0.99, close_xy=(0.5, 0.9)), c)
     assert taps(effects)[0].x == pytest.approx(0.5)
     assert not any(isinstance(e, Back) for e in effects)
+
+
+def test_the_clearing_back_press_carries_its_own_budget():
+    """`Runner.apply` counts an accepted press by matching this exact budget name (see
+    config.Timings.switch_clear_max) - not the shared "back" bucket RECOVERING and the
+    exit-dialog/keyboard interrupts also use, so an unrelated Back never eats into the
+    bound this guards."""
+    c = ctx(phase="settle", accounts=panel(active="TrainerTwo"))
+    backs = [e for e in fsm.step(obs(on_map=False, screen="Menu", conf=0.99), c)
+             if isinstance(e, Back)]
+    assert len(backs) == 1
+    assert backs[0].budget == "switch_clear"
+
+
+def test_settle_stops_pressing_back_once_the_clear_bound_is_spent():
+    """The fix for the measured 90-press BACK storm: once `switch_clear_presses` has
+    reached `Timings.switch_clear_max`, `_settle` simply waits - it must not keep
+    hammering BACK into what may be a legitimate multi-minute LOADING screen."""
+    bound = Config().timings.switch_clear_max
+    c = ctx(phase="settle", accounts=panel(active="TrainerTwo"),
+           switch_clear_presses=bound)
+    effects = fsm.step(obs(on_map=False, screen="Menu", conf=0.99), c)
+    assert effects == []
+
+
+def test_a_located_close_button_ignores_the_clear_bound():
+    """A located close button is targeted, not blind - unlike the coordinate-free BACK
+    fallback it is never subject to switch_clear_max."""
+    bound = Config().timings.switch_clear_max
+    c = ctx(phase="settle", accounts=panel(active="TrainerTwo"),
+           switch_clear_presses=bound)
+    effects = fsm.step(
+        obs(on_map=False, screen="Menu", conf=0.99, close_xy=(0.5, 0.9)), c)
+    assert taps(effects)[0].x == pytest.approx(0.5)
+    assert not any(isinstance(e, Back) for e in effects)
+
+
+def test_settle_still_confirms_once_the_map_returns_after_the_clear_bound_is_spent():
+    """The bound only stops the BLIND BACK presses; it must never itself block a switch
+    from confirming once the map actually comes back - switch_timeout, not this count,
+    owns the outcome of a switch that never confirms."""
+    bound = Config().timings.switch_clear_max
+    c = ctx(phase="settle", accounts=panel(active="TrainerTwo"),
+           switch_clear_presses=bound)
+    effects = fsm.step(obs(on_map=True), c)
+    assert not [e for e in effects if isinstance(e, Transition)]
+    assert any(isinstance(e, SetFlag) and e.value == "zoom" for e in effects)
 
 
 def test_confirmation_needs_both_the_map_and_the_asterisk():

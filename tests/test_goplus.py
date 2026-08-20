@@ -170,24 +170,32 @@ def test_off_and_on_map_presses_the_toggle():
     assert not any(isinstance(e, Transition) for e in effects)
 
 
-def test_on_does_not_press_and_confirms_the_switch():
+def test_on_does_not_press_and_hands_off_to_autowalk():
+    """`_goplus` no longer confirms directly - it hands off to "autowalk_open" (see
+    tests/test_autowalk.py for what that phase does and why the transition lives at the
+    END of that ladder instead)."""
     c = gctx(target="TrainerTwo")
     effects = fsm.step(obs(on_map=True, goplus=Tristate.TRUE), c)
+    # panel() (test_switching.py's fixture) carries no star_norm, so the hand-off itself
+    # cannot tap anything either - this asserts no tap of ANY kind, not just "goplus".
     assert not [e for e in effects if isinstance(e, Tap)]
-    tr = [e for e in effects if isinstance(e, Transition)]
-    assert len(tr) == 1
-    assert tr[0].to is BotState.SCANNING and tr[0].outcome is IntentOutcome.CONFIRMED
-    assert tr[0].reason.endswith("TrainerTwo")
+    assert not any(isinstance(e, Transition) for e in effects)
+    assert any(isinstance(e, SetFlag) and e.name == "switch_phase"
+               and e.value == "autowalk_open" for e in effects)
 
 
-def test_absent_does_not_press_and_still_confirms_the_switch():
+def test_absent_does_not_press_and_still_hands_off_to_autowalk():
     """No Virtual Go Plus at all must not block anything - the whole feature is a no-op
-    for an account that never had the toggle."""
+    for an account that never had the toggle, same as it always was; only where the
+    ladder goes next has changed (see the test above)."""
     c = gctx(target="TrainerTwo")
     effects = fsm.step(obs(on_map=True, goplus=Tristate.UNKNOWN), c)
+    # panel() (test_switching.py's fixture) carries no star_norm, so the hand-off itself
+    # cannot tap anything either - this asserts no tap of ANY kind, not just "goplus".
     assert not [e for e in effects if isinstance(e, Tap)]
-    tr = [e for e in effects if isinstance(e, Transition)]
-    assert tr and tr[0].outcome is IntentOutcome.CONFIRMED
+    assert not any(isinstance(e, Transition) for e in effects)
+    assert any(isinstance(e, SetFlag) and e.name == "switch_phase"
+               and e.value == "autowalk_open" for e in effects)
 
 
 def test_does_nothing_until_the_map_is_confirmed_back():
@@ -224,14 +232,15 @@ def test_a_second_press_waits_for_the_first_to_take():
 
 
 def test_attempts_are_bounded_and_never_block_confirmation():
-    """Still OFF after `max_attempts` presses: the switch confirms anyway rather than
-    sitting there forever - it must never block a switch from confirming."""
+    """Still OFF after `max_attempts` presses: the ladder moves on to AutoWalk anyway
+    rather than sitting there forever - it must never block a switch from confirming."""
     c = gctx(target="TrainerTwo")
     c.switch_goplus_attempts = C.goplus.max_attempts
     effects = fsm.step(obs(on_map=True, goplus=Tristate.FALSE), c)
     assert not [e for e in effects if isinstance(e, Tap)]
-    tr = [e for e in effects if isinstance(e, Transition)]
-    assert tr and tr[0].outcome is IntentOutcome.CONFIRMED
+    assert not any(isinstance(e, Transition) for e in effects)
+    assert any(isinstance(e, SetFlag) and e.name == "switch_phase"
+               and e.value == "autowalk_open" for e in effects)
 
 
 def test_zoom_hands_off_to_goplus_once_every_repeat_has_fired():
@@ -248,16 +257,17 @@ def test_zoom_hands_off_to_goplus_once_every_repeat_has_fired():
     assert not any(isinstance(e, Transition) for e in effects)
 
 
-def test_zoom_hand_off_confirms_immediately_when_goplus_is_absent():
-    """The common case in this whole test suite: `obs()` defaults `goplus` to UNKNOWN,
-    so every pre-existing zoom test that never mentions Virtual Go Plus at all still
-    confirms on the same tick zoom's repeats complete - see test_switch_zoom.py."""
+def test_zoom_hand_off_reaches_autowalk_immediately_when_goplus_is_absent():
+    """The common case in this whole test suite: `obs()` defaults `goplus` to UNKNOWN, so
+    every pre-existing zoom test that never mentions Virtual Go Plus at all still reaches
+    the AutoWalk phase on the same tick zoom's repeats complete - see
+    test_switch_zoom.py, and tests/test_autowalk.py for what happens from there."""
     c = switching_ctx(phase="zoom")
     c.switch_zoom_reps = c.cfg.zoom.repeats
     effects = fsm.step(obs(on_map=True), c)
-    tr = [e for e in effects if isinstance(e, Transition)]
-    assert len(tr) == 1
-    assert tr[0].to is BotState.SCANNING and tr[0].outcome is IntentOutcome.CONFIRMED
+    assert not any(isinstance(e, Transition) for e in effects)
+    assert any(isinstance(e, SetFlag) and e.name == "switch_phase"
+               and e.value == "autowalk_open" for e in effects)
 
 
 # ------------------------------------------------------------------ never on a failed/timed-out switch

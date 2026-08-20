@@ -112,6 +112,12 @@ class Observation:
     #: (see perception.goplus_signal); nothing here enforces that gate, so a caller that
     #: reads this off-map is reading noise, not absence.
     goplus: Tristate = Tristate.UNKNOWN
+    #: Pokemon GO's own "Do you want to exit Pokemon GO?" confirm dialog - Unity-drawn,
+    #: so uiautomator cannot see it (see perception.exit_dialog_signal). Defaults to a
+    #: false Signal so every existing Observation() call site - which never mentions this
+    #: field - stays exactly as it was, unlike x_button/map_ball/etc. above which are
+    #: required precisely because nothing this old ever forgot to compute them.
+    exit_dialog: Signal = field(default_factory=lambda: Signal(False, 0.0, 1.0))
 
     # Measured over 235 labelled frames: the red Pokeball alone reaches 97% recall on
     # Overworld but fires on 18% of encounters (a red Poke Ball sits in the same ROI).

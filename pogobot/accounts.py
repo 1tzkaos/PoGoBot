@@ -15,6 +15,15 @@ edge of its login button - 157px centre to centre, measured off
 tests/fixtures/uiautomator/accounts_open.xml. Every coordinate here is some node's OWN
 bounds. Nothing is a constant, an offset, or a guess, because the failure mode is an
 irreversibly deleted account.
+
+The same channel also reads PGSharp's floating "star" shortcut widget, the menu it opens,
+and the AutoWalk dialog that menu can lead to (see `fsm.Switching._autowalk_open` and
+neighbours) - not a second channel, the same dump, parsed further. The star moves (it is
+described as draggable, and was measured at two different positions hours apart - see
+tests/fixtures/uiautomator/star_moved.xml), so it is located the same way the cooldown
+launcher already is: through a stable descendant id (`hl_floating_icon`, confirmed present
+in tests/fixtures/uiautomator/accounts_open.xml) walked up to its nearest clickable
+ancestor, never by class+clickable alone or by a remembered coordinate.
 """
 
 from __future__ import annotations
@@ -38,6 +47,23 @@ ID_DELETE = "hl_account_item_delete"
 ID_TAB_ACCOUNTS = "hl_cdhist_cat_accounts"
 ID_CLOSE = "hl_page_close"
 ID_COOLDOWN_TEXT = "hl_cd_text"
+#: The icon ImageView inside the star widget - see the module docstring. Located the
+#: same way ID_COOLDOWN_TEXT is: walk up from this id to the nearest clickable ancestor.
+ID_STAR_ICON = "hl_floating_icon"
+#: Shortcut-menu entries the star opens ('Map', 'AutoWalk', 'Feeds', ...). Each is its
+#: own directly-clickable text node - the same shape ID_TAB_ACCOUNTS already is.
+ID_SHORTCUT_ITEM = "hl_shortcut_menu_item_txt"
+#: The AutoWalk dialog. `alertTitle`/`button1`/`button2`/`button3` are Android's own
+#: framework AlertDialog ids, not PGSharp's - matched by suffix like everything else here
+#: so the exact package prefix (`android:id/...`) is never assumed. `hl_aw_input` and the
+#: toggle ids are never looked up at all: this module has no coordinate for any of them,
+#: which is what makes them untappable rather than merely un-tapped (see
+#: `fsm.Switching._autowalk_dialog`).
+ID_AW_TITLE = "alertTitle"
+ID_AW_TITLE_TEXT = "Auto-Generated GPX"
+ID_AW_OK = "button1"            # OK - the default (50 POIs)
+ID_AW_CANCEL = "button2"        # CANCEL - never tapped by this module
+ID_AW_CONTINUE_LAST = "button3"  # CONTINUE LAST - present only sometimes; preferred when it is
 
 _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
 
@@ -55,7 +81,9 @@ class AccountRow:
 
 @dataclass(frozen=True)
 class AccountView:
-    """The current state of the PGSharp account-list panel."""
+    """The current state of the PGSharp overlay: the account-list panel, and (see the
+    module docstring) the star shortcut widget, the menu it opens, and the AutoWalk
+    dialog that menu can lead to. All parsed from the same dump by `parse_dump`."""
 
     rows: tuple[AccountRow, ...] = ()
     launcher_norm: Optional[tuple[float, float]] = None
@@ -63,6 +91,29 @@ class AccountView:
     close_norm: Optional[tuple[float, float]] = None
     available: bool = False
     panel_open: bool = False
+    #: The star widget's own current position - see ID_STAR_ICON. None means "not found
+    #: in this dump", never a stale or assumed location.
+    star_norm: Optional[tuple[float, float]] = None
+    #: The shortcut menu's "AutoWalk" entry, present only once the star has been tapped
+    #: and the menu has actually rendered.
+    autowalk_menu_norm: Optional[tuple[float, float]] = None
+    #: The AutoWalk entry's own ICON BOX: x from the screen's own left edge to the
+    #: label's own left edge, y over the label's own vertical bounds - both taken from
+    #: the SAME node `autowalk_menu_norm` was located from, in the same pass, never a
+    #: hardcoded rectangle. This is bounds only; see `perception.autowalk_active_signal`
+    #: for what reads the colour inside it and `fsm.Switching._autowalk_menu` for the
+    #: decision that colour drives ("if the icon reads blue, this account is already
+    #: autowalking - do not tap it again"). None whenever `autowalk_menu_norm` is None -
+    #: the two can only ever appear or disappear together.
+    autowalk_icon_rect_norm: Optional[tuple[float, float, float, float]] = None
+    #: True only when a node identifies THIS dialog by its title text - never inferred
+    #: from button1/button2/button3 alone, which are generic Android AlertDialog ids that
+    #: could in principle belong to a different dialog.
+    autowalk_dialog_open: bool = False
+    #: CONTINUE LAST (button3) - present only sometimes; preferred over OK when it is.
+    autowalk_continue_last_norm: Optional[tuple[float, float]] = None
+    #: OK (button1) - the default (50 POIs).
+    autowalk_ok_norm: Optional[tuple[float, float]] = None
 
     @property
     def active(self) -> Optional[AccountRow]:
@@ -88,6 +139,16 @@ def _centre_norm(node, w: int, h: int) -> Optional[tuple[float, float]]:
     return ((r[0] + r[2]) / 2.0 / w, (r[1] + r[3]) / 2.0 / h)
 
 
+def _rect_norm(node, w: int, h: int) -> Optional[tuple[float, float, float, float]]:
+    """A node's own bounds, normalized. Used only where the shape of the bounds matters,
+    not just their centre - see `autowalk_icon_rect_norm`'s derivation below."""
+    r = _rect(node)
+    if r is None or w <= 0 or h <= 0:
+        return None
+    x0, y0, x1, y1 = r
+    return (x0 / w, y0 / h, x1 / w, y1 / h)
+
+
 def _ends_with(node, suffix: str) -> bool:
     return node.get("resource-id", "").endswith(suffix)
 
@@ -102,22 +163,60 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
 
     parents = {child: parent for parent in root.iter() for child in parent}
 
-    launcher = accounts_tab = close = None
+    def _clickable_ancestor(node):
+        """Walk up from `node` to its nearest clickable ancestor, or None. Locating a
+        launcher this way - through a stable descendant id rather than a coordinate, and
+        through the tree's own parent links rather than an assumption about how many
+        levels separate the two - is the difference between "works" and "works on this
+        phone at this resolution"."""
+        cur = parents.get(node)
+        while cur is not None:
+            if cur.get("clickable") == "true":
+                return cur
+            cur = parents.get(cur)
+        return None
+
+    launcher = accounts_tab = close = star = None
+    autowalk_menu = None
+    autowalk_icon_rect = None
+    autowalk_dialog_open = False
+    autowalk_continue_last = autowalk_ok = None
     for n in root.iter("node"):
         if _ends_with(n, ID_TAB_ACCOUNTS):
             accounts_tab = _centre_norm(n, w, h)
         elif _ends_with(n, ID_CLOSE):
             close = _centre_norm(n, w, h)
         elif _ends_with(n, ID_COOLDOWN_TEXT):
-            # The launcher is the clickable ancestor of the cooldown readout. Locating it
-            # this way rather than by coordinate is the difference between "works" and
-            # "works on this phone at this resolution".
-            cur = parents.get(n)
-            while cur is not None:
-                if cur.get("clickable") == "true":
-                    launcher = _centre_norm(cur, w, h)
-                    break
-                cur = parents.get(cur)
+            anc = _clickable_ancestor(n)
+            if anc is not None:
+                launcher = _centre_norm(anc, w, h)
+        elif _ends_with(n, ID_STAR_ICON):
+            # Same idiom as the cooldown launcher just above, deliberately not folded
+            # into one branch: the two anchor ids identify two DIFFERENT widgets, and
+            # collapsing them would make a future third widget one `elif` away from
+            # being confused with either.
+            anc = _clickable_ancestor(n)
+            if anc is not None:
+                star = _centre_norm(anc, w, h)
+        elif _ends_with(n, ID_SHORTCUT_ITEM):
+            if n.get("text") == "AutoWalk":
+                autowalk_menu = _centre_norm(n, w, h)
+                item_rect = _rect_norm(n, w, h)
+                if item_rect is not None:
+                    # The icon box: x from the screen's own left edge to the label's OWN
+                    # left edge, y over the label's own vertical bounds - see
+                    # AccountView.autowalk_icon_rect_norm and perception.autowalk_active_signal.
+                    autowalk_icon_rect = (0.0, item_rect[1], item_rect[0], item_rect[3])
+        elif _ends_with(n, ID_AW_TITLE):
+            # The one place this module reads TEXT to decide something rather than just
+            # to display it: button1/2/3 are generic Android AlertDialog ids that some
+            # other dialog could also use, so "this is the AutoWalk dialog" is only ever
+            # true when its own title says so.
+            autowalk_dialog_open = n.get("text") == ID_AW_TITLE_TEXT
+        elif _ends_with(n, ID_AW_CONTINUE_LAST):
+            autowalk_continue_last = _centre_norm(n, w, h)
+        elif _ends_with(n, ID_AW_OK):
+            autowalk_ok = _centre_norm(n, w, h)
 
     rows: list[AccountRow] = []
     for row in root.iter("node"):
@@ -157,6 +256,12 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         # open panel as closed and taps the launcher, which TOGGLES the overlay shut and
         # then open again until the switch times out.
         panel_open=close is not None or bool(rows),
+        star_norm=star,
+        autowalk_menu_norm=autowalk_menu,
+        autowalk_icon_rect_norm=autowalk_icon_rect,
+        autowalk_dialog_open=autowalk_dialog_open,
+        autowalk_continue_last_norm=autowalk_continue_last,
+        autowalk_ok_norm=autowalk_ok,
     )
 
 
