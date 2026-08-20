@@ -2,7 +2,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
-  <img src="assets/logo-light.png" alt="PoGoBot — Pokémon GO Vision Bot" width="440">
+  <img src="assets/logo-light.png" alt="PoGoBot: Pokémon GO Vision Bot" width="440">
 </picture>
 
 ### A computer-vision bot for Pokémon GO
@@ -22,7 +22,7 @@ machine, and acts through `adb`.
 
 <img src="assets/demo.gif" width="300" alt="PoGoBot running: the HUD shows live YOLOv8 detections with confidences, the interaction range, and the state machine moving through SCANNING, TARGETING and ENCOUNTER">
 
-<sub>Live capture. The HUD is the bot's own preview — detection boxes and confidences, the reach ellipse it will act inside, the screen classifier's verdict, and the raw signals behind every decision.</sub>
+<sub>Live capture. The HUD is the bot's own preview: detection boxes and confidences, the reach ellipse it will act inside, the screen classifier's verdict, and the raw signals behind every decision.</sub>
 
 </div>
 
@@ -30,21 +30,49 @@ machine, and acts through `adb`.
 
 ## Features
 
-- **Detects and taps** Pokémon, PokéStops, Rocket stops and gyms with a 4-class YOLOv8 detector
-- **Pure state machine** — `(Observation, Context) -> list[Effect]`, importable without a phone, a GPU, or a model
-- **Bounded failure** — every state declares a timeout and an escape, enforced at import time
-- **Two-source perception** — optical signals veto the classifier, with an N-of-M stabilizer so no single frame moves the machine
-- **Team GO Rocket** — presses BATTLE and confirms the party, then lets the in-game auto-battler run
-- **Runs out of balls gracefully** — gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting to restock
-- **Tracks the 24h spin cap** — a rolling window that survives restarts, so a refused PokéStop is correctly blamed on the quota rather than on distance
-- **Account switching** — optionally logs into another PGSharp account once the current one is spun out, or on a clock; off by default
-- **Honest learning loop** — curates frames into a human review queue instead of training on its own guesses
-- **Session counters** — encounters, catch attempts, stops collected and rockets, with per-hour rates and cumulative lifetime totals across runs
-- **Terminal dashboard** — `--tui` puts the counters, live perception and the log on one screen
-- **Pause and resume** — stops sending input, and stops recording, without stopping perception or ageing the state machine
-- **Full trace** — one JSON record per tick with both perception opinions, the raw scores, and every effect
-- **The whole suite runs in under 10 seconds**, no device required
-- **Replay mode** — run the entire bot against saved frames with nothing plugged in
+### What it does
+
+| Feature | What it does |
+|---|---|
+| Target detection | Finds Pokémon, PokéStops, and Rocket stops with a 4-class YOLOv8 detector. Gyms are detected too, but deliberately never tapped. |
+| Two-source perception | Optical signals veto the classifier's read, with an N-of-M stabilizer so no single frame moves the state machine. |
+| Team GO Rocket | Presses BATTLE, confirms the party, then lets the in-game auto-battler fight. The bot does not choose moves. |
+| Restocking | Gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting until it restocks. |
+| Account switching | Optionally logs into another PGSharp account once the current one is spun out, or on a clock. Off by default. |
+| Honest learning loop | Curates frames into a human review queue instead of training on its own guesses. |
+| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. The full suite (479 tests) runs in about 18 seconds. |
+
+### Failsafes and safety
+
+| Feature | What it does |
+|---|---|
+| Bounded failure | Every state declares a timeout and an escape, enforced at import time. |
+| Stuck watchdog | Halts the run rather than tapping blindly when something goes wrong. |
+| Optical button location | Every button is located on screen before it is tapped; a button that cannot be found is never guessed at a fallback coordinate. |
+| 24h spin cap tracking | A rolling window survives restarts, so a refused PokéStop is correctly blamed on the quota rather than on distance. |
+| Pause and resume | Stops sending input and stops recording, without stopping perception or ageing the state machine. |
+| Exit-dialog handling | The exit confirmation dialog is recognised and dismissed with BACK, not a tap near where its OK button usually sits. |
+
+### Observability
+
+| Feature | What it does |
+|---|---|
+| Terminal dashboard | `--tui` puts the counters, live perception, and the log on one screen. |
+| Session counters | Encounters, catch attempts, stops collected, and rockets, with per-hour rates and cumulative lifetime totals across runs. |
+| Full trace | One JSON record per tick with both perception opinions, the raw scores, and every effect. |
+| Replay mode | Runs the entire bot against saved frames with nothing plugged in. |
+
+*"Catch attempts" means exactly that, not catches: a successful catch and a fleeing Pokémon end the same way on screen, so the bot counts attempts, never confirmed catches (see [Session stats](#session-stats)).*
+
+### Coming soon
+
+Not yet implemented.
+
+| Feature | Status |
+|---|---|
+| Gym interaction | Gyms are detected by the model but excluded from targeting entirely. No gym interaction exists. |
+| Raids | No raid support. There is no raid code in the bot at all. |
+| Confirmed catches | The `confirmed_catches` field exists but always stays empty. It needs a screen classifier that can tell a catch from a flee; 36 post-login frames have already been collected toward a related `Dialogue` class. |
 
 ## Interface
 
@@ -68,10 +96,10 @@ screen and in the trace.
 | Python | 3.10 or newer |
 | Tools | [`scrcpy`](https://github.com/Genymobile/scrcpy) 2.0+ and `adb` on your `PATH` |
 | Device | Android with USB debugging enabled, Pokémon GO in the foreground |
-| Accel | Apple Silicon (MPS) or CUDA optional — CPU works, just slower |
+| Accel | Apple Silicon (MPS) or CUDA optional; CPU works, just slower |
 
 > Developed and verified on macOS with Apple Silicon. Linux and Windows should work
-> — `scrcpy` and `adb` support both — but are untested.
+> (`scrcpy` and `adb` support both), but are untested.
 
 ## Quick Start
 
@@ -153,13 +181,13 @@ Three properties are enforced structurally rather than by convention:
 
 Every optical threshold is a **fraction of its region's area**, never a pixel count, so
 changing `--max-size` cannot silently disable a check. Buttons are **located, never
-assumed** — every finder returns `Optional`, and no located button means no tap.
+assumed**: every finder returns `Optional`, and no located button means no tap.
 
 Calibrated against 235 labelled frames:
 
 | signal | behaviour |
 |---|---|
-| map — red Pokéball **and** orange binoculars | 79% recall, ~0% false positive → used as a precision-first veto |
+| map: red Pokéball **and** orange binoculars | 79% recall, ~0% false positive → used as a precision-first veto |
 | close button | 93% on menu screens, 1% on encounters |
 | affirmative pill | 100% on the Rocket BATTLE / party screens, 4% on menus |
 
@@ -168,12 +196,12 @@ agrees with the optical map signal 97.9% of the time.
 
 ## Models
 
-Trained on `det_v3` (186/21/11 images, 4 classes) — verified to have no cross-split
+Trained on `det_v3` (186/21/11 images, 4 classes), verified to have no cross-split
 leakage, no duplicate images, and no empty label files.
 
 | detector | size | class-agnostic recall | mAP50 |
 |---|---|---|---|
-| previous | 6 MB | 23.3% | not measurable — its validation set was leaked |
+| previous | 6 MB | 23.3% | not measurable: its validation set was leaked |
 | **`yolov8n`** (shipped) | **6 MB** | **69.2%** | 0.494 |
 | `yolov8s` (opt-in) | 85 MB | **75.9%** | **0.601** |
 
@@ -192,7 +220,7 @@ different class counts and what the bot needs is *did it find the object at all*
 Per-class mAP50 for `yolov8s`: pokemon 0.778, gym 0.630, pokestop_rocket 0.578,
 pokestop 0.417.
 
-The screen classifier is 5-class — Overworld / PokemonEncounter / Menu / Poi / Rocket —
+The screen classifier is 5-class (Overworld / PokemonEncounter / Menu / Poi / Rocket)
 and scores 100% on its held-out split.
 
 ## Learning
@@ -209,12 +237,12 @@ python3 tools/promote_reviewed.py --promote --yes
 ```
 
 Training on unreviewed model output is self-training, which measurably degraded the
-previous detector — 3.23 → 2.38 detections per frame over three generations.
+previous detector: 3.23 → 2.38 detections per frame over three generations.
 
 ## Running out of Poké Balls
 
-An encounter with an empty bag looks exactly like a normal one — the giant throwable ball
-is simply absent — and throws silently do nothing. Left alone the bot sat on that screen
+An encounter with an empty bag looks exactly like a normal one (the giant throwable ball
+is simply absent), and throws silently do nothing. Left alone, the bot sat on that screen
 until its watchdog halted the run.
 
 Out of balls is **not** detected optically. With one labelled example and no clean positive
@@ -229,13 +257,13 @@ uncatchable Pokémon alike.
   `restock_max_seconds` if no stop turns out to be in range
 
 An encounter the bot deliberately left is not re-entered until the map is confirmed again.
-Without that, fleeing and immediately re-entering the same screen was a livelock —
+Without that, fleeing and immediately re-entering the same screen was a livelock,
 observed live as `ENCOUNTER -> RECOVERING -> ENCOUNTER` repeating until the watchdog fired.
 
 ## The 24-hour spin cap
 
 Niantic caps PokéStop spins per rolling 24 hours. **Past the cap a stop refuses in a way
-that is visually identical to being out of reach** — the same "walk closer to interact"
+that is visually identical to being out of reach**: the same "walk closer to interact"
 banner. That ambiguity is a trap: a session here logged 152 refused stops and it was
 written up as a positioning problem when the account had simply spun out for the day.
 
@@ -248,8 +276,8 @@ SPIN QUOTA REACHED: 1200/1200 in the last 24h. Stops will refuse to yield until
 3h59m from now - this looks identical to 'out of range' on screen.
 ```
 
-Once the cap is reached the bot stops targeting PokéStops entirely — tapping one can only
-produce the misleading banner — and keeps catching Pokémon. It also refuses to enter
+Once the cap is reached the bot stops targeting PokéStops entirely (tapping one can only
+produce the misleading banner) and keeps catching Pokémon. It also refuses to enter
 restock mode, since the bag cannot be refilled against a spent quota.
 
 Spins done by hand or by an earlier run still count against the account, so
@@ -260,14 +288,14 @@ python3 -m pogobot --seed-spins 1200      # I already spun 1200 today
 ```
 
 If a ban lifts earlier than the rolling window implies, or a seeded count turns out to be
-stale, clear it — an over-stated quota is as harmful as an under-stated one, because it
+stale, clear it. An over-stated quota is as harmful as an under-stated one, because it
 stops the bot targeting stops it could actually use:
 
 ```bash
 python3 -m pogobot --reset-spins
 ```
 
-Every account tracked keeps its own independent version of this window — see
+Every account tracked keeps its own independent version of this window. See
 [Account switching](#account-switching).
 
 ## Account switching
@@ -276,8 +304,8 @@ The bot can log into another PGSharp account once the current one has nothing le
 instead of sitting on a spent quota until a human intervenes.
 
 **Requires the PGSharp account list to be reachable.** Who is logged in comes from a
-second perception channel — real Android views read with `uiautomator`, not pixels (see
-`pogobot/accounts.py`) — because the account list states, as text with an asterisk, which
+second perception channel: real Android views read with `uiautomator`, not pixels (see
+`pogobot/accounts.py`), because the account list states, as text with an asterisk, which
 account is active. That is ground truth; inferring it from the map would be a guess. A
 switch opens the panel itself via the floating PGSharp launcher, so PGSharp has to be
 installed and its overlay present on screen; if it is not, the read simply fails and the
@@ -290,11 +318,11 @@ python3 -m pogobot --switch-on-quota      # switch once this account exhausts it
 python3 -m pogobot --switch-every 240     # also rotate every 240 minutes, regardless of state
 ```
 
-Neither changes anything by itself — an invocation with neither flag behaves exactly as it
+Neither changes anything by itself: an invocation with neither flag behaves exactly as it
 did before this feature existed. They can be combined. `--switch-on-quota` fires only once
 every PokéStop is refused for the day; `--switch-every` fires on a plain clock. A trigger
-that is due but cannot be satisfied — every account capped, or no second account
-enumerated to switch to — is left pending rather than retried on every tick, and the bot
+that is due but cannot be satisfied (every account capped, or no second account
+enumerated to switch to) is left pending rather than retried on every tick, and the bot
 keeps catching Pokémon while it waits.
 
 **A switch that never confirms is not retried straight away.** A switch counts as
@@ -304,27 +332,27 @@ attempt is then held off for ten minutes, doubling with each consecutive failure
 after three in a row the bot stops switching for the rest of the run and says which
 account it was trying to reach. This is deliberate rather than defensive: the failure a
 real device produced was PGSharp accepting the login tap, closing its own panel, and the
-account simply not changing — most likely a login throttle after several switches within a
-few hours — and re-tapping a control that is throttling you cannot make it answer. A
+account simply not changing (most likely a login throttle after several switches within
+a few hours). Re-tapping a control that is throttling you cannot make it answer. A
 switch that does confirm clears the record, so one bad patch does not disable switching
 for the rest of the run.
 
 If a login *was* tapped before the attempt expired, the run is re-attributed to **whichever
-account the overlay last named as active during that attempt** — not to the account it set
+account the overlay last named as active during that attempt**, not to the account it set
 out from. A login can land late, which is why the bot waits out a grace period before
 verifying at all, so the outgoing name is no longer something to simply assume. It is not
 a guess either: verifying re-opens the panel and reads the asterisk every couple of
 seconds right up to the timeout, so a failed attempt has usually watched who is logged in
 many times over, minutes past the grace period. That reading is what the run is booked to,
-which keeps the 24-hour window pointed at the real account — a capped account stays capped
-and the "this is the cap, not distance" diagnostic keeps working — and keeps the rotation
+which keeps the 24-hour window pointed at the real account (a capped account stays capped
+and the "this is the cap, not distance" diagnostic keeps working) and keeps the rotation
 with an origin to rotate from, so the backoff above governs real retries.
 
 Only when no read during the attempt named anybody at all does the account become
 **unknown**, and spins go to the unattributed bucket until a switch confirms a name.
 
-**The account a run belongs to is read from the overlay, not guessed — when switching is
-on.** With `--switch-on-quota` or `--switch-every`, the bot opens the account panel once at
+**When switching is on, the account a run belongs to is read from the overlay, not
+guessed.** With `--switch-on-quota` or `--switch-every`, the bot opens the account panel once at
 startup, reads who is active and which accounts exist, and closes it again:
 
 ```
@@ -334,7 +362,7 @@ logged in as TrainerOne (L42), 3 account(s) available
 That one read is also the roster a later switch picks its target from; the panel is shut
 for the rest of the run, so an account added to PGSharp mid-run is not noticed until a
 restart. It costs three taps into a panel where every row's delete button sits beside its
-login button, so it is not done at all unless a switch trigger is armed — and not while
+login button, so it is not done at all unless a switch trigger is armed, and not while
 the [pause file](#pausing) is present, because those taps would otherwise be sent by a bot
 that has promised to send nothing.
 
@@ -349,8 +377,8 @@ account, under-counts the real one's 24-hour window and starts the rotation from
 place. When the read fails, `--account` is used as given.
 
 **The 24-hour spin cap is per account.** Each account keeps its own independent rolling
-window (see [The 24-hour spin cap](#the-24-hour-spin-cap)) — one account spinning out never
-blocks another — and `--seed-spins` / `--reset-spins` can target a single account by name:
+window (see [The 24-hour spin cap](#the-24-hour-spin-cap)). One account spinning out never
+blocks another, and `--seed-spins` / `--reset-spins` can target a single account by name:
 
 ```bash
 python3 -m pogobot --seed-spins 1200 --account TrainerOne
@@ -358,41 +386,41 @@ python3 -m pogobot --reset-spins TrainerOne     # clear one account's window
 python3 -m pogobot --reset-spins                # clear every account's window, as before
 ```
 
-`--seed-spins` refuses to run without a known account — passed with `--account`, or read
-from the overlay on a run where switching is armed — rather than seeding a nameless bucket
+`--seed-spins` refuses to run without a known account (passed with `--account`, or read
+from the overlay on a run where switching is armed) rather than seeding a nameless bucket
 that could later be mistaken for a real account's history.
 
 Logging in resets the game camera to a close-in view, which leaves far less of the map in
 frame than the detector expects. After a switch confirms, the bot zooms back out with the
-one-finger gesture Android supports — a tap followed by a drag up from the same point. That
+one-finger gesture Android supports: a tap followed by a drag up from the same point. That
 is a single pointer, so it goes through the same `adb` path as every other gesture; a real
 pinch is not available, because `sendevent` is blocked by SELinux and `input` injects only
 one pointer at a time. The gesture is open-loop: nothing reads the resulting zoom level back,
 so a future change to how the game responds would not be detected.
 
 Logging in also turns **Virtual Go Plus off**, every time. Once the zoom-out has actually
-been sent, the bot reads that toggle and presses it — but only if it reads *off*. The
+been sent, the bot reads that toggle and presses it, but only if it reads *off*. The
 reading has three answers, not two: on and off are each a separately measured HSV
 signature, and anything matching neither is *unknown*, which is also exactly what an
 account with no Virtual Go Plus at all looks like. Only a positive off is acted on; on and
 unknown are both left alone rather than tapped on the assumption that a toggle is there to
-find. Two press-and-recheck cycles are the limit, and the switch is booked either way —
+find. Two press-and-recheck cycles are the limit, and the switch is booked either way:
 re-enabling a toggle must never be the thing that stops an otherwise good switch from
 confirming.
 
 That reading is only meaningful **on the map**. The same patch of screen reads 100% green
 on a PokéStop reward screen, and various other things on menus and loading screens, so the
-check waits for the map to be confirmed back before it believes anything it sees there —
-off the map it is noise, not absence. Each frame's answer is written to the trace next to
+check waits for the map to be confirmed back before it believes anything it sees there.
+Off the map, it is noise, not absence. Each frame's answer is written to the trace next to
 the other signals, which is the only way to find out whether real frames ever land in the
 unmeasured band between the two signatures.
 
 **A switch attempt is credited a grace period with the stuck watchdog, not exempted from it.** That watchdog halts a run
-whose map has not been seen for two minutes, and a switch legitimately hides the map while driving the PGSharp overlay — so the ordinary staleness measure cannot tell a healthy switch in flight from a wedged one. A switch is credited its own four-minute budget plus the same two-minute grace that other states receive, for a total of six minutes measured from when the switch began. A failed switch that required the full six-minute window used to halt the run on staleness alone; it is now allowed to fail and back off cleanly. Every other kind of stuckness halts exactly as tightly as before: staleness that continues once the switch has released the screen, and a run with no switch in it at all, both still halt at two minutes. The starvation check — a capture source that has gone quiet without dying — is bounded to the six-minute grace during a switch, rather than the tighter two-minute limit. A switch can only start from a confirmed map frame, so every six-minute budget costs a real map sighting; failures are additionally capped at three attempts with escalating backoff.
+whose map has not been seen for two minutes, and a switch legitimately hides the map while driving the PGSharp overlay, so the ordinary staleness measure cannot tell a healthy switch in flight from a wedged one. A switch is credited its own four-minute budget plus the same two-minute grace that other states receive, for a total of six minutes measured from when the switch began. A failed switch that required the full six-minute window used to halt the run on staleness alone; it is now allowed to fail and back off cleanly. Every other kind of stuckness halts exactly as tightly as before: staleness that continues once the switch has released the screen, and a run with no switch in it at all, both still halt at two minutes. The starvation check (a capture source that has gone quiet without dying) is bounded to the six-minute grace during a switch, rather than the tighter two-minute limit. A switch can only start from a confirmed map frame, so every six-minute budget costs a real map sighting; failures are additionally capped at three attempts with escalating backoff.
 
 ## Pausing
 
-Three ways — two toggles and one latch:
+Three ways, two toggles and one latch:
 
 ```bash
 touch logs/PAUSE            # pause          (rm logs/PAUSE to resume)
@@ -402,12 +430,12 @@ kill -USR1 $(pgrep -f "python3 -m pogobot")   # toggle
 
 `SIGUSR1` and the `p` key drive the same toggle. The pause file is not equivalent to
 either: while it exists the bot stays paused, and neither the signal nor the key can
-resume it — delete the file. That precedence is deliberate (a file is the one handle a
-script or a cron job has), but it does mean a stale `logs/PAUSE` from a previous run
-starts the next one paused.
+resume it. Only deleting the file does. That precedence is deliberate (a file is the one
+handle a script or a cron job has), but it does mean a stale `logs/PAUSE` from a previous
+run starts the next one paused.
 
-While paused the bot keeps perceiving, rendering and tracing — so you can watch what it
-sees — but sends nothing to the device, advances no state, and records nothing: no frame
+While paused the bot keeps perceiving, rendering, and tracing, so you can watch what it
+sees, but sends nothing to the device, advances no state, and records nothing: no frame
 enters the learning ledger and none joins the encounter ring, because a paused frame is
 not evidence of anything the bot did.
 
@@ -417,8 +445,8 @@ away and nothing has to know a pause happened. Shifting each timer instead would
 resume fires every timeout at once, and a pause that ends in a recovery storm is worse
 than no pause at all.
 
-The freeze covers the state machine's clock and nothing else. The loop's own pacing — the
-inference schedule, the preview refresh, the fps window — stays on the real clock, because
+The freeze covers the state machine's clock and nothing else. The loop's own pacing (the
+inference schedule, the preview refresh, the fps window) stays on the real clock, because
 a frozen clock never reaches its own next deadline: driving `next_infer` from it stopped
 perception after a single frame and stopped the repaint that reads the keyboard, so the
 `p` key could pause the preview but never resume it and `q` could not quit.
@@ -463,21 +491,21 @@ so a count cannot drift from what the bot actually did.
 ```
 
 **On the word "catches".** `catch attempts` counts encounters in which a ball was thrown.
-It is **not** a confirmed catch count: a successful catch and a Pokémon fleeing both end the
-same way — the encounter UI disappears and the map returns — and the screen classifier has
-no class for the post-catch award screen. A `confirmed_catches` field exists and stays
-absent rather than being conflated with attempts.
+It is **not** a confirmed catch count. A successful catch and a Pokémon fleeing both end
+the same way, with the encounter UI disappearing and the map returning, and the screen
+classifier has no class for the post-catch award screen. A `confirmed_catches` field
+exists and stays absent rather than being conflated with attempts.
 
 **What the other names do and do not claim.** `stops collected` counts stop screens that
-opened and then closed cleanly — the item toast is never read, so the collection itself is
+opened and then closed cleanly. The item toast is never read, so the collection itself is
 inferred from the screen, not observed. `stops out of range` counts only the frames where
 "Walk closer to interact" was actually seen. `taps that expired` counts post-tap waits that
 never produced the screen they claimed, whether the tap was aimed at a Pokémon or a stop; a
 tap that hit nothing and simply left the map showing is counted nowhere, because the bot
 learned nothing about it beyond the cooldown it set.
 
-**Rates.** A rate is withheld until the session has run for two minutes — `--/h` in the log
-line, an empty column in the summary — because one event five seconds in extrapolates to
+**Rates.** A rate is withheld until the session has run for two minutes (`--/h` in the log
+line, an empty column in the summary), because one event five seconds in extrapolates to
 677/h. Lifetime rates are withheld the same way, and also whenever a recorded session has no
 duration in it, since the denominator would then be unknown.
 
@@ -538,7 +566,7 @@ legacy/      previous generations, unmaintained
 
 - **PokéStop detection is the weakest class** (mAP50 0.309). Labelling more stops is the
   highest-value improvement available.
-- **Gym screens can classify as `PokemonEncounter`** — the `Poi` class has only 8 training
+- **Gym screens can classify as `PokemonEncounter`**: the `Poi` class has only 8 training
   samples. The 0.60 confidence gate refuses them and the 25s encounter timeout bounds the
   cost, but it is a real gap.
 - **Rocket battling relies on the in-game auto-battler.** The bot presses BATTLE and
