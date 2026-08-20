@@ -31,7 +31,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Mapping, Optional, Sequence
 
-from .effects import Back, Effect, Swipe, Tap, is_actuation
+from .effects import Back, DoubleTapDrag, Effect, Swipe, Tap, is_actuation
 from .observation import Tristate
 
 DEFAULT_RESOLUTION = (1080, 2340)
@@ -211,6 +211,22 @@ class Actuator:
         if isinstance(effect, Back):
             return Command(_adb_argv(self.adb, self.serial, "shell", "input", "keyevent", "4"),
                            effect.budget, effect.reason, None, _CLOCK())
+        if isinstance(effect, DoubleTapDrag):
+            # Measured on the device: multi-touch is unavailable (sendevent blocked by
+            # SELinux, `input motionevent` is single-pointer, two concurrent `input
+            # swipe`s do nothing), but a tap immediately followed by a press-and-drag
+            # from the same point IS a single pointer, and Android reads it as its
+            # one-finger pinch gesture. The two commands MUST be one adb invocation - a
+            # separate `subprocess.run` per command would insert adb's own round-trip
+            # latency between them and miss the double-tap window `input` needs to chain
+            # tap into drag rather than reading them as two independent touches.
+            x1, y1 = self.to_device(effect.x1, effect.y1)
+            x2, y2 = self.to_device(effect.x2, effect.y2)
+            ms = max(1, int(effect.duration_ms))
+            shell_cmd = (f"input tap {x1} {y1}; "
+                        f"input swipe {x1} {y1} {x2} {y2} {ms}")
+            return Command(_adb_argv(self.adb, self.serial, "shell", shell_cmd),
+                           effect.budget, effect.reason, (x2, y2), _CLOCK())
         return None
 
     # ------------------------------------------------------------- dispatch
