@@ -329,6 +329,39 @@ def exit_dialog_signal(bgr: np.ndarray, cfg: Config) -> Signal:
     )
 
 
+#: Minimum width, as a fraction of frame width, for a contour to be considered the close
+#: button. The button is normally found as its whole mint ring: measured across the
+#: labelled corpus those blobs run 9-12% of frame width, comfortably over the original
+#: 0.05 floor. The "NEW LEVEL UNLOCKS" reward screen paints a cooler, paler X - ring hue
+#: 96-107 (past MINT_HI's 95) and a near-white glyph (S~20, under MINT's S>=40) - so the
+#: mint mask keeps only the glyph's inner core: round (aspect 1.00) and centred
+#: (cx 0.500) but just 3.2% of frame width, which the 0.05 floor discarded. With no
+#: button located, POPUP had nothing to tap and the bot cycled POPUP -> RECOVERING until
+#: a human intervened.
+#:
+#: Swept over the 235-frame labelled corpus, counting frames whose located point changes:
+#:   0.050  ->  baseline                                  unlocks: MISSED
+#:   0.035  ->  0 lost, 0 moved, 8 newly located          unlocks: MISSED
+#:   0.030  ->  0 lost, 0 moved, 11 newly located         unlocks: found
+#:   0.028  ->  0 lost, 0 moved, 11 newly located         unlocks: found   <- chosen
+#:   0.025  ->  0 lost, 0 moved, 16 newly located         unlocks: found
+#: Nothing that already worked breaks at any level - no frame loses its button and no
+#: frame's tap point moves. 0.028 was chosen over 0.030 purely for margin: the unlocks
+#: core measures 3.1-3.2% depending on stream scale, and 0.028 costs nothing that 0.030
+#: does not already cost, while 0.025 starts pulling in unrelated blobs.
+#:
+#: Of the 11 newly located frames, 8 are Overworld/encounter frames where both consumers
+#: (Popup.step, Recovering.step) return on `obs.on_map` before ever reaching the tap; the
+#: other 3 are Pokedex frames, where locating the close button is the desired behaviour.
+#:
+#: Rejected alternatives, recorded so nobody re-treads them. Scaling the MORPH_CLOSE
+#: kernel with frame width does merge this ring's arcs into one blob, but costs 13 frames
+#: that lose their button and 22 whose tap point moves. Widening this locator's hue
+#: ceiling to 99 to admit the ring costs 8 lost and moves MainMenu's tap point on 4
+#: frames. Only the width floor is free.
+CLOSE_MIN_W = 0.028
+
+
 def find_close_button(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, float]]:
     """Locate the mint X. Returns normalized centre, or None.
 
@@ -347,7 +380,7 @@ def find_close_button(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, flo
     best = None
     for c in cnts:
         x, y, cw, ch = cv2.boundingRect(c)
-        if cw < w * 0.05 or cw > w * 0.22:
+        if cw < w * CLOSE_MIN_W or cw > w * 0.22:
             continue
         if ch <= 0 or not (0.75 <= cw / ch <= 1.35):   # round
             continue
