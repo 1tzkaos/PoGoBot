@@ -368,6 +368,26 @@ pinch is not available, because `sendevent` is blocked by SELinux and `input` in
 one pointer at a time. The gesture is open-loop: nothing reads the resulting zoom level back,
 so a future change to how the game responds would not be detected.
 
+Logging in also turns **Virtual Go Plus off**, every time. Once the zoom-out has actually
+been sent, the bot reads that toggle and presses it — but only if it reads *off*. The
+reading has three answers, not two: on and off are each a separately measured HSV
+signature, and anything matching neither is *unknown*, which is also exactly what an
+account with no Virtual Go Plus at all looks like. Only a positive off is acted on; on and
+unknown are both left alone rather than tapped on the assumption that a toggle is there to
+find. Two press-and-recheck cycles are the limit, and the switch is booked either way —
+re-enabling a toggle must never be the thing that stops an otherwise good switch from
+confirming.
+
+That reading is only meaningful **on the map**. The same patch of screen reads 100% green
+on a PokéStop reward screen, and various other things on menus and loading screens, so the
+check waits for the map to be confirmed back before it believes anything it sees there —
+off the map it is noise, not absence. Each frame's answer is written to the trace next to
+the other signals, which is the only way to find out whether real frames ever land in the
+unmeasured band between the two signatures.
+
+**A switch attempt is credited a grace period with the stuck watchdog, not exempted from it.** That watchdog halts a run
+whose map has not been seen for two minutes, and a switch legitimately hides the map while driving the PGSharp overlay — so the ordinary staleness measure cannot tell a healthy switch in flight from a wedged one. A switch is credited its own four-minute budget plus the same two-minute grace that other states receive, for a total of six minutes measured from when the switch began. A failed switch that required the full six-minute window used to halt the run on staleness alone; it is now allowed to fail and back off cleanly. Every other kind of stuckness halts exactly as tightly as before: staleness that continues once the switch has released the screen, and a run with no switch in it at all, both still halt at two minutes. The starvation check — a capture source that has gone quiet without dying — is bounded to the six-minute grace during a switch, rather than the tighter two-minute limit. A switch can only start from a confirmed map frame, so every six-minute budget costs a real map sighting; failures are additionally capped at three attempts with escalating backoff.
+
 ## Pausing
 
 Three ways — two toggles and one latch:

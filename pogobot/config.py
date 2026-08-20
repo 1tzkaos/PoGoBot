@@ -24,6 +24,11 @@ class Rois:
     flee_icon: Rect = (0.05, 0.06, 0.16, 0.12)
     out_of_range_banner: Rect = (0.15, 0.79, 0.85, 0.85)
     claim_button: Rect = (0.25, 0.77, 0.75, 0.83)
+    #: Core of the Virtual Go Plus pokeball toggle, top-right of the map (see
+    #: config.GoPlusToggle, perception.goplus_signal). Sits entirely inside the icon's
+    #: opaque centre - measured zero variance across 12 OFF frames and 8 ON frames
+    #: spanning two accounts, three zoom levels and several hours.
+    goplus_toggle: Rect = (0.898, 0.200, 0.932, 0.225)
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,35 @@ class Thresholds:
     out_of_range_pink: float = 0.004
     claim_teal: float = 0.45
     claim_white_text: float = 0.04
+
+    # Virtual Go Plus toggle (Rois.goplus_toggle). Measured in that ROI, in HSV, with
+    # green = fraction matching H 40-90, S>=80, V>=80 (perception.goplus_signal):
+    #   OFF: V=160.6  S=121.8  green=0.0%   (stable to 1 decimal - 12 map frames, 2
+    #                                        accounts, 3 zoom levels, several hours)
+    #   ON:  V=253.3  S=166.2  green=25.8%  (stable across 8 consecutive samples)
+    # Both states are POSITIVELY matched (every bound below must clear for that state)
+    # rather than one being "not the other" - so an unmeasured third appearance, chiefly
+    # no Virtual Go Plus at all, reads UNKNOWN/ABSENT rather than being forced into ON or
+    # OFF. OFF is bounded on BOTH sides of V and S, not just capped from above: a single
+    # ceiling would also match a flat black or white ROI, which is not what was measured
+    # and is exactly the kind of unmeasured appearance that must read ABSENT. ON only
+    # needs a floor - there is no plausible "too bright/saturated/green to be ON" case,
+    # and the S floor alone already rejects achromatic content (black or white). Margins
+    # sit roughly halfway between the two measured points on each axis, leaving a dead
+    # zone that also reads UNKNOWN.
+    #
+    # This signal is meaningless off the map: the same ROI read green=100% on a PokeStop
+    # reward screen (green background), and 100%/68%/26% on assorted menus and loading
+    # screens - the last of those is within noise of the real ON fraction. Callers MUST
+    # gate on obs.on_map before trusting the result (see fsm.Switching._goplus).
+    goplus_on_v_min: float = 220.0
+    goplus_on_s_min: float = 150.0
+    goplus_on_green_min: float = 0.15
+    goplus_off_v_min: float = 125.0
+    goplus_off_v_max: float = 195.0
+    goplus_off_s_min: float = 90.0
+    goplus_off_s_max: float = 140.0
+    goplus_off_green_max: float = 0.08
 
 
 @dataclass(frozen=True)
@@ -178,6 +212,27 @@ class ZoomOut:
 
 
 @dataclass(frozen=True)
+class GoPlusToggle:
+    """Re-enabling Virtual Go Plus after a confirmed account switch (see
+    `fsm.Switching._goplus`). Every number here is measured on the real device, not
+    re-derived - see `Thresholds` above for the HSV signatures this acts on.
+    """
+
+    #: Normalized tap point - device (989, 496) on 1080x2340.
+    tap_x: float = 0.915
+    tap_y: float = 0.212
+    #: Measured: pressing the toggle takes effect between t+2.2s and t+4.5s (the game
+    #: shows "connecting..." meanwhile). Real headroom over the top of that range before
+    #: re-checking, not a tight bound - the whole switch is already bounded by
+    #: `Timings.switch_timeout` regardless of how this number is tuned.
+    press_wait: float = 6.0
+    #: Bounds the tap+recheck cycles a single switch may spend on this - it must never
+    #: block a switch from confirming. One tap is normally enough; a second covers a
+    #: press whose effect landed slowly.
+    max_attempts: int = 2
+
+
+@dataclass(frozen=True)
 class Config:
     rois: Rois = field(default_factory=Rois)
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -185,6 +240,7 @@ class Config:
     cooldowns: Cooldowns = field(default_factory=Cooldowns)
     reach: Reach = field(default_factory=Reach)
     zoom: ZoomOut = field(default_factory=ZoomOut)
+    goplus: GoPlusToggle = field(default_factory=GoPlusToggle)
 
     det_model: Path = BASE_DIR / "models" / "v3" / "det" / "weights" / "best.pt"
     cls_model: Path = BASE_DIR / "models" / "v3" / "cls" / "weights" / "best.pt"

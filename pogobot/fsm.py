@@ -91,6 +91,21 @@ class Context:
     #: ctx.now at the moment the current login tap landed; 0.0 means none has (yet, or at
     #: all - the target was already active and no login was ever tapped)
     switch_login_ts: float = 0.0
+    #: tap+recheck cycles spent re-enabling Virtual Go Plus so far in the "goplus" phase.
+    #: Reset on every state entry (see runner._RESET_ON_ENTRY), same reasoning as
+    #: switch_zoom_reps above - it must never carry between switch attempts.
+    switch_goplus_attempts: int = 0
+    #: ctx.now at the instant the MOST RECENT SWITCHING attempt released the screen -
+    #: confirmed or expired, set by runner._count_transition. Deliberately NOT reset on
+    #: state entry: unlike switch_zoom_reps/switch_goplus_attempts this is not per-visit
+    #: bookkeeping, it is a standing fact ("a switch last let go of the screen at time
+    #: T") that the stuck watchdog (Recovering.on_timeout) keeps consulting for as long
+    #: as it is the most recent thing that happened. See that method's docstring for why
+    #: it exists: a switch can legitimately occupy the screen for up to
+    #: Timings.switch_timeout (240s), well past Timings.stuck_watchdog (120s), and
+    #: without this a failed switch alone reliably tripped the watchdog the moment it
+    #: handed off to RECOVERING.
+    switch_exit_ts: float = 0.0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
@@ -100,6 +115,27 @@ class Context:
     @property
     def restocking(self) -> bool:
         return self.now < self.restocking_until
+
+    @property
+    def map_stale_since(self) -> float:
+        """The instant the stuck watchdog should measure staleness from.
+
+        `last_map_ts` alone regresses the moment anything legitimately owns the screen
+        without the map being visible: a switch can occupy it for up to
+        Timings.switch_timeout (240s), well past Timings.stuck_watchdog (120s). Taking
+        the LATER of `last_map_ts` and `switch_exit_ts` means a switch's own bounded
+        duration is never by itself sufficient to look stuck, while stuckness that
+        begins - or continues - after the switch has released the screen is still
+        measured from exactly the same origin the watchdog has always used. With no
+        switch involved, `switch_exit_ts` stays at its 0.0 default and this reduces to
+        `last_map_ts` exactly.
+
+        The single property exists so every `stuck_watchdog` consumer - the pure FSM
+        check in `Recovering.on_timeout` and the runner's own "no usable frames" guard
+        in its read loop - shares one definition of staleness instead of two that can
+        drift apart.
+        """
+        return max(self.last_map_ts, self.switch_exit_ts)
 
     def ready(self, budget: str, gap: float, ignore_settle: bool = False) -> bool:
         """True when `budget` has been idle for `gap` and the UI is not mid-transition.
@@ -390,10 +426,13 @@ class Switching(Handler):
     conditionals, so each tick makes exactly one decision from observable state: "open"
     drives the overlay to the target's login button, "settle" waits out whatever the
     login produces until the map is back AND the login has had time to land, "verify"
-    re-opens the overlay to read the asterisk before confirming anything, and "zoom" -
+    re-opens the overlay to read the asterisk before confirming anything, "zoom" -
     entered only once verify has actually matched - fires the measured one-finger
     zoom-out before the switch is allowed to confirm, so PGoBot is not left driving the
-    very-zoomed-in camera the game resets to after every login (see `_zoom`).
+    very-zoomed-in camera the game resets to after every login (see `_zoom`), and
+    "goplus" - entered only once every zoom repeat has actually fired - re-enables the
+    Virtual Go Plus toggle if it reads OFF (see `_goplus`), since a login turns it off
+    every time.
 
     `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
     dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
@@ -437,6 +476,8 @@ class Switching(Handler):
             return self._verify(obs, ctx)
         if ctx.switch_phase == "zoom":
             return self._zoom(obs, ctx)
+        if ctx.switch_phase == "goplus":
+            return self._goplus(obs, ctx)
         cfg = ctx.cfg
         v = ctx.accounts
         if v is None or not v.available:
@@ -558,12 +599,13 @@ class Switching(Handler):
         the system already paces itself by - no zoom-specific cadence was measured, so
         borrowing the existing one is honest about that rather than inventing a number.
 
-        The CONFIRMED transition is deliberately the LAST thing this phase does, once
-        `repeats` have actually been applied - not the first. Doing it earlier would let
-        `desired_state` or a later SCANNING tick pull attention away from the account mid
-        gesture; SWITCHING keeps owning the screen for exactly as long as it takes to
-        finish what it started, and the whole 240s `switch_timeout` still bounds it if the
-        map never reappears at all.
+        The CONFIRMED transition is no longer the last thing this phase does - see
+        `_goplus`, which it hands off to once `repeats` have actually been applied.
+        Deferring THAT hand-off, rather than confirming here and letting the toggle run
+        as an ordinary SCANNING-time action, keeps the same causal tie `_verify`'s own
+        comment describes: SWITCHING keeps owning the screen for exactly as long as it
+        takes to finish everything the switch itself justified, and the whole 240s
+        `switch_timeout` still bounds the lot if the map never reappears at all.
 
         `ctx.switch_zoom_reps` is NOT advanced here. This handler is pure and cannot know
         whether the `DoubleTapDrag` it emits will actually reach the device -
@@ -578,8 +620,7 @@ class Switching(Handler):
             return []
         z = ctx.cfg.zoom
         if ctx.switch_zoom_reps >= z.repeats:
-            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                               f"logged into {ctx.switch_target}")]
+            return [SetFlag("switch_phase", "goplus")] + self._goplus(obs, ctx)
         if not ctx.ready("zoom", 0.0):
             return []                    # let the previous drag's settle window clear
         y2 = z.center_y - z.drag_frac
@@ -589,6 +630,35 @@ class Switching(Handler):
                           f"({ctx.switch_zoom_reps + 1}/{z.repeats})",
                           duration_ms=z.duration_ms, budget="zoom"),
         ]
+
+    def _goplus(self, obs, ctx):
+        """Re-enable Virtual Go Plus if it reads OFF, once the zoom gesture is done -
+        the last thing SWITCHING does before confirming (see `_zoom`'s docstring for why
+        the confirmation is deferred this far rather than let this run as a SCANNING-time
+        action with no causal tie to the switch that justified it).
+
+        Reachable only from `_zoom`'s completion, so - like the gesture itself - this can
+        never run on a switch that failed or merely timed out; a mismatch or an expiry
+        never advances `switch_phase` past "verify" in the first place.
+
+        ON or UNKNOWN/ABSENT both fall through immediately: the whole point of the three
+        states in `perception.goplus_signal` is that "we do not know, or there is nothing
+        there" must never be treated as "so tap it" - that is exactly the missing/ambiguous-
+        signal-means-do-nothing rule this module observes everywhere else. Only a
+        POSITIVELY read OFF is acted on, and even then `max_attempts` bounds the tap+
+        recheck cycles: this must never block a switch from confirming, so the existing
+        state timeout (`Timings.switch_timeout`), not a retry limit invented here, owns
+        whatever happens if the toggle genuinely will not budge.
+        """
+        if not obs.on_map:
+            return []
+        g = ctx.cfg.goplus
+        if obs.goplus is not Tristate.FALSE or ctx.switch_goplus_attempts >= g.max_attempts:
+            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                               f"logged into {ctx.switch_target}")]
+        if not ctx.ready("goplus", g.press_wait):
+            return []                    # either mid-settle, or waiting for the press to take
+        return [Tap(g.tap_x, g.tap_y, "switch: re-enable Virtual Go Plus", budget="goplus")]
 
     def on_timeout(self, obs, ctx):
         return [
@@ -632,8 +702,26 @@ class Recovering(Handler):
         return []
 
     def on_timeout(self, obs, ctx):
-        if ctx.now - ctx.last_map_ts > ctx.cfg.timings.stuck_watchdog:
-            return [Halt(f"no confirmed map for {ctx.now - ctx.last_map_ts:.0f}s; stopping "
+        # `ctx.last_map_ts` alone regressed here: an account switch legitimately owns the
+        # screen for up to Timings.switch_timeout (240s), comfortably longer than
+        # stuck_watchdog (120s), so `last_map_ts` goes stale while SWITCHING drives the
+        # PGSharp overlay whether the switch succeeds or fails. A failed switch reliably
+        # tripped this the moment it handed off to RECOVERING - measured on the device,
+        # HALTED "no confirmed map for 209s" six seconds after a switch that never
+        # confirmed, ending a run over one ordinary, already-handled failure (SWITCHING's
+        # own timeout plus the backoff and three-strike give-up in runner.py).
+        #
+        # `switch_exit_ts` (set by runner._count_transition, never here - handlers cannot
+        # write ctx) marks the instant control last legitimately returned from a switch,
+        # successful or failed. `ctx.map_stale_since` takes the LATER of it and
+        # `last_map_ts`, so a switch's own bounded duration is never by itself sufficient
+        # to trip this halt, while stuckness that begins - or continues - AFTER a switch
+        # ends is still caught at exactly the same 120s this watchdog has always used:
+        # with no switch involved, `switch_exit_ts` stays at its 0.0 default and this is
+        # exactly the old check.
+        stale_since = ctx.map_stale_since
+        if ctx.now - stale_since > ctx.cfg.timings.stuck_watchdog:
+            return [Halt(f"no confirmed map for {ctx.now - stale_since:.0f}s; stopping "
                          f"rather than tapping blindly")]
         return [Transition(BotState.SCANNING, IntentOutcome.CARRIED, "recovery attempt over")]
 
