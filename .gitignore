@@ -20,3 +20,6 @@ __pycache__/
 *.py[cod]
 .DS_Store
 .venv/
+
+# Agent working files (plans, reports, ledgers)
+.superpowers/

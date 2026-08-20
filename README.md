@@ -360,6 +360,14 @@ python3 -m pogobot --reset-spins                # clear every account's window, 
 from the overlay on a run where switching is armed — rather than seeding a nameless bucket
 that could later be mistaken for a real account's history.
 
+Logging in resets the game camera to a close-in view, which leaves far less of the map in
+frame than the detector expects. After a switch confirms, the bot zooms back out with the
+one-finger gesture Android supports — a tap followed by a drag up from the same point. That
+is a single pointer, so it goes through the same `adb` path as every other gesture; a real
+pinch is not available, because `sendevent` is blocked by SELinux and `input` injects only
+one pointer at a time. The gesture is open-loop: nothing reads the resulting zoom level back,
+so a future change to how the game responds would not be detected.
+
 ## Pausing
 
 Three ways — two toggles and one latch:

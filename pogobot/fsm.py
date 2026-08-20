@@ -24,6 +24,7 @@ from .effects import (
     BotState,
     Cooldown,
     ClearSpatialMemory,
+    DoubleTapDrag,
     Effect,
     Halt,
     IntentOutcome,
@@ -82,6 +83,11 @@ class Context:
     accounts: Optional[AccountView] = None
     switch_target: Optional[str] = None
     switch_phase: str = "open"
+    #: applications of the post-switch zoom-out gesture fired so far in the "zoom" phase.
+    #: Reset on every state entry (see runner._RESET_ON_ENTRY), so it starts at 0 both
+    #: when a switch begins and again once it leaves SWITCHING - never carries between
+    #: attempts, same reasoning as switch_login_ts below.
+    switch_zoom_reps: int = 0
     #: ctx.now at the moment the current login tap landed; 0.0 means none has (yet, or at
     #: all - the target was already active and no login was ever tapped)
     switch_login_ts: float = 0.0
@@ -383,8 +389,11 @@ class Switching(Handler):
     Phases advance through `switch_phase` on the Context rather than through nested
     conditionals, so each tick makes exactly one decision from observable state: "open"
     drives the overlay to the target's login button, "settle" waits out whatever the
-    login produces until the map is back AND the login has had time to land, and "verify"
-    re-opens the overlay to read the asterisk before confirming anything.
+    login produces until the map is back AND the login has had time to land, "verify"
+    re-opens the overlay to read the asterisk before confirming anything, and "zoom" -
+    entered only once verify has actually matched - fires the measured one-finger
+    zoom-out before the switch is allowed to confirm, so PGoBot is not left driving the
+    very-zoomed-in camera the game resets to after every login (see `_zoom`).
 
     `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
     dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
@@ -426,6 +435,8 @@ class Switching(Handler):
             return self._settle(obs, ctx)
         if ctx.switch_phase == "verify":
             return self._verify(obs, ctx)
+        if ctx.switch_phase == "zoom":
+            return self._zoom(obs, ctx)
         cfg = ctx.cfg
         v = ctx.accounts
         if v is None or not v.available:
@@ -509,12 +520,17 @@ class Switching(Handler):
             return [Tap(*v.accounts_tab_norm, "switch: follow the Accounts tab",
                         budget="switch")]
         if v.active is not None and v.active.name == ctx.switch_target:
+            # Do not transition yet - hand off to the "zoom" phase (SetFlag, since a
+            # handler cannot write switch_phase itself) so the confirmed switch gets its
+            # camera-reset gesture BEFORE control passes to SCANNING. Confirming here
+            # unconditionally, before the panel-close tap has even reached the device,
+            # would have made the zoom a SCANNING-time action with no causal tie to the
+            # switch that justified it.
             effects = []
             if v.close_norm is not None:
                 effects.append(Tap(*v.close_norm, "switch: close overlay after verifying",
                                    budget="switch"))
-            effects.append(Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                                      f"logged into {ctx.switch_target}"))
+            effects.append(SetFlag("switch_phase", "zoom"))
             return effects
         # Someone else is active. The login is asynchronous, so this is not evidence of
         # failure by itself - only that it has not landed as of this read. A second login
@@ -526,6 +542,53 @@ class Switching(Handler):
             effects.append(Tap(*v.close_norm, "switch: close overlay; will re-check",
                                budget="switch"))
         return effects
+
+    def _zoom(self, obs, ctx):
+        """Fire the measured one-finger zoom-out, then confirm the switch.
+
+        Only reachable from `_verify`'s match branch, so this phase - and therefore the
+        gesture itself - can never run on a switch that failed or merely timed out; a
+        mismatch or an expiry never sets `switch_phase` to "zoom" in the first place.
+
+        Waits for `obs.on_map` before ever touching the screen: the close tap `_verify`
+        just queued is only just reaching the actuator's queue when this phase is first
+        entered, so acting on the same tick would be driving the gesture from a view that
+        still shows the account panel, not the map underneath it. One gesture per tick,
+        gated by the same settle window (`Timings.ui_settle`) every other actuation in
+        the system already paces itself by - no zoom-specific cadence was measured, so
+        borrowing the existing one is honest about that rather than inventing a number.
+
+        The CONFIRMED transition is deliberately the LAST thing this phase does, once
+        `repeats` have actually been applied - not the first. Doing it earlier would let
+        `desired_state` or a later SCANNING tick pull attention away from the account mid
+        gesture; SWITCHING keeps owning the screen for exactly as long as it takes to
+        finish what it started, and the whole 240s `switch_timeout` still bounds it if the
+        map never reappears at all.
+
+        `ctx.switch_zoom_reps` is NOT advanced here. This handler is pure and cannot know
+        whether the `DoubleTapDrag` it emits will actually reach the device -
+        `Actuator.apply` can legitimately refuse a live command (rate-limit, queue
+        backpressure) without raising. `Runner.apply` increments the counter itself, and
+        only when that same actuation is the one that was accepted - the same pattern
+        `taps_in_state`/`targets_tapped` already use - so a rejected gesture cannot be
+        counted as if it had fired and let this phase confirm the switch having sent
+        fewer than `repeats` real zoom-outs.
+        """
+        if not obs.on_map:
+            return []
+        z = ctx.cfg.zoom
+        if ctx.switch_zoom_reps >= z.repeats:
+            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                               f"logged into {ctx.switch_target}")]
+        if not ctx.ready("zoom", 0.0):
+            return []                    # let the previous drag's settle window clear
+        y2 = z.center_y - z.drag_frac
+        return [
+            DoubleTapDrag(z.center_x, z.center_y, z.center_x, y2,
+                          f"switch: zoom out after confirming {ctx.switch_target} "
+                          f"({ctx.switch_zoom_reps + 1}/{z.repeats})",
+                          duration_ms=z.duration_ms, budget="zoom"),
+        ]
 
     def on_timeout(self, obs, ctx):
         return [

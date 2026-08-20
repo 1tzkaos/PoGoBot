@@ -22,6 +22,7 @@ from .effects import (
     BotState,
     ClearSpatialMemory,
     Cooldown,
+    DoubleTapDrag,
     Effect,
     Halt,
     IntentOutcome,
@@ -83,7 +84,7 @@ SWITCH_BACKOFF_BASE = 600.0
 SWITCH_MAX_FAILURES = 3
 
 # States whose per-visit bookkeeping must reset on entry.
-_RESET_ON_ENTRY = ("spun_disc", "taps_in_state")
+_RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps")
 
 
 class Runner:
@@ -751,9 +752,17 @@ class Runner:
                         self.ctx.throws_this_encounter += 1
                     elif budget == "tap" and isinstance(e, Tap):
                         self.stats.targets_tapped += 1
+                    elif budget == "zoom" and isinstance(e, DoubleTapDrag):
+                        # Counted here, not by a self-reported SetFlag from _zoom: the
+                        # handler is pure and cannot know whether the actuator actually
+                        # accepted this gesture (rate-limit / queue backpressure can
+                        # legitimately refuse it). Only an accepted application may move
+                        # the FSM's repeat count, or `_zoom` could confirm the switch
+                        # having sent fewer than `repeats` real zoom-outs.
+                        self.ctx.switch_zoom_reps += 1
                     self.ctx.last_action[budget] = self.ctx.now
                     self.ctx.taps_in_state += 1
-                    if isinstance(e, (Tap, Swipe, Back)):
+                    if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag)):
                         self.ctx.settle_until = self.ctx.now + self.cfg.timings.ui_settle
                     if self.ctx.state is BotState.SWITCHING:
                         # The launcher tap TOGGLES the overlay, so a second decision taken

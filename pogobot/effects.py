@@ -65,6 +65,34 @@ class Back:
 
 
 @dataclass(frozen=True)
+class DoubleTapDrag:
+    """A tap immediately followed by a press-and-drag from the same point, delivered as
+    ONE adb invocation so the second touch lands inside Android's double-tap window.
+
+    Modeled as the mechanism, not as `ZoomOut`, on purpose: Tap and Swipe already name
+    their shape rather than their purpose ("throw ball" and "rotate camera" are both a
+    Swipe distinguished only by `reason`), and this gesture happens to be the one-finger
+    substitute for pinch-zoom ONLY because multi-touch is unavailable on this device (see
+    actions.py). A caller wanting the same tap-then-drag-from-here shape for something
+    that is not zoom - a different one-finger gesture PGSharp or the game responds to -
+    reuses this and the actuator support behind it for free; a `ZoomOut` effect would have
+    made that caller invent a second effect for an identical wire shape.
+
+    (x1, y1) is both the tap point and the drag's start; (x2, y2) is where the drag ends -
+    the same field shape as `Swipe`, since underneath it IS a tap plus a swipe from the
+    same origin.
+    """
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+    reason: str
+    duration_ms: int = 200
+    budget: str = "zoom"
+
+
+@dataclass(frozen=True)
 class Transition:
     to: BotState
     outcome: IntentOutcome
@@ -118,10 +146,10 @@ class Halt:
     reason: str
 
 
-Effect = Union[Tap, Swipe, Back, Transition, SetIntent, SetFlag, Cooldown,
+Effect = Union[Tap, Swipe, Back, DoubleTapDrag, Transition, SetIntent, SetFlag, Cooldown,
                ClearSpatialMemory, Note, Halt]
 
-ACTUATIONS = (Tap, Swipe, Back)
+ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag)
 
 
 def is_actuation(effect: Effect) -> bool:

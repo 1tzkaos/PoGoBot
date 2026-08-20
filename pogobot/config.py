@@ -146,12 +146,45 @@ class Reach:
 
 
 @dataclass(frozen=True)
+class ZoomOut:
+    """The one-finger zoom-out gesture fired once a confirmed account switch is back on
+    the map (see `fsm.Switching._zoom`). Values are read directly off the measurement in
+    the task brief, not re-derived: a tap followed by a press-and-drag UP from
+    (540, 1170) on a 1080x2340 screen, repeated twice, produced a map-region diff of 43.1
+    after the first application and 17.6 after the second, against an 11.1 no-input
+    baseline - i.e. the first pass does most of the work and the second lands near
+    whatever ceiling the game's zoom-out actually has. A third application was never
+    measured to do anything further, so `repeats` stops at the number that was tested,
+    not at a round number.
+    """
+
+    #: (0.5, 0.5) is screen centre in EITHER orientation and resolution, unlike the
+    #: measured device pixel (540, 1170) which is specific to the 1080x2340 screen it was
+    #: read on - normalizing to the centre is what makes this gesture resolution
+    #: independent, exactly like every other coordinate in the system (see effects.py).
+    center_x: float = 0.5
+    center_y: float = 0.5
+    #: Normalized drag distance. Measured: dragging UP 370px on a 2340px-tall screen.
+    #: Expressed as a fraction of screen height so it survives any capture resolution,
+    #: the same reasoning `Cooldowns.radius_frac` uses for screen width.
+    drag_frac: float = 370.0 / 2340.0
+    #: The `input swipe` duration, in ms, used for the drag half of the gesture. 400ms is
+    #: what was actually run on the device for both applications that produced the
+    #: measurements above; untested durations are not assumed to behave the same.
+    duration_ms: int = 400
+    #: Two applications were measured; a third was not. Stopping at the tested number
+    #: rather than guessing further reductions exist past what was actually observed.
+    repeats: int = 2
+
+
+@dataclass(frozen=True)
 class Config:
     rois: Rois = field(default_factory=Rois)
     thresholds: Thresholds = field(default_factory=Thresholds)
     timings: Timings = field(default_factory=Timings)
     cooldowns: Cooldowns = field(default_factory=Cooldowns)
     reach: Reach = field(default_factory=Reach)
+    zoom: ZoomOut = field(default_factory=ZoomOut)
 
     det_model: Path = BASE_DIR / "models" / "v3" / "det" / "weights" / "best.pt"
     cls_model: Path = BASE_DIR / "models" / "v3" / "cls" / "weights" / "best.pt"

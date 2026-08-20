@@ -5,7 +5,15 @@ import pytest
 from pogobot import fsm
 from pogobot.accounts import AccountRow, AccountView
 from pogobot.config import Config
-from pogobot.effects import Back, BotState, IntentOutcome, SetFlag, Tap, Transition
+from pogobot.effects import (
+    Back,
+    BotState,
+    DoubleTapDrag,
+    IntentOutcome,
+    SetFlag,
+    Tap,
+    Transition,
+)
 from tests.factories import obs
 
 
@@ -67,15 +75,21 @@ def test_no_tap_ever_lands_on_a_delete_button():
     """The delete button sits ~24px from login. This is the test that matters.
 
     Every phase `switch_phase` can actually hold - "tab" and "login" are steps WITHIN
-    "open", not phases, and naming them here only ran the "open" case three times.
+    "open", not phases, and naming them here only ran the "open" case three times. "zoom"
+    is included too: it is a screen-centre gesture nowhere near any row, but its endpoints
+    are still coordinates this handler emits, and this is the test that matters for those.
     """
-    for phase in ("open", "settle", "verify"):
+    for phase in ("open", "settle", "verify", "zoom"):
         for on_map in (True, False):
             c = ctx(phase=phase)
-            for t in taps(fsm.step(obs(on_map=on_map), c)):
+            effects = fsm.step(obs(on_map=on_map), c)
+            points = [(t.x, t.y) for t in taps(effects)]
+            points += [(d.x1, d.y1) for d in effects if isinstance(d, DoubleTapDrag)]
+            points += [(d.x2, d.y2) for d in effects if isinstance(d, DoubleTapDrag)]
+            for x, y in points:
                 for r in c.accounts.rows:
-                    assert (t.x, t.y) != r.delete_norm
-                    assert abs(t.x - r.delete_norm[0]) > 0.02 or abs(t.y - r.delete_norm[1]) > 0.02
+                    assert (x, y) != r.delete_norm
+                    assert abs(x - r.delete_norm[0]) > 0.02 or abs(y - r.delete_norm[1]) > 0.02
 
 
 def test_unavailable_view_does_nothing_rather_than_guessing():
@@ -100,11 +114,15 @@ def test_settle_prefers_a_located_close_button_over_back():
 
 def test_confirmation_needs_both_the_map_and_the_asterisk():
     on_map_only = ctx(phase="settle", accounts=panel(active="TrainerOne"))
-    assert not [e for e in fsm.step(obs(on_map=True), on_map_only)
-                if isinstance(e, Transition)]
+    effects = fsm.step(obs(on_map=True), on_map_only)
+    assert not [e for e in effects if isinstance(e, Transition)]
+    assert not any(isinstance(e, SetFlag) and e.value == "zoom" for e in effects)
     both = ctx(phase="settle", accounts=panel(active="TrainerTwo"))
-    tr = [e for e in fsm.step(obs(on_map=True), both) if isinstance(e, Transition)][0]
-    assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
+    # A match advances to "zoom", not straight to CONFIRMED - see test_switch_zoom.py for
+    # why the transition is deferred to the end of that phase.
+    effects = fsm.step(obs(on_map=True), both)
+    assert not [e for e in effects if isinstance(e, Transition)]
+    assert any(isinstance(e, SetFlag) and e.value == "zoom" for e in effects)
 
 
 def test_settle_reopens_the_panel_once_the_map_is_back():
@@ -121,11 +139,15 @@ def test_settle_reopens_the_panel_once_the_map_is_back():
 
 
 def test_verify_confirms_when_the_reopened_panel_shows_the_target_active():
+    """A match closes the panel and hands off to "zoom" - not straight to CONFIRMED.
+    See test_switch_zoom.py for what that phase does and why the transition lives there
+    instead of here."""
     c = ctx(phase="verify", accounts=panel(active="TrainerTwo"))
     effects = fsm.step(obs(on_map=True), c)
     assert taps(effects)[0].x == pytest.approx(0.06)     # the panel's own close_norm
-    tr = [e for e in effects if isinstance(e, Transition)][0]
-    assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
+    assert not any(isinstance(e, Transition) for e in effects)
+    assert any(isinstance(e, SetFlag) and e.name == "switch_phase" and e.value == "zoom"
+               for e in effects)
 
 
 def test_a_mismatch_does_not_end_the_switch():
@@ -140,8 +162,8 @@ def test_a_mismatch_does_not_end_the_switch():
     assert not any((t.x, t.y) == login_norm for t in taps(first))
     c.accounts = panel(active="TrainerTwo")          # the login has landed since
     second = fsm.step(obs(on_map=True), c)
-    tr = [e for e in second if isinstance(e, Transition)][0]
-    assert tr.to is BotState.SCANNING and tr.outcome is IntentOutcome.CONFIRMED
+    assert not any(isinstance(e, Transition) for e in second)
+    assert any(isinstance(e, SetFlag) and e.value == "zoom" for e in second)
 
 
 def test_verify_waits_out_the_login_grace_period():
