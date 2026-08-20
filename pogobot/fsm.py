@@ -88,6 +88,14 @@ class Context:
     #: when a switch begins and again once it leaves SWITCHING - never carries between
     #: attempts, same reasoning as switch_login_ts below.
     switch_zoom_reps: int = 0
+    #: coordinate-free BACK presses `_settle` has fired clearing a post-login screen so
+    #: far, counting only ones the actuator actually accepted (see
+    #: config.Timings.switch_clear_max for the bound and the 90-press storm it guards
+    #: against). Reset on every state entry (see runner._RESET_ON_ENTRY), same reasoning
+    #: as switch_zoom_reps just above - it must never carry between switch attempts, and
+    #: like switch_zoom_reps it is advanced by `Runner.apply`, never by this pure
+    #: handler, which cannot know whether a given Back actually reached the device.
+    switch_clear_presses: int = 0
     #: ctx.now at the moment the current login tap landed; 0.0 means none has (yet, or at
     #: all - the target was already active and no login was ever tapped)
     switch_login_ts: float = 0.0
@@ -95,6 +103,27 @@ class Context:
     #: Reset on every state entry (see runner._RESET_ON_ENTRY), same reasoning as
     #: switch_zoom_reps above - it must never carry between switch attempts.
     switch_goplus_attempts: int = 0
+    #: ctx.now at the moment the AutoWalk ladder ("autowalk_open" through "autowalk_close"
+    #: - see Switching._autowalk_open and neighbours) actually started. 0.0 means it has
+    #: not started yet. Zeroed by Runner._begin_switch at the start of every NEW attempt -
+    #: same reasoning, and same shape, as switch_login_ts below - never by
+    #: runner._RESET_ON_ENTRY, because SWITCHING is entered once per attempt and this must
+    #: survive every phase change within that one attempt, not just one state entry.
+    switch_autowalk_since: float = 0.0
+    #: Colour reading of the shortcut menu's "AutoWalk" icon glyph - TRUE means AutoWalk
+    #: is ALREADY running for the target account and must not be tapped again (see
+    #: `Switching._autowalk_menu`, `perception.autowalk_active_signal`, and
+    #: `config.Thresholds` for the measured table and its honesty note). Refreshed by
+    #: `Runner._refresh_accounts` in the SAME call, from the SAME view, that refreshes
+    #: `accounts` itself - the uiautomator dump supplies the icon's bounds
+    #: (`accounts.AccountView.autowalk_icon_rect_norm`), the CURRENT frame supplies the
+    #: colour. This is why it needs no reset of its own in `Runner._begin_switch`, unlike
+    #: `switch_autowalk_since` above: the icon box is only ever populated once the
+    #: shortcut menu has actually rendered (`_autowalk_menu`), which is well after a new
+    #: attempt's very FIRST accounts refresh - during "open" or "settle" - so that first
+    #: refresh already overwrites whatever a PRIOR attempt left here with UNKNOWN before
+    #: this field could ever be consulted for the new one.
+    switch_autowalk_active: Tristate = Tristate.UNKNOWN
     #: ctx.now at the instant the MOST RECENT SWITCHING attempt released the screen -
     #: confirmed or expired, set by runner._count_transition. Deliberately NOT reset on
     #: state entry: unlike switch_zoom_reps/switch_goplus_attempts this is not per-visit
@@ -178,8 +207,18 @@ def encounter_confirmed(obs: Observation, cfg: Config) -> bool:
 
 def rocket_screen(obs: Observation, cfg: Config) -> bool:
     """A Team GO Rocket step. The affirmative pill finder hits 100% of the labelled
-    GruntBattleButton and ChooseParty frames and ~0% of the menu screens."""
-    if obs.map_ball.value:
+    GruntBattleButton and ChooseParty frames and ~0% of the menu screens.
+
+    `exit_dialog` is vetoed here for the same reason `map_ball` already is: Pokemon GO's
+    own exit-confirmation dialog classifies as Rocket (measured live) but its buttons
+    sit nowhere near ROCKET's fixed dialogue-advance tap, so following it into ROCKET
+    means a 150s stall - measured live: 430s consumed for two ROCKET<->RECOVERING round
+    trips and nothing else - where interrupts() (the primary defence) would otherwise
+    already have dismissed it with BACK. This is the secondary layer: it closes the
+    window on ticks where that interrupt's own pacing gate withholds a repeat BACK press
+    while the dialog is still on screen.
+    """
+    if obs.map_ball.value or obs.exit_dialog.value:
         return False
     return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
 
@@ -432,7 +471,10 @@ class Switching(Handler):
     very-zoomed-in camera the game resets to after every login (see `_zoom`), and
     "goplus" - entered only once every zoom repeat has actually fired - re-enables the
     Virtual Go Plus toggle if it reads OFF (see `_goplus`), since a login turns it off
-    every time.
+    every time, and "autowalk_open"/"autowalk_menu"/"autowalk_dialog"/"autowalk_close" -
+    entered only once `_goplus` is itself done - drive PGSharp's floating star widget to
+    start an AutoWalk route (see `_autowalk_open` and its neighbours), since the user
+    wants one running after every switch.
 
     `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
     dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
@@ -478,6 +520,14 @@ class Switching(Handler):
             return self._zoom(obs, ctx)
         if ctx.switch_phase == "goplus":
             return self._goplus(obs, ctx)
+        if ctx.switch_phase == "autowalk_open":
+            return self._autowalk_open(obs, ctx)
+        if ctx.switch_phase == "autowalk_menu":
+            return self._autowalk_menu(obs, ctx)
+        if ctx.switch_phase == "autowalk_dialog":
+            return self._autowalk_dialog(obs, ctx)
+        if ctx.switch_phase == "autowalk_close":
+            return self._autowalk_close(obs, ctx)
         cfg = ctx.cfg
         v = ctx.accounts
         if v is None or not v.available:
@@ -512,13 +562,25 @@ class Switching(Handler):
         cfg = ctx.cfg
         if not obs.on_map:
             if obs.close_button_xy is not None and ctx.ready("close", cfg.timings.close_menu):
+                # A LOCATED close button is targeted, not blind, so it is never subject
+                # to switch_clear_max below - see that constant's docstring.
                 return [Tap(*obs.close_button_xy, "switch: close a post-login overlay",
                             budget="close")]
-            if ctx.ready("back", cfg.timings.switch_clear):
+            if ctx.switch_clear_presses >= cfg.timings.switch_clear_max:
+                # Bound spent (config.Timings.switch_clear_max) - simply wait rather than
+                # keep hammering BACK into what may be a legitimate multi-minute LOADING
+                # screen. switch_timeout still owns the outcome, and _verify still runs
+                # the instant the map returns.
+                return []
+            if ctx.ready("switch_clear", cfg.timings.switch_clear):
                 # Measured: one BACK dismissed the post-login news modal. BACK carries no
                 # coordinate at all, which is why it is preferred to tapping a screen whose
-                # layout we have exactly one example of.
-                return [Back("switch: dismiss a post-login screen")]
+                # layout we have exactly one example of. `switch_clear_presses` is NOT
+                # advanced here - this handler is pure and cannot know whether the
+                # actuator will actually accept it (rate-limit / backpressure);
+                # Runner.apply owns the count, and only for an ACCEPTED press, the same
+                # pattern switch_zoom_reps/switch_goplus_attempts already use.
+                return [Back("switch: dismiss a post-login screen", budget="switch_clear")]
             return []
         if ctx.now - ctx.switch_login_ts < cfg.timings.switch_login_grace:
             # The outgoing account's map can reappear before the login has actually
@@ -649,16 +711,250 @@ class Switching(Handler):
         recheck cycles: this must never block a switch from confirming, so the existing
         state timeout (`Timings.switch_timeout`), not a retry limit invented here, owns
         whatever happens if the toggle genuinely will not budge.
+
+        Once done, hands off to "autowalk_open" - the CONFIRMED transition moved there in
+        turn (see `_autowalk_close`) for the same reason it moved here from `_zoom`: every
+        step SWITCHING still owns the screen gets to run before control is handed back.
         """
         if not obs.on_map:
             return []
         g = ctx.cfg.goplus
         if obs.goplus is not Tristate.FALSE or ctx.switch_goplus_attempts >= g.max_attempts:
-            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                               f"logged into {ctx.switch_target}")]
+            return [SetFlag("switch_phase", "autowalk_open")] + self._autowalk_open(obs, ctx)
         if not ctx.ready("goplus", g.press_wait):
             return []                    # either mid-settle, or waiting for the press to take
         return [Tap(g.tap_x, g.tap_y, "switch: re-enable Virtual Go Plus", budget="goplus")]
+
+    def _autowalk_deadline(self, ctx) -> Optional[list]:
+        """Common to every "autowalk_*" phase. Returns the give-up effects once the
+        ladder's own wall-clock budget (config.AutoWalk.budget_s) has run out, or None
+        while there is still time - see that class's docstring for why a wall clock, not
+        an attempt count, is what has to bound this.
+
+        Callers check this ONLY once the node they actually want was not found - a node
+        that IS found is always used, however close to (or past) the budget the clock has
+        run. The budget exists for "this is never going to appear", not to race a step
+        that just this tick actually succeeded.
+
+        Giving up is not the same as walking away. Reaching "autowalk_open"'s OWN
+        deadline check means the star itself was never located across the whole budget -
+        finding it always taps and advances the phase in the SAME tick (see
+        `_autowalk_open`), so that phase is only ever here when nothing was found - and
+        with the star never found the shortcut menu was never opened, so there is nothing
+        to clean up: this confirms immediately, exactly as before this method grew a
+        cleanup step. Every OTHER phase is reachable only through that same star tap, so
+        the menu IS open by the time any of them can be here - and leaving it that way is
+        not cosmetic (see `_autowalk_close`'s own docstring: it sits over the reach
+        ellipse SCANNING taps into, and the NEXT switch's own opening tap would toggle it
+        SHUT instead of open, silently killing AutoWalk for the rest of the run). So those
+        phases get one more chance at a LOCATED star tap before confirming, bounded by
+        `config.AutoWalk.close_grace_s` on top of `budget_s` so this can never by itself
+        push the switch toward `Timings.switch_timeout`. The AutoWalk dialog needs no
+        special case here even though it is the one screen most likely to still be open at
+        this point: `_autowalk_dialog` already presses CONTINUE LAST/OK, which is not a
+        failure at all but the ladder's own goal, before ever consulting this method
+        whenever the dialog and a button are both there - this is only ever reached once
+        that phase has nothing left of its own to press.
+
+        `ctx.accounts` is frequently `None` on exactly the tick this first fires -
+        `Runner.apply` drops it after every actuation taken while SWITCHING (the star
+        tap that opened the menu very much included), and only the next throttled tree
+        refresh (`runner.ACCOUNTS_REFRESH`) puts a usable view back. A single check right
+        at the budget boundary would see that `None` most of the time and never even
+        attempt the closing tap - `close_grace_s` exists so a retry once a real view has
+        landed gets a chance, the same reasoning `_autowalk_close`'s own wait already
+        uses for the view its normal path needs.
+        """
+        cfg = ctx.cfg.autowalk
+        elapsed = ctx.now - ctx.switch_autowalk_since
+        if elapsed <= cfg.budget_s:
+            return None
+        if ctx.switch_phase == "autowalk_open":
+            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                               f"logged into {ctx.switch_target}; AutoWalk did not "
+                               f"complete in time ({ctx.switch_phase})")]
+        v = ctx.accounts
+        if v is not None and v.available and v.star_norm is not None \
+                and ctx.ready("switch", ctx.cfg.timings.switch_tap):
+            return [
+                Tap(*v.star_norm, "autowalk: close the shortcut menu (giving up)",
+                    budget="switch"),
+                Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                           f"logged into {ctx.switch_target}; AutoWalk did not "
+                           f"complete in time ({ctx.switch_phase})"),
+            ]
+        if elapsed <= cfg.budget_s + cfg.close_grace_s:
+            return []             # still inside the cleanup allowance; wait for a view
+        return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                           f"logged into {ctx.switch_target}; AutoWalk did not "
+                           f"complete in time ({ctx.switch_phase}); the menu may "
+                           f"still be open")]
+
+    def _autowalk_open(self, obs, ctx):
+        """Tap the PGSharp star to open its shortcut menu (see the module docstring and
+        accounts.py's for the widget itself). The star is LOCATED fresh from the current
+        dump every time, never a remembered coordinate - it is described as draggable and
+        was measured at two different positions hours apart.
+
+        Only reachable from `_goplus`'s completion, so - like the zoom gesture and the
+        Go Plus toggle before it - this can never run on a switch that failed or merely
+        timed out.
+
+        Deliberately does NOT gate on `obs.on_map`, unlike `_zoom`/`_goplus`: those two
+        fire a BLIND gesture at a fixed screen coordinate and need `on_map` to prove the
+        account panel underneath has actually closed before the gesture can land on the
+        map rather than the panel. Every autowalk phase instead acts only on a coordinate
+        it just read from the LIVE uiautomator tree (`ctx.accounts`, refreshed every tick
+        regardless of what is on screen - see `Runner._refresh_accounts`) - the same shape
+        `_verify` is in, and for the same reason `_verify` has no such gate either. Gating
+        on `on_map` here would be actively wrong: PGSharp's own shortcut menu and the
+        AlertDialog it opens sit on top of the map exactly while these phases need to act,
+        and a full-screen AlertDialog dims the window behind it - this codebase's own
+        exit-dialog fix (`perception.exit_dialog_signal`) is direct evidence that a dialog
+        like that can read as NOT on-map. Gating on it would make `_autowalk_deadline`'s
+        own escape hatch unreachable while the dialog it is trying to escape is up.
+        """
+        effects: list = []
+        first_tick = ctx.switch_autowalk_since == 0.0
+        if first_tick:
+            # Start the ladder's own clock rather than checking a deadline of zero
+            # elapsed time against it - see _autowalk_deadline.
+            effects.append(SetFlag("switch_autowalk_since", ctx.now))
+        v = ctx.accounts
+        if v is not None and v.available and v.star_norm is not None:
+            if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                return effects
+            return effects + [
+                Tap(*v.star_norm, "autowalk: open the PGSharp shortcut menu", budget="switch"),
+                SetFlag("switch_phase", "autowalk_menu"),
+            ]
+        if not first_tick:
+            gone = self._autowalk_deadline(ctx)
+            if gone is not None:
+                return gone
+        return effects           # could not look, or the star was not found - wait
+
+    def _autowalk_menu(self, obs, ctx):
+        """Pick "AutoWalk" from the shortcut menu the previous phase opened, once it has
+        actually rendered. Located by its own text among the menu's items, not by
+        position - the same discipline the star lookup above uses.
+
+        No `obs.on_map` gate - see `_autowalk_open`'s docstring; this phase acts on a
+        live-located coordinate too, never a blind fixed one.
+
+        Before tapping, checks whether AutoWalk is ALREADY running for this account -
+        `ctx.switch_autowalk_active`, a colour reading of this SAME node's icon glyph
+        (see `perception.autowalk_active_signal`, refreshed by `Runner._refresh_accounts`
+        in lockstep with `ctx.accounts` itself). The user's own report, confirmed on the
+        device: a blue glyph means the account is already autowalking, and tapping
+        AutoWalk again must not happen. Only a positively-read TRUE skips - FALSE and
+        UNKNOWN (including the one ambiguous sample this signal is known not to separate
+        cleanly; see config.Thresholds) both fall through to the ordinary tap, because the
+        safe failure direction here is "not active": tapping AutoWalk when it is already
+        running is exactly today's behaviour, while silently skipping a walk the user
+        actually wanted is not.
+
+        Skipping still has to leave the shortcut menu in the state the rest of the ladder
+        expects - closed - so it hands off straight to `_autowalk_close` in the same tick
+        rather than simply confirming here (see that method's own docstring for why
+        leaving the menu open is not cosmetic).
+        """
+        v = ctx.accounts
+        if v is not None and v.available and v.autowalk_menu_norm is not None:
+            if ctx.switch_autowalk_active is Tristate.TRUE:
+                return [
+                    Note(f"AutoWalk already active for {ctx.switch_target}; not tapping "
+                         f"it again - closing the shortcut menu instead", "info"),
+                    SetFlag("switch_phase", "autowalk_close"),
+                ] + self._autowalk_close(obs, ctx)
+            if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                return []
+            return [
+                Tap(*v.autowalk_menu_norm, "autowalk: select AutoWalk from the shortcut menu",
+                    budget="switch"),
+                SetFlag("switch_phase", "autowalk_dialog"),
+            ]
+        gone = self._autowalk_deadline(ctx)
+        return gone if gone is not None else []
+
+    def _autowalk_dialog(self, obs, ctx):
+        """The 'Auto-Generated GPX' dialog: press CONTINUE LAST when PGSharp offers it,
+        otherwise OK (defaults to 50 POIs) - exactly the rule given in the task brief.
+
+        Never touches the POI-count input field or either toggle group: this module has
+        no coordinate for any of them (see accounts.py), so there is nothing here capable
+        of tapping one even in error. `autowalk_dialog_open` requires the dialog's own
+        title text, not merely the presence of button1/2/3 - generic Android AlertDialog
+        ids some other dialog could also carry - so this never presses a button that
+        belongs to a screen it only coincidentally resembles.
+
+        No `obs.on_map` gate - see `_autowalk_open`'s docstring. This matters most here:
+        the "Auto-Generated GPX" AlertDialog is the one screen in this ladder most likely
+        to read as off-map (a real AlertDialog dims the window behind it), and this is the
+        phase whose job is to act while that dialog is genuinely open.
+        """
+        v = ctx.accounts
+        if v is not None and v.available and v.autowalk_dialog_open:
+            target = v.autowalk_continue_last_norm or v.autowalk_ok_norm
+            if target is not None:
+                if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                    return []
+                reason = ("autowalk: CONTINUE LAST"
+                          if v.autowalk_continue_last_norm is not None
+                          else "autowalk: OK (default 50 POIs)")
+                return [Tap(*target, reason, budget="switch"),
+                        SetFlag("switch_phase", "autowalk_close")]
+        gone = self._autowalk_deadline(ctx)
+        return gone if gone is not None else []
+
+    def _autowalk_close(self, obs, ctx):
+        """Tap the star again to close the shortcut menu, which stays open after the
+        dialog is dismissed (measured live), then confirm the switch.
+
+        Waits for the view first, exactly like its three siblings, and for the reason
+        that makes waiting mandatory rather than merely tidy: `Runner.apply` drops
+        `ctx.accounts` after EVERY actuation taken while SWITCHING - the star TOGGLES the
+        menu, so a second decision taken from one stale view undoes the first - and only
+        the next tree refresh, itself throttled to `runner.ACCOUNTS_REFRESH`, repopulates
+        it. A version that confirmed on that `None` view instead of waiting could never
+        fire the close tap at any tick rate the runner actually has: driven through the
+        real Runner the tap appeared only when a single tick was longer than the whole
+        refresh cadence (measured: absent at dt=0.1/0.5/1.0/2.0s, present at dt=3.0s).
+
+        Leaving the menu open is not cosmetic. The menu overlaps the reach ellipse
+        SCANNING taps into while the map-ball ROI stays clear of it, so `on_map` remains
+        true and SCANNING taps straight into the menu; and the NEXT switch's
+        `_autowalk_open` taps the star while that menu is already open, which toggles it
+        SHUT - `_autowalk_menu` then finds no "AutoWalk" node, waits out the whole budget
+        and confirms without ever starting a route. AutoWalk would work on the first
+        switch of a run and silently stop thereafter.
+
+        Bounded by the same `_autowalk_deadline` as its siblings, so the wait can never
+        become a hang: a star that never reappears still confirms within
+        `config.AutoWalk.budget_s + close_grace_s` rather than holding the switch to the
+        full `Timings.switch_timeout` - the same allowance `_autowalk_deadline` itself
+        gives `_autowalk_menu`/`_autowalk_dialog` for exactly this same closing tap, since
+        by the time any of the three are running the menu is equally open and equally
+        worth one more try to shut. Confirmation is still never conditional on the close
+        tap SUCCEEDING - only on it having been emitted, or on the allowance being spent.
+
+        No `obs.on_map` gate, for the same reason as its siblings (see `_autowalk_open`'s
+        docstring): PGSharp's own menu is up on exactly the ticks this phase must act,
+        and a dimmed window behind it can read as NOT on-map.
+        """
+        v = ctx.accounts
+        if v is not None and v.available and v.star_norm is not None:
+            if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                return []
+            # Tap before Transition: `Runner.apply` walks the list in order, so the tap is
+            # applied while the state is still SWITCHING and the confirmation follows it.
+            return [
+                Tap(*v.star_norm, "autowalk: close the shortcut menu", budget="switch"),
+                Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                           f"logged into {ctx.switch_target}"),
+            ]
+        gone = self._autowalk_deadline(ctx)
+        return gone if gone is not None else []
 
     def on_timeout(self, obs, ctx):
         return [
@@ -752,8 +1048,24 @@ for _s in BotState:
 # ---------------------------------------------------------------- dispatch
 
 def interrupts(obs: Observation, ctx: Context) -> list[Effect]:
-    """At most one fires per tick. Interrupts act but never change state."""
+    """At most one fires per tick. Interrupts act but never change state.
+
+    Checked first and unconditionally on state: Pokemon GO's own exit-confirmation
+    dialog (obs.exit_dialog - see perception.exit_dialog_signal) can appear while
+    RECOVERING is unwinding whatever put it there, and needs the fastest, most direct
+    response available regardless of what state that happens to be - not routed through
+    `desired_state`/a handler's own `step`, both of which run only after this. BACK is
+    the whole point: it carries no coordinate at all, where this dialog's own OK button
+    sits close enough to ROCKET's fixed dialogue-advance tap (see `rocket_screen`) that a
+    coordinate-based response risks quitting the game outright. Given that asymmetry, a
+    threshold measured on only two positive samples (see config.Thresholds) is an
+    acceptable trade: the worst a false positive costs is one extra BACK press.
+    """
     cfg = ctx.cfg
+    if obs.exit_dialog.value and ctx.ready("back", cfg.timings.exit_dialog_back):
+        return [Back("dismiss Pokemon GO's own exit-confirmation dialog"),
+                Note("exit-confirmation dialog detected; pressing BACK rather than "
+                     "risking a coordinate tap near its OK button", "warn")]
     if obs.keyboard is Tristate.TRUE and ctx.state is not BotState.ENCOUNTER \
             and ctx.ready("keyboard", cfg.timings.keyboard_check):
         return [Back("soft keyboard is up"), Note("dismissing soft keyboard")]

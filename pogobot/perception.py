@@ -37,10 +37,31 @@ MINT_LO, MINT_HI = np.array([75, 40, 175]), np.array([95, 255, 255])
 TEAL_LO, TEAL_HI = np.array([80, 70, 30]), np.array([105, 255, 165])
 ORANGE_LO, ORANGE_HI = np.array([10, 130, 150]), np.array([25, 255, 255])
 PINK_LO, PINK_HI = np.array([155, 80, 150]), np.array([175, 255, 255])
-GREEN_PILL_LO, GREEN_PILL_HI = np.array([55, 60, 120]), np.array([95, 255, 255])
+#: Saturation is capped at 200 (not left at 255) because the level-up screen ("LEVEL
+#: n", CLAIM REWARDS) shares the pill's hue with its own teal background: at S<=255
+#: pill and background merge into one 590x634 contour (fixture resolution 590x1280)
+#: that fails every width/height/aspect check, so the pill—though `claim_pill_signal`
+#: sees it fine—is never located. Measured on the fixtures: pill saturation ~142,
+#: background saturation ~252; the background covers 86.6-87.0% of the lower ROI. A
+#: ceiling between them separates the two without touching hue. Swept against 470
+#: labelled corpus frames (state_v3 + state_cls5): S<=220 and S<=200 both locate the
+#: pill at (0.499, 0.801) with zero corpus regressions (see tests/test_perception_levelup.py);
+#: S<=180 was rejected because the mask starts eating into the pill itself and the
+#: located centre drifts to 0.465.
+GREEN_PILL_LO, GREEN_PILL_HI = np.array([55, 60, 120]), np.array([95, 200, 255])
 #: The Virtual Go Plus toggle's green centre when ON. Exactly the band specified in the
 #: task brief (H 40-90, S>=80, V>=80) - not re-derived, see config.Thresholds.
 GOPLUS_GREEN_LO, GOPLUS_GREEN_HI = np.array([40, 80, 80]), np.array([90, 255, 255])
+#: The exit-confirmation dialog's flat teal/green surround. Exactly the band reported
+#: for it (H 70-100, S>=60, V>=90) - see config.Thresholds.exit_dialog_teal for the
+#: measured samples and the honesty note about how few of them there are.
+EXIT_TEAL_LO, EXIT_TEAL_HI = np.array([70, 60, 90]), np.array([100, 255, 255])
+#: PGSharp shortcut-menu icon glyph colours (perception.autowalk_active_signal). Exactly
+#: the bands measured and reported - white = S<60 and V>170, blue = H 105-130, S>=120,
+#: V>=90 - not re-derived; see config.Thresholds for the measured table and the honesty
+#: note about how thin the negative sample is.
+AUTOWALK_WHITE_LO, AUTOWALK_WHITE_HI = np.array([0, 0, 171]), np.array([180, 59, 255])
+AUTOWALK_BLUE_LO, AUTOWALK_BLUE_HI = np.array([105, 120, 90]), np.array([130, 255, 255])
 BALL_BANDS = (
     (np.array([0, 120, 100]), np.array([10, 255, 255])),     # Poke Ball red
     (np.array([170, 120, 100]), np.array([180, 255, 255])),  # Poke Ball red wrap
@@ -192,6 +213,122 @@ def goplus_signal(bgr: np.ndarray, cfg: Config) -> Tristate:
     return Tristate.UNKNOWN
 
 
+def autowalk_active_signal(bgr: np.ndarray, icon_rect_norm: Optional[Rect],
+                           cfg: Config) -> Tristate:
+    """Colour of PGSharp's shortcut-menu "AutoWalk" icon glyph: TRUE when AutoWalk is
+    ALREADY running for the current account and must not be tapped again (the user's own
+    report, confirmed on the device), FALSE when the glyph is a plain white icon like
+    every other menu item, UNKNOWN when neither is clear - see
+    `fsm.Switching._autowalk_menu` for the decision this drives.
+
+    `icon_rect_norm` is supplied by the caller, never looked up here: it is the AutoWalk
+    entry's own icon box - x=0 to the label's own left edge, y over the label's own
+    vertical bounds, both taken from the uiautomator node (see
+    `accounts.AccountView.autowalk_icon_rect_norm`) - NEVER a hardcoded rectangle. This
+    function supplies only the colour inside it; the uiautomator view supplies the
+    bounds, the frame supplies the colour, and neither channel invents the other's job.
+    None (the menu, or its AutoWalk entry, has not rendered yet) reads UNKNOWN - there is
+    nothing to sample, exactly like a missing node means "do nothing" everywhere else in
+    this codebase.
+
+    Measured on the one committed capture of an account that already had AutoWalk
+    running (tests/fixtures/{uiautomator,screens}/autowalk_menu_active.{xml,png}),
+    sampling every item's OWN icon box the same way:
+
+        item          blue_frac   white_frac
+        Map               0.141        0.261
+        7.0 km/h          0.033        0.139
+        AutoWalk          0.320        0.002     <- active: the glyph is BLUE, not white
+        Feeds             0.027        0.135
+        Favorites         0.118        0.172
+        Teleport          0.213        0.198
+        Settings          0.213        0.246
+        Tap to            0.120        0.205
+
+    (full 1080x2340 capture; the SAME fixture downscaled to the bot's own 590x1280
+    processing resolution reads white=0.001 blue=0.331 for AutoWalk - the signal survives
+    the downscale.) white_frac is the clean discriminator here - 0.002 against a 0.135
+    floor across the seven inactive siblings, a 60x gap - while blue_frac is contaminated
+    by the semi-transparent menu sitting over a blue map: Teleport alone reads blue=0.213
+    while genuinely inactive, which is exactly why TRUE below requires white too, not
+    blue alone.
+
+    HONESTY: this is ONE sample of the active state, and there is no clean negative
+    sample of an inactive AutoWalk icon SPECIFICALLY - the seven siblings above are a
+    proxy ("some OTHER icon is white when inactive"), not AutoWalk's own icon caught
+    inactive. An older capture, taken before AutoWalk was ever started on that account,
+    reads white=0.041 blue=0.096 for the very same box - neither clearly white nor
+    clearly blue - so it cannot serve as a negative and must NOT read as confidently
+    inactive (FALSE) below; it lands in the UNKNOWN gap between the two bars, which is
+    exactly what `cfg.thresholds.autowalk_active_white_max`/`autowalk_inactive_white_min`
+    are set to do (see config.Thresholds for the full reasoning). Because the negative
+    side is this thin, TRUE requires BOTH bars to clear, precision-first: reading an
+    inactive account as "already active" silently skips a walk the user wanted, while the
+    opposite mistake - trying AutoWalk on an account that already has it running - is
+    exactly today's behaviour and is already known to be safe.
+    """
+    if icon_rect_norm is None:
+        return Tristate.UNKNOWN
+    roi = crop(bgr, icon_rect_norm)
+    if roi.size == 0:
+        return Tristate.UNKNOWN
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    white = mask_frac(hsv, AUTOWALK_WHITE_LO, AUTOWALK_WHITE_HI)
+    blue = mask_frac(hsv, AUTOWALK_BLUE_LO, AUTOWALK_BLUE_HI)
+    t = cfg.thresholds
+    if white <= t.autowalk_active_white_max and blue >= t.autowalk_active_blue_min:
+        return Tristate.TRUE
+    if white >= t.autowalk_inactive_white_min:
+        return Tristate.FALSE
+    return Tristate.UNKNOWN
+
+
+def exit_dialog_signal(bgr: np.ndarray, cfg: Config) -> Signal:
+    """Pokemon GO's own "Do you want to exit Pokemon GO?" confirm dialog.
+
+    Unity-drawn, so it never appears in a uiautomator dump (see accounts.py) - a dump
+    taken while it was up returned only PGSharp's own overlay nodes. It must be told
+    apart from the map and from every other screen by pixels alone: a flat teal/green
+    surround (measured H 70-100, S>=60, V>=90) with a bright, low-saturation card
+    centred in the middle band. Both are required - see config.Thresholds.exit_dialog_*
+    for the measured samples, the false-positive sweep against the 235-frame labelled
+    corpus, and the honesty note that only TWO positive samples exist.
+
+    The response this justifies is BACK (fsm.interrupts), which carries no coordinate at
+    all - unlike the OK button this dialog actually has, which sits close enough to the
+    fixed point ROCKET taps that a misclassification which instead led to a coordinate
+    tap would risk quitting the game outright. That asymmetry is why a two-sample
+    threshold is an acceptable trade here: the worst a false positive costs is one BACK
+    press RECOVERING would very likely have sent anyway.
+    """
+    top = crop(bgr, cfg.rois.exit_dialog_surround_top)
+    bottom = crop(bgr, cfg.rois.exit_dialog_surround_bottom)
+    card = crop(bgr, cfg.rois.exit_dialog_card)
+    if top.size == 0 or bottom.size == 0 or card.size == 0:
+        return _sig(0.0, cfg.thresholds.exit_dialog_teal)
+    teal_top = mask_frac(cv2.cvtColor(top, cv2.COLOR_BGR2HSV), EXIT_TEAL_LO, EXIT_TEAL_HI)
+    teal_bottom = mask_frac(cv2.cvtColor(bottom, cv2.COLOR_BGR2HSV), EXIT_TEAL_LO, EXIT_TEAL_HI)
+    # The MINIMUM of the two bands, not their average: both are meant to be flat teal
+    # background, so a card that spills into (or is mis-placed relative to) one of them
+    # must be allowed to sink that band's own score rather than being smoothed away by
+    # the other one still reading clean.
+    teal = min(teal_top, teal_bottom)
+    t = cfg.thresholds
+    card_hsv = cv2.cvtColor(card, cv2.COLOR_BGR2HSV)
+    card_mask = cv2.inRange(card_hsv,
+                            np.array([0, 0, t.exit_dialog_card_v_min]),
+                            np.array([180, t.exit_dialog_card_s_max, 255]))
+    card_white = float(np.count_nonzero(card_mask)) / float(card_mask.size)
+    ok = teal >= t.exit_dialog_teal and card_white >= t.exit_dialog_card
+    return Signal(
+        value=ok,
+        score=min(teal / max(t.exit_dialog_teal, 1e-9),
+                  card_white / max(t.exit_dialog_card, 1e-9)),
+        threshold=1.0,
+        detail={"teal": teal, "card_white": card_white},
+    )
+
+
 def find_close_button(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, float]]:
     """Locate the mint X. Returns normalized centre, or None.
 
@@ -223,8 +360,35 @@ def find_close_button(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, flo
     return None if best is None else (best[1], best[2])
 
 
+#: `find_action_pill`'s two white-text gates - a candidate must clear EITHER to be kept.
+#: `PILL_WHITE_WIDE` (the original, sole gate) is measured over 70% of the pill's width
+#: (x 0.15-0.85) and passes a label that fills most of the pill, like "CLAIM REWARDS".
+#: `PILL_WHITE_MIDDLE` is the same white measure taken only over the pill's centred
+#: quarter (x 0.38-0.62), so a short CENTRED label - "OK" on the post-login "Stay Aware
+#: of Your Surroundings" splash - still clears a gate even though it never fills WIDE's
+#: much wider window. Measured on the shape-passing "Stay Aware" candidate (0.51w x
+#: 0.063h, so shape and colour both already pass) in the committed fixture at 590x1280:
+#: wide=0.0284 (missed - below 0.05), middle=0.0837 (well inside a centred label's own window).
+#:
+#: Threshold swept against the labelled corpus, counting frames that newly locate a pill:
+#:   middle >= 0.080  ->  OK found, new false positives: none
+#:   middle >= 0.070  ->  OK found, new false positives: none                 <- chosen
+#:   middle >= 0.060  ->  new false positive: ExitTrainerBattle
+#:   middle >= 0.040  ->  new false positives: Overworld, ExitTrainerBattle
+#: 0.07 was chosen over 0.08 for margin: OK itself measures 0.0837, so 0.08 would leave
+#: only 0.0037 of headroom, while 0.07 still shows zero new false positives and the first
+#: one does not appear until 0.06.
+#:
+#: Rejected alternative, recorded so nobody re-treads it: simply lowering
+#: PILL_WHITE_WIDE to 0.025 also finds OK, but costs a new Overworld false positive
+#: (9 -> 10). The middle-window rule above costs none.
+PILL_WHITE_WIDE = 0.05
+PILL_WHITE_MIDDLE = 0.07
+
+
 def find_action_pill(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, float]]:
-    """Locate the wide green affirmative pill (BATTLE / USE THIS PARTY / CLAIM REWARDS).
+    """Locate the wide green affirmative pill (BATTLE / USE THIS PARTY / CLAIM REWARDS /
+    the post-login "Stay Aware of Your Surroundings" splash's OK).
 
     Pokemon GO uses one visual idiom for 'the button that advances', so one finder
     serves every screen that has one. Hardcoding coordinates per screen was rejected:
@@ -249,8 +413,16 @@ def find_action_pill(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, floa
         inner = roi[y + int(ch * 0.25):y + int(ch * 0.75), x + int(cw * 0.15):x + int(cw * 0.85)]
         if inner.size == 0:
             continue
-        white = float(np.count_nonzero(cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY) > 215)) / float(inner.size / 3)
-        if white < 0.05:                                # must carry white label text
+        wide = float(np.count_nonzero(cv2.cvtColor(inner, cv2.COLOR_BGR2GRAY) > 215)) / float(inner.size / 3)
+        middle = 0.0
+        if wide < PILL_WHITE_WIDE:
+            # Only worth measuring when WIDE alone did not already pass - see
+            # PILL_WHITE_MIDDLE's docstring for why a short centred label needs this
+            # narrower window at all.
+            mid = roi[y + int(ch * 0.25):y + int(ch * 0.75), x + int(cw * 0.38):x + int(cw * 0.62)]
+            if mid.size:
+                middle = float(np.count_nonzero(cv2.cvtColor(mid, cv2.COLOR_BGR2GRAY) > 215)) / float(mid.size / 3)
+        if wide < PILL_WHITE_WIDE and middle < PILL_WHITE_MIDDLE:  # must carry white label text
             continue
         area = cw * ch
         if best is None or area > best[0]:
@@ -357,4 +529,5 @@ class Perceptor:
             action_pill_xy=find_action_pill(bgr, cfg),
             frame_age=frame.age(),
             goplus=goplus_signal(bgr, cfg),
+            exit_dialog=exit_dialog_signal(bgr, cfg),
         )

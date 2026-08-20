@@ -30,6 +30,19 @@ class Rois:
     #: spanning two accounts, three zoom levels and several hours.
     goplus_toggle: Rect = (0.898, 0.200, 0.932, 0.225)
 
+    # Pokemon GO's own "Do you want to exit Pokemon GO?" confirm dialog (see
+    # perception.exit_dialog_signal): a white card centred on a flat teal-green
+    # background. Two bands sampled OUTSIDE where the card sits, both required to read
+    # flat teal, are more conservative than one - a card that is narrower or taller than
+    # expected still leaves at least a sliver of background in either band, but a single
+    # band positioned wrong could sit entirely inside the card and read low-teal/high-
+    # white on every frame regardless of what is actually on screen.
+    exit_dialog_surround_top: Rect = (0.0, 0.02, 1.0, 0.20)
+    exit_dialog_surround_bottom: Rect = (0.0, 0.85, 1.0, 0.98)
+    #: The card itself - a generic centred-dialog placement, not a per-pixel measurement;
+    #: see Thresholds.exit_dialog_card for the honesty note this shares.
+    exit_dialog_card: Rect = (0.12, 0.38, 0.88, 0.62)
+
 
 @dataclass(frozen=True)
 class Thresholds:
@@ -75,6 +88,76 @@ class Thresholds:
     goplus_off_s_max: float = 140.0
     goplus_off_green_max: float = 0.08
 
+    # Pokemon GO's own exit-confirmation dialog (perception.exit_dialog_signal). Both
+    # bars are the rule exactly as measured on the two real positive samples available:
+    #   sample 1: teal_surround=0.814  card_white=0.815
+    #   sample 2: teal_surround=0.858  card_white=0.815
+    # against every labelled class in the 235-frame corpus - one false positive
+    # (ExitTrainerBattle, itself a confirm dialog on a flat teal background where BACK is
+    # also the correct response) and zero on everything else, including Overworld
+    # (max teal 0.35) and PokemonEncounter (max card 1.00, but max teal only 0.44 - the
+    # AND of both bars is what separates it, not either alone). Only TWO positive
+    # samples exist; these are not a well-sampled threshold the way, say,
+    # goplus_on/off_* above are - see the module docstring for the same caveat.
+    exit_dialog_teal: float = 0.55
+    exit_dialog_card: float = 0.35
+    #: "Bright, low-saturation" for the card ROI - not itself a number from the task
+    #: brief (only the teal-surround band, H 70-100/S>=60/V>=90, was measured and
+    #: reported); chosen to match the qualitative description of a light dialog card
+    #: independent of hue, and exercised only against synthetic fixtures, not the real
+    #: corpus. See perception.exit_dialog_signal.
+    exit_dialog_card_s_max: float = 60.0
+    exit_dialog_card_v_min: float = 180.0
+
+    # PGSharp shortcut-menu "AutoWalk" icon glyph colour (perception.autowalk_active_signal,
+    # fsm.Switching._autowalk_menu). The user's own report: if the glyph is blue, that
+    # account is ALREADY autowalking and must not be tapped again. Measured by sampling
+    # every item's own icon box - x=0 to the label's left edge, y over the label's own
+    # vertical bounds, both taken from the item's uiautomator node (see
+    # accounts.AccountView.autowalk_icon_rect_norm) - on the ONE captured dump of an
+    # account that already had AutoWalk running:
+    #
+    #   item          blue_frac   white_frac
+    #   Map               0.141        0.261
+    #   7.0 km/h          0.033        0.139
+    #   AutoWalk          0.320        0.002     <- active: the glyph is BLUE, not white
+    #   Feeds             0.027        0.135
+    #   Favorites         0.118        0.172
+    #   Teleport          0.213        0.198
+    #   Settings          0.213        0.246
+    #   Tap to            0.120        0.205
+    #
+    # (full 1080x2340 capture; the SAME fixture downscaled to the bot's own 590x1280
+    # processing resolution reads white=0.001 blue=0.331 for AutoWalk - the signal
+    # survives the downscale.) white_frac is the clean discriminator - 0.002 against a
+    # 0.135 floor across the seven inactive siblings, a 60x gap - while blue_frac is
+    # contaminated by the semi-transparent menu sitting over a blue map: Teleport alone
+    # reads blue=0.213 while genuinely inactive, which is exactly why the TRUE bar below
+    # requires white too, never blue alone.
+    #
+    # HONESTY: this is ONE sample of the active state, and there is no clean negative
+    # sample of an inactive AutoWalk icon SPECIFICALLY - the seven siblings above are a
+    # proxy ("some OTHER icon is white when inactive"), not AutoWalk's own icon caught
+    # inactive. An older capture, taken before AutoWalk was ever started on that account,
+    # reads white=0.041 blue=0.096 for the very same box - neither clearly white nor
+    # clearly blue - so it CANNOT serve as a negative and must not read as confidently
+    # inactive; it has to land in the UNKNOWN gap between the two bars below, not be
+    # forced into either one. Because the negative side is this thin, "already active"
+    # requires BOTH bars to clear, precision-first: misreading an inactive account as
+    # already active silently skips a walk the user wanted, while the opposite mistake -
+    # trying AutoWalk on an account that already has it running - is exactly today's
+    # behaviour and is already known to be safe. The margins below sit strictly between
+    # the single active sample (white 0.001-0.002, blue 0.320-0.331) and the ambiguous
+    # negative (white 0.041, blue 0.096) - there are no OTHER negative samples to place a
+    # margin against.
+    autowalk_active_white_max: float = 0.02
+    autowalk_active_blue_min: float = 0.20
+    #: "Confidently inactive" (FALSE) needs only the white bar - measured the cleaner of
+    #: the two above - clearing a floor well under the seven inactive siblings' own
+    #: minimum (0.135), so a real white glyph is never mistaken for the UNKNOWN gap that
+    #: exists only to keep the single ambiguous sample out of both bars.
+    autowalk_inactive_white_min: float = 0.10
+
 
 @dataclass(frozen=True)
 class Timings:
@@ -116,6 +199,29 @@ class Timings:
     switch_tap: float = 2.0
     #: gap between attempts to clear a post-login screen
     switch_clear: float = 2.5
+    #: Bounds the coordinate-free BACK presses `Switching._settle` may fire clearing a
+    #: post-login screen, counting only ones the actuator actually accepted - see
+    #: `Runner.apply`, the same pattern `switch_zoom_reps`/`switch_goplus_attempts`
+    #: already use, and `fsm.Context.switch_clear_presses` for where the count lives.
+    #:
+    #: Measured on a live run: one BACK dismisses the post-login news modal, but nothing
+    #: bounded the presses, and BACK kept firing every `switch_clear` into a Unity
+    #: LOADING screen that legitimately runs for minutes. The actuator tally from that
+    #: run: `by_budget: {'back': 100, ...}` - about 90 of those went into the loading
+    #: screen over four minutes, and nothing else was logged in that window because
+    #: every phase was returning `[]` waiting on a map that never came ("account switch
+    #: to the target account never confirmed" at +240s, then RECOVERING halted the run at "no
+    #: confirmed map for 129s"). Worse than a stall: afterward PGSharp's own account
+    #: panel showed NEITHER account with an asterisk - the game had logged out of the
+    #: old account and never finished logging into the new one, recovered only by hand.
+    #: One or two BACKs clear a news modal; ninety is never right.
+    #:
+    #: Real headroom over the observed 1-2 presses, not the presses themselves. Once
+    #: spent, `_settle` simply waits - `switch_timeout` (240s below) already owns the
+    #: outcome, and `_verify` still runs the instant the map returns. A LOCATED close
+    #: button (`obs.close_button_xy`) is targeted, not blind, and is not limited by this
+    #: bound - only the coordinate-free BACK fallback is.
+    switch_clear_max: int = 5
     #: Budget for the whole SWITCHING state, read by `fsm.Switching.timeout`.
     #:
     #: Sized from the one switch that was fully observed end to end: ~2 minutes from the
@@ -138,6 +244,12 @@ class Timings:
     #: not a tight bound: waiting a bit too long costs a few seconds out of the switch
     #: budget above; waiting too little burns the whole budget on a false negative.
     switch_login_grace: float = 30.0
+
+    #: Gap between BACK presses aimed at Pokemon GO's own exit-confirmation dialog (see
+    #: perception.exit_dialog_signal, fsm.interrupts). Matches RECOVERING's own retry
+    #: cadence for the same physical button; this is a repeat-dismissal pace, not a
+    #: one-shot timeout - the dialog is not expected to survive even one BACK.
+    exit_dialog_back: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -233,6 +345,49 @@ class GoPlusToggle:
 
 
 @dataclass(frozen=True)
+class AutoWalk:
+    """Launching AutoWalk after a confirmed account switch, through PGSharp's floating
+    star widget (see `fsm.Switching._autowalk_open` and its neighbours): tap the star,
+    pick AutoWalk from the shortcut menu it opens, press CONTINUE LAST if PGSharp offers
+    it or OK otherwise, then tap the star again to close the menu it leaves open.
+
+    Bounded by WALL-CLOCK time, unlike `ZoomOut.repeats`/`GoPlusToggle.max_attempts`
+    above. Those both act on a FIXED coordinate that cannot fail to be found, so counting
+    accepted actuations is enough to bound them. Every step here instead depends on
+    LOCATING a uiautomator node - the star, the "AutoWalk" menu entry, a dialog button -
+    that can legitimately never appear (a PGSharp update, an unexpected screen), in which
+    case zero actuations are ever accepted and a bare attempt count never advances. A
+    wall-clock budget is the only bound that still guarantees the ladder gives up rather
+    than occupying the screen until `Timings.switch_timeout` itself expires and turns an
+    already-successful account switch into a recorded failure.
+    """
+
+    #: Real headroom for four settle-and-reread cycles (star, menu, dialog, close) at
+    #: `Timings.switch_tap` apart, without eating meaningfully into the switch's own
+    #: 240s budget - see the class docstring for why this exists at all.
+    budget_s: float = 30.0
+
+    #: Extra time `fsm.Switching._autowalk_deadline` may spend, ON TOP OF `budget_s`,
+    #: trying to close a shortcut menu the ladder itself opened before it gives up -
+    #: never to keep hoping the ladder will still finish, only to avoid handing SCANNING
+    #: a menu left open (see `_autowalk_close`'s own docstring for why that is not
+    #: cosmetic: it sits over the reach ellipse SCANNING taps into, and the NEXT switch's
+    #: own star tap would toggle it SHUT instead of open, silently killing AutoWalk for
+    #: the rest of the run).
+    #:
+    #: Sized for exactly one "wait for the view, then tap" cycle: `Runner.apply` drops
+    #: `ctx.accounts` after every actuation taken while SWITCHING, and only the next
+    #: throttled tree refresh (`runner.ACCOUNTS_REFRESH`, 2.5s) puts a usable view back -
+    #: this has to survive at least one of those, with headroom for more than one in case
+    #: the first lands on `Timings.switch_tap`'s own pacing gate (2.0s) instead of the
+    #: star. Confirmation still happens once this is spent too, exactly like `budget_s`
+    #: itself - the switch is never held hostage to the cleanup - and the combined total
+    #: (40s) stays a small fraction of the 240s `Timings.switch_timeout` that bounds the
+    #: whole switch regardless.
+    close_grace_s: float = 10.0
+
+
+@dataclass(frozen=True)
 class Config:
     rois: Rois = field(default_factory=Rois)
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -241,6 +396,7 @@ class Config:
     reach: Reach = field(default_factory=Reach)
     zoom: ZoomOut = field(default_factory=ZoomOut)
     goplus: GoPlusToggle = field(default_factory=GoPlusToggle)
+    autowalk: AutoWalk = field(default_factory=AutoWalk)
 
     det_model: Path = BASE_DIR / "models" / "v3" / "det" / "weights" / "best.pt"
     cls_model: Path = BASE_DIR / "models" / "v3" / "cls" / "weights" / "best.pt"
