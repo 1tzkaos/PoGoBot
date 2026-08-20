@@ -20,7 +20,9 @@
 Reads the screen over `scrcpy`, finds targets with YOLOv8, decides with a pure state
 machine, and acts through `adb`.
 
-<img src="assets/hud.png" width="300" alt="PoGoBot HUD showing live detections, the interaction range, and the raw perception scores">
+<img src="assets/demo.gif" width="300" alt="PoGoBot running: the HUD shows live YOLOv8 detections with confidences, the interaction range, and the state machine moving through SCANNING, TARGETING and ENCOUNTER">
+
+<sub>Live capture. The HUD is the bot's own preview — detection boxes and confidences, the reach ellipse it will act inside, the screen classifier's verdict, and the raw signals behind every decision.</sub>
 
 </div>
 
