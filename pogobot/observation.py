@@ -107,6 +107,11 @@ class Observation:
     close_button_xy: Optional[tuple[float, float]] = None
     action_pill_xy: Optional[tuple[float, float]] = None
     frame_age: float = 0.0
+    #: Virtual Go Plus toggle: TRUE=ON, FALSE=OFF, UNKNOWN=neither signature matched -
+    #: including "no Virtual Go Plus at all". Meaningless unless `on_map` is also true
+    #: (see perception.goplus_signal); nothing here enforces that gate, so a caller that
+    #: reads this off-map is reading noise, not absence.
+    goplus: Tristate = Tristate.UNKNOWN
 
     # Measured over 235 labelled frames: the red Pokeball alone reaches 97% recall on
     # Overworld but fires on 18% of encounters (a red Poke Ball sits in the same ROI).

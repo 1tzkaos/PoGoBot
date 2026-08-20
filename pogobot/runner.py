@@ -84,7 +84,7 @@ SWITCH_BACKOFF_BASE = 600.0
 SWITCH_MAX_FAILURES = 3
 
 # States whose per-visit bookkeeping must reset on entry.
-_RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps")
+_RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps", "switch_goplus_attempts")
 
 
 class Runner:
@@ -246,6 +246,22 @@ class Runner:
             # is one target tap that never produced the screen it claimed. Counting only
             # TARGETING silently dropped every stop tap whose POI screen never opened.
             st.taps_expired += 1
+        if src is BotState.SWITCHING and dst is not BotState.SWITCHING:
+            # A switch attempt - successful or failed - legitimately occupies the screen
+            # for up to `switch_timeout` (240s), well past `stuck_watchdog` (120s), and
+            # `last_map_ts` goes stale while SWITCHING drives the PGSharp overlay. Left
+            # alone, RECOVERING's own watchdog check reads that staleness as genuine
+            # stuckness - measured on the device, HALTED "no confirmed map for 209s" six
+            # seconds after a switch that never confirmed. `last_map_ts` itself is left
+            # untouched here: Scanning's own popup-timeout check and the
+            # encounter-resumed test (below) both depend on it meaning "the map was
+            # actually seen". `switch_exit_ts` instead marks the instant control
+            # legitimately returned to the FSM, and only `Recovering.on_timeout`
+            # consults it - so a switch's own bounded, already-handled failure (backoff +
+            # three-strike give-up below) can never by itself trip a halt, while
+            # stuckness that begins after a switch ends is still caught at the exact same
+            # 120s the watchdog has always used for every other kind of stuckness.
+            self.ctx.switch_exit_ts = self.ctx.now
         if src is BotState.SWITCHING and dst is BotState.SCANNING \
                 and e.outcome is IntentOutcome.CONFIRMED and self._switch_target:
             # Only a CONFIRMED switch rolls the session over: that outcome means the tree
@@ -274,6 +290,46 @@ class Runner:
         if self._halt_reason is None:
             self.stats.halts += 1
         self._halt_reason = reason
+
+    def _frames_starved(self, now: float) -> bool:
+        """True once a run of unusable frames has outlasted the stuck watchdog.
+
+        This is a second, independent consumer of `stuck_watchdog` alongside
+        `Recovering.on_timeout` - it exists because `fsm.step` (and so every FSM-level
+        timeout, including SWITCHING's own `switch_timeout`) can only run once a real
+        frame has been read, so a stretch of `frame is None` needs its own backstop.
+
+        A switch is given a LONGER budget here, not excused from the check. The ordinary
+        `map_stale_since` accounting cannot judge a switch in flight: SWITCHING drives the
+        PGSharp overlay over the map for the whole attempt, so `last_map_ts` is already
+        >120s stale on a perfectly on-budget switch, and `switch_exit_ts` still holds
+        whatever an earlier switch (or none) left it at. Unguarded, one ordinary transient
+        frame-read gap partway through such a switch halted the run outright - exactly the
+        failure class `ctx.map_stale_since` was added to stop, reached by a path
+        `Recovering.on_timeout` cannot cover, since that only ever runs once SWITCHING has
+        already exited.
+
+        Returning False outright was the overcorrection. "It will be caught once the
+        switch exits" is not an escape hatch that exists here: SWITCHING is left only
+        through `fsm.step`, and the loop reaches `fsm.step` only after a frame has come
+        back - so when the thing that has failed IS the frames, that exit never arrives. A
+        source that is alive but silent (scrcpy holding the pipe open with the screen off,
+        a flaked USB, a sleeping device - see `capture.release`) keeps `healthy()` true and
+        the reader thread quiet, so the run loop spun on forever with no halt, no log line
+        and no session record, where before it stopped cleanly at 120s. Nothing is tapped
+        meanwhile, so it is not unsafe - it is a clean halt replaced by a silent hang.
+
+        `switch_timeout` is the whole budget a switch is entitled to, and `stuck_watchdog`
+        on top is the same grace any other state gets before staleness counts as stuckness;
+        past their sum there is no reading of the frames that is still consistent with a
+        switch merely being slow. `state_since` is the switch's own start (nothing
+        re-enters SWITCHING from itself - `_maybe_switch` starts only from SCANNING), so
+        this is that switch's clock, not a rolling one.
+        """
+        if self.ctx.state is BotState.SWITCHING:
+            return now - self.ctx.state_since > (self.cfg.timings.switch_timeout
+                                                 + self.cfg.timings.stuck_watchdog)
+        return now - self.ctx.map_stale_since > self.cfg.timings.stuck_watchdog
 
     def toggle_pause(self) -> None:
         self._pause_requested = not self._pause_requested
@@ -760,6 +816,12 @@ class Runner:
                         # the FSM's repeat count, or `_zoom` could confirm the switch
                         # having sent fewer than `repeats` real zoom-outs.
                         self.ctx.switch_zoom_reps += 1
+                    elif budget == "goplus" and isinstance(e, Tap):
+                        # Same reasoning as switch_zoom_reps just above: `_goplus` is pure
+                        # and cannot know whether its Tap actually reached the device, so
+                        # only an ACCEPTED tap may advance the bound that keeps a stuck
+                        # toggle from spending unlimited attempts.
+                        self.ctx.switch_goplus_attempts += 1
                     self.ctx.last_action[budget] = self.ctx.now
                     self.ctx.taps_in_state += 1
                     if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag)):
@@ -781,6 +843,12 @@ class Runner:
             "seq": obs.seq, "t": round(obs.ts, 3), "state": self.ctx.state.value,
             "screen": obs.screen.label, "conf": round(obs.screen.conf, 3),
             "map": obs.map_ball.value, "x": obs.x_button.value, "enc": obs.encounter.value,
+            # Recorded as the tristate's own name, not a bool: OFF and ON are separately
+            # measured signatures and everything else is UNKNOWN, so collapsing it would
+            # erase the only question a live trace can settle - whether real frames land
+            # in the unmeasured band between the two (see config.Thresholds). Read it
+            # against "map": off the map this ROI is noise, not absence.
+            "goplus": obs.goplus.value,
             "red": round(obs.map_ball.detail.get("red", 0.0), 4),
             "orange": round(obs.map_ball.detail.get("orange", 0.0), 4),
             "pill": obs.action_pill_xy is not None,
@@ -886,8 +954,9 @@ class Runner:
                 if frame is None:
                     # A stale or missing frame must never be treated as a fresh one; v1
                     # served the last good frame forever and tapped a phone it could not see.
+                    # See `_frames_starved` for why this is not simply `last_map_ts`.
                     time.sleep(0.01)
-                    if now - self.ctx.last_map_ts > cfg.timings.stuck_watchdog:
+                    if self._frames_starved(now):
                         self._halt("no usable frames")
                         break
                     continue

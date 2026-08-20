@@ -18,6 +18,7 @@ Each of these has a failure mode that a green suite would otherwise hide:
 import json
 import logging
 import time
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -25,7 +26,7 @@ import pytest
 from pogobot import fsm
 from pogobot import runner as runner_mod
 from pogobot.accounts import AccountView, FakeTreeReader
-from pogobot.config import DEFAULT
+from pogobot.config import DEFAULT, Config
 from pogobot.effects import BotState, IntentOutcome, Tap, Transition
 from pogobot.frames import Frame
 from pogobot.quota import SpinQuota
@@ -525,7 +526,201 @@ def test_the_abandoned_claim_is_logged_as_a_switch_not_a_pause(caplog):
     assert "switch" in line and "paused" not in line
 
 
-# ------------------------------------------------------------------ failed switches
+# ------------------------------------------------------------------ the stuck-watchdog regression
+
+def test_a_failed_switch_does_not_trip_the_stuck_watchdog():
+    """Driven through the real Runner and real FSM end to end, including RECOVERING's
+    OWN on_timeout - `_fail_a_switch` below forces the return to SCANNING by hand and so
+    cannot see this. Observed live: a switch that never confirmed handed off to
+    RECOVERING with `last_map_ts` already stale by nearly the whole `switch_timeout`
+    (240s), and RECOVERING's own 6s timeout halted the run moments later - "no confirmed
+    map for 209s" - ending a session over one ordinary, already-handled switch failure.
+    """
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now
+    r._begin_switch("TrainerTwo")
+    assert r.ctx.state is BotState.SWITCHING
+
+    # The map never comes back - the shape a silently-refused login leaves behind - so
+    # the switch runs out its own budget rather than confirming.
+    off = off_map()
+    r.ctx.now += r.cfg.timings.switch_timeout + 1.0
+    r.apply(fsm.step(off, r.ctx), off)
+    assert r.ctx.state is BotState.RECOVERING, "the switch must end at its own timeout"
+
+    # Jump straight to RECOVERING's own timeout - one real tick, exactly like every
+    # other timeout test in this suite, is enough to reach on_timeout (see fsm.step: the
+    # dispatcher checks elapsed > handler.timeout(ctx) before anything else runs).
+    r.ctx.now += r.cfg.timings.recovering_timeout + 1.0
+    r.apply(fsm.step(off, r.ctx), off)
+
+    assert r._halt_reason is None, r._halt_reason
+    assert r.ctx.state is not BotState.HALTED
+
+
+def test_stuckness_after_a_failed_switch_still_trips_the_watchdog():
+    """The other half, which is what makes the fix honest: stuckness that continues once
+    the switch has already released the screen is NOT excused - only the switch's own
+    bounded duration was. RECOVERING's own on_timeout is called directly, exactly the
+    way every other timeout test in this suite reaches it."""
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now
+    r._begin_switch("TrainerTwo")
+
+    off = off_map()
+    r.ctx.now += r.cfg.timings.switch_timeout + 1.0
+    r.apply(fsm.step(off, r.ctx), off)
+    assert r.ctx.state is BotState.RECOVERING
+    exit_ts = r.ctx.switch_exit_ts        # the instant the switch let go of the screen
+
+    r.ctx.now = exit_ts + r.cfg.timings.stuck_watchdog + 1.0
+    r.apply(fsm.step(off, r.ctx), off)
+
+    assert r._halt_reason is not None
+    assert r.ctx.state is BotState.HALTED
+
+
+# ------------------------------------------------------------ the "no usable frames" watchdog
+#
+# A second, independent `stuck_watchdog` consumer: `Runner.run()`'s own read loop halts
+# with "no usable frames" when the capture source stops returning frames, because
+# `fsm.step` - and so every FSM-level timeout, including SWITCHING's own 240s
+# `switch_timeout` - can only run once a frame has actually been read. Unlike
+# `Recovering.on_timeout`, which can only ever run once SWITCHING has already exited,
+# this check runs on every tick regardless of state, including mid-switch - so crediting
+# only `switch_exit_ts` (as `ctx.map_stale_since` does) is not enough here: a switch
+# 125s into its own on-budget 240s window has not exited yet, `switch_exit_ts` is still
+# whatever an EARLIER switch (or none) left it at, and `last_map_ts` is already >120s
+# stale purely because SWITCHING legitimately hides the map. One transient
+# `source.read() -> None` tick at that point must not halt the run.
+
+def test_a_frame_gap_mid_switch_does_not_starve_the_watchdog():
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now
+    r._begin_switch("TrainerTwo")
+    assert r.ctx.state is BotState.SWITCHING
+
+    # Well inside switch_timeout (240s), well past stuck_watchdog (120s) - exactly the
+    # observed live shape - and switch_exit_ts has nothing to say yet: this switch has
+    # not exited.
+    r.ctx.now += 125.0
+    assert r.ctx.switch_exit_ts == 0.0
+    assert not r._frames_starved(r.ctx.now)
+
+
+def test_a_frame_gap_after_the_switch_exits_still_starves_normally():
+    """The guard is scoped to an ACTIVE switch, not a blanket exemption: once SWITCHING
+    has released the screen, a frame gap is judged by the same switch_exit_ts credit
+    Recovering.on_timeout already uses, not excused forever."""
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now
+    r._begin_switch("TrainerTwo")
+
+    off = off_map()
+    r.ctx.now += r.cfg.timings.switch_timeout + 1.0
+    r.apply(fsm.step(off, r.ctx), off)
+    assert r.ctx.state is BotState.RECOVERING
+    exit_ts = r.ctx.switch_exit_ts
+
+    r.ctx.now = exit_ts + r.cfg.timings.stuck_watchdog + 1.0
+    assert r._frames_starved(r.ctx.now)
+
+
+def test_a_frame_gap_with_no_switch_involved_still_starves_exactly_as_tightly():
+    """No behavioural change for the failure mode this watchdog originally shipped for:
+    with switch_exit_ts at its 0.0 default, this is the pre-fix check, unmodified."""
+    r = make_runner()
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now - (r.cfg.timings.stuck_watchdog + 1.0)
+    assert r._frames_starved(r.ctx.now)
+
+
+def test_a_switch_starved_for_its_whole_budget_still_starves():
+    """The counterpart the guard must not swallow: SWITCHING is credited its own budget,
+    not exempted from the check.
+
+    A switch cannot leave SWITCHING except through `fsm.step`, and the loop only reaches
+    `fsm.step` once a frame has actually been read - so when the thing that has failed is
+    the frames themselves, no amount of waiting produces the exit that would hand the
+    question back to `switch_exit_ts`. The bound has to be enforced from inside the
+    state."""
+    r = make_runner(tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now
+    r._begin_switch("TrainerTwo")
+
+    grace = r.cfg.timings.switch_timeout + r.cfg.timings.stuck_watchdog
+    r.ctx.now += grace - 1.0
+    assert not r._frames_starved(r.ctx.now)
+    r.ctx.now += 2.0
+    assert r._frames_starved(r.ctx.now)
+
+
+class _SilentSrc:
+    """The shape `capture.py` names: scrcpy holding the pipe open while producing nothing
+    (screen off, USB flake, device asleep). `healthy()` stays true, the reader thread is
+    quiet, and every `read()` comes back None.
+
+    `give_up_after` is a safety valve, not part of the behaviour under test: without the
+    starvation bound nothing in the run loop ever ends this run, so this is what turns a
+    hang into a failed assertion.
+    """
+
+    def __init__(self, give_up_after=400):
+        self.runner = None                   # set by the test once the Runner exists
+        self.give_up_after = give_up_after
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        if self.reads >= self.give_up_after and self.runner is not None:
+            self.runner._stop = True
+        return None
+
+    def healthy(self):
+        return True
+
+    def release(self):
+        pass
+
+
+def test_a_silent_but_alive_source_mid_switch_still_halts_the_run():
+    """Driven through the real `Runner.run()` loop, because the claim is about the loop:
+    the capture source never dies, so the "capture source died" exit is never taken, and
+    `fsm.step` is never reached, so SWITCHING's own timeout never runs either. Before the
+    bound this spun forever - no halt, no log line, no session record."""
+    cfg = Config(timings=replace(DEFAULT.timings, switch_timeout=0.05, stuck_watchdog=0.02))
+    src = _SilentSrc()
+    r = runner_mod.Runner(cfg, src, _Act(), perceptor=None, display=False,
+                          tree_reader=FakeTreeReader([closed_panel()]), roster=ROSTER)
+    src.runner = r
+    r.stats.account = "TrainerOne"
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = time.perf_counter()
+    r.ctx.last_map_ts = r.ctx.now
+    r._begin_switch("TrainerTwo")
+    assert r.ctx.state is BotState.SWITCHING
+
+    assert r.run() == 1
+    assert r._halt_reason == "no usable frames"
+    assert r.stats.halts == 1
+    assert src.reads < src.give_up_after, "the run loop never ended itself"
+
 
 def _fail_a_switch(r, start, *, tap_login, view=None):
     """Drive one whole attempt through the real Runner and the real FSM, from the trigger

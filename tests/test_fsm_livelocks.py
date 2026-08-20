@@ -122,6 +122,56 @@ def test_watchdog_halts_instead_of_tapping_forever():
     assert kinds(out, Halt), "a bot that cannot find the map must stop, not keep tapping"
 
 
+# --- the switch/watchdog regression: a switch attempt must not trip the halt alone ----
+def test_a_switch_exit_excuses_the_watchdog_for_its_own_duration():
+    """A switch can legitimately occupy the screen for up to `switch_timeout` (240s),
+    comfortably longer than `stuck_watchdog` (120s) - `last_map_ts` goes stale while it
+    drives the PGSharp overlay whether the switch confirms or fails. Observed live:
+    HALTED "no confirmed map for 209s" six seconds after a switch that never confirmed
+    handed off to RECOVERING, ending a run over one ordinary, already-handled failure.
+    `switch_exit_ts` - set by runner._count_transition the instant a switch releases the
+    screen - must be enough on its own to keep the watchdog from firing over that gap."""
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 300.0,
+            switch_exit_ts=1000.0 - 6.0)
+    out = fsm.step(obs(screen="Menu"), c)
+    assert not kinds(out, Halt)
+
+
+def test_non_switch_stuckness_still_halts_exactly_as_tightly():
+    """The other half of the fix, and the one that makes it honest: with no switch
+    involved (switch_exit_ts left at its 0.0 default), the watchdog must be completely
+    untouched - same 120s, same halt, as before this fix existed."""
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 121.0)
+    out = fsm.step(obs(screen="Menu"), c)
+    assert kinds(out, Halt)
+
+
+def test_stuckness_that_begins_after_a_switch_ends_still_halts_at_120s():
+    """The credit is a reset, not a blank cheque: stuckness that starts once the switch
+    has already let go of the screen is still caught at the same 120s as ever - just
+    measured from the moment the switch released the screen, not from whenever the map
+    was last genuinely seen (which could be far longer ago, as here)."""
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 300.0,
+            switch_exit_ts=1000.0 - 121.0)
+    out = fsm.step(obs(screen="Menu"), c)
+    assert kinds(out, Halt)
+
+
+def test_halt_message_reports_the_reason_the_gate_actually_used():
+    """The gating condition and the printed message must agree on why the halt fired.
+    Here `last_map_ts` is stale from long before the switch even started (300s), but
+    the halt actually fires on the 121s since `switch_exit_ts` - the message must name
+    that 121s, not the far larger, disconnected `last_map_ts` figure, or a human reading
+    the log line (as this fix's own report was diagnosed from) draws the wrong
+    conclusion about what the bot was stuck on."""
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 300.0,
+            switch_exit_ts=1000.0 - 121.0)
+    halts = kinds(fsm.step(obs(screen="Menu"), c), Halt)
+    assert halts, "expected a halt"
+    assert "121s" in halts[0].reason
+    assert "300s" not in halts[0].reason
+
+
 # --- structural guarantees ----------------------------------------------------
 def test_every_state_declares_a_timeout_and_an_escape():
     for s in BotState:

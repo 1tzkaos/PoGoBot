@@ -78,11 +78,16 @@ def test_no_tap_ever_lands_on_a_delete_button():
     "open", not phases, and naming them here only ran the "open" case three times. "zoom"
     is included too: it is a screen-centre gesture nowhere near any row, but its endpoints
     are still coordinates this handler emits, and this is the test that matters for those.
+    "goplus" needs `obs.goplus=FALSE` forced on top of the loop's own `obs()` call - with
+    the suite-wide default of UNKNOWN that phase never taps at all, and a guard that never
+    exercises the tap it exists to check proves nothing.
     """
-    for phase in ("open", "settle", "verify", "zoom"):
+    from pogobot.observation import Tristate
+    for phase in ("open", "settle", "verify", "zoom", "goplus"):
         for on_map in (True, False):
             c = ctx(phase=phase)
-            effects = fsm.step(obs(on_map=on_map), c)
+            kw = {"goplus": Tristate.FALSE} if phase == "goplus" else {}
+            effects = fsm.step(obs(on_map=on_map, **kw), c)
             points = [(t.x, t.y) for t in taps(effects)]
             points += [(d.x1, d.y1) for d in effects if isinstance(d, DoubleTapDrag)]
             points += [(d.x2, d.y2) for d in effects if isinstance(d, DoubleTapDrag)]

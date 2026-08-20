@@ -38,6 +38,9 @@ TEAL_LO, TEAL_HI = np.array([80, 70, 30]), np.array([105, 255, 165])
 ORANGE_LO, ORANGE_HI = np.array([10, 130, 150]), np.array([25, 255, 255])
 PINK_LO, PINK_HI = np.array([155, 80, 150]), np.array([175, 255, 255])
 GREEN_PILL_LO, GREEN_PILL_HI = np.array([55, 60, 120]), np.array([95, 255, 255])
+#: The Virtual Go Plus toggle's green centre when ON. Exactly the band specified in the
+#: task brief (H 40-90, S>=80, V>=80) - not re-derived, see config.Thresholds.
+GOPLUS_GREEN_LO, GOPLUS_GREEN_HI = np.array([40, 80, 80]), np.array([90, 255, 255])
 BALL_BANDS = (
     (np.array([0, 120, 100]), np.array([10, 255, 255])),     # Poke Ball red
     (np.array([170, 120, 100]), np.array([180, 255, 255])),  # Poke Ball red wrap
@@ -156,6 +159,37 @@ def claim_pill_signal(bgr: np.ndarray, cfg: Config) -> Signal:
     white = float(np.count_nonzero(ig > 220)) / float(ig.size)
     ok = teal >= cfg.thresholds.claim_teal and white >= cfg.thresholds.claim_white_text
     return Signal(ok, teal, cfg.thresholds.claim_teal, {"teal": teal, "white": white})
+
+
+def goplus_signal(bgr: np.ndarray, cfg: Config) -> Tristate:
+    """Virtual Go Plus pokeball toggle: TRUE (ON, bright with a green centre), FALSE
+    (OFF, dim and desaturated), or UNKNOWN when the ROI matches neither measured
+    signature - which is also the honest answer when there is no Virtual Go Plus at all.
+
+    Both states are POSITIVELY identified (see config.Thresholds for the measured
+    numbers and margins), not inferred as "not the other one", so an unmeasured third
+    appearance in that ROI reads UNKNOWN rather than being forced into ON or OFF.
+
+    Meaningless off the map - the same ROI reads a false 100% green on a PokeStop reward
+    screen, and 100%/68%/26% on assorted menus and loading screens (see the docstring on
+    Thresholds.goplus_on_v). Callers MUST gate on obs.on_map before trusting this; this
+    function has no way to enforce that itself.
+    """
+    roi = crop(bgr, cfg.rois.goplus_toggle)
+    if roi.size == 0:
+        return Tristate.UNKNOWN
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    v = float(np.mean(hsv[:, :, 2]))
+    s = float(np.mean(hsv[:, :, 1]))
+    green = mask_frac(hsv, GOPLUS_GREEN_LO, GOPLUS_GREEN_HI)
+    t = cfg.thresholds
+    if v >= t.goplus_on_v_min and s >= t.goplus_on_s_min and green >= t.goplus_on_green_min:
+        return Tristate.TRUE
+    if (t.goplus_off_v_min <= v <= t.goplus_off_v_max
+            and t.goplus_off_s_min <= s <= t.goplus_off_s_max
+            and green <= t.goplus_off_green_max):
+        return Tristate.FALSE
+    return Tristate.UNKNOWN
 
 
 def find_close_button(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, float]]:
@@ -322,4 +356,5 @@ class Perceptor:
             close_button_xy=find_close_button(bgr, cfg),
             action_pill_xy=find_action_pill(bgr, cfg),
             frame_age=frame.age(),
+            goplus=goplus_signal(bgr, cfg),
         )
