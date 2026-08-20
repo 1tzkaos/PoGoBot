@@ -164,7 +164,7 @@ stateDiagram-v2
     POPUP --> SCANNING: overlay closed
     SCANNING --> RECOVERING: map not visible
     RECOVERING --> SCANNING: recovered
-    RECOVERING --> HALTED: cannot find the map
+    RECOVERING --> HALTED: no map, even after restarting the app
 ```
 
 Three properties are enforced structurally rather than by convention:

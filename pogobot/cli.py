@@ -36,6 +36,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="switch to PokeStop-only targeting after N useless encounters in a row")
     p.add_argument("--restock-stops", type=int, default=None, metavar="N",
                    help="PokeStops to collect before resuming normal targeting")
+    p.add_argument("--max-app-restarts", type=int, default=None, metavar="N",
+                   help="consecutive times recovery may force-stop and relaunch the game "
+                        "before halting instead (0 never restarts it)")
     p.add_argument("--no-rotate", action="store_true")
     p.add_argument("--dry-run", action="store_true",
                    help="perceive and decide, but never touch the device")
@@ -185,7 +188,8 @@ def config_from_args(a) -> Config:
             overrides[name] = v
     for cli_name, cfg_name in (("max_throws", "max_throws_per_encounter"),
                                ("restock_after", "restock_after_failures"),
-                               ("restock_stops", "restock_target_stops")):
+                               ("restock_stops", "restock_target_stops"),
+                               ("max_app_restarts", "max_app_restarts")):
         v = getattr(a, cli_name, None)
         if v is not None:
             overrides[cfg_name] = v

@@ -24,6 +24,14 @@ tests/fixtures/uiautomator/star_moved.xml), so it is located the same way the co
 launcher already is: through a stable descendant id (`hl_floating_icon`, confirmed present
 in tests/fixtures/uiautomator/accounts_open.xml) walked up to its nearest clickable
 ancestor, never by class+clickable alone or by a remembered coordinate.
+
+Because BOTH of those widgets float and are draggable, they can also end up drawn on top
+of one another - measured immediately after an app restart, and reproduced in
+tests/fixtures/uiautomator/overlay_collapsed.xml. That is why this module reports each
+one's clickable RECT as well as its centre: two centres cannot express an overlap, and the
+overlap is what turns a tap meant for the star into a tap on the accounts launcher. See
+`AccountView.overlay_collapsed` for the measurement and `fsm.Switching._separate_star` for
+what acts on it.
 """
 
 from __future__ import annotations
@@ -87,6 +95,11 @@ class AccountView:
 
     rows: tuple[AccountRow, ...] = ()
     launcher_norm: Optional[tuple[float, float]] = None
+    #: The accounts/cooldown launcher's own clickable bounds, normalized - the SAME node
+    #: `launcher_norm` is the centre of. Present for exactly one reason: an overlap cannot
+    #: be expressed by two centres (see `overlay_collapsed`), and neither can the landing
+    #: zone a separating drag has to aim at (see `star_clear_y_norm`).
+    launcher_rect_norm: Optional[tuple[float, float, float, float]] = None
     accounts_tab_norm: Optional[tuple[float, float]] = None
     close_norm: Optional[tuple[float, float]] = None
     available: bool = False
@@ -94,6 +107,9 @@ class AccountView:
     #: The star widget's own current position - see ID_STAR_ICON. None means "not found
     #: in this dump", never a stale or assumed location.
     star_norm: Optional[tuple[float, float]] = None
+    #: The star's own clickable bounds, normalized - the SAME node `star_norm` is the
+    #: centre of, and the counterpart of `launcher_rect_norm` above.
+    star_rect_norm: Optional[tuple[float, float, float, float]] = None
     #: The shortcut menu's "AutoWalk" entry, present only once the star has been tapped
     #: and the menu has actually rendered.
     autowalk_menu_norm: Optional[tuple[float, float]] = None
@@ -114,6 +130,76 @@ class AccountView:
     autowalk_continue_last_norm: Optional[tuple[float, float]] = None
     #: OK (button1) - the default (50 POIs).
     autowalk_ok_norm: Optional[tuple[float, float]] = None
+
+    @property
+    def overlay_collapsed(self) -> bool:
+        """True when PGSharp's two floating widgets are drawn on top of each other.
+
+        Measured on the device immediately after `effects.RestartApp` relaunched the game:
+        the star's clickable rect was (0,152)-(108,260) and the launcher's (0,152)-(272,245)
+        - a 108x93 overlap covering nearly the whole star, with the star's own CENTRE
+        (54,206) inside the launcher's rect. That centre is exactly what `star_norm`
+        reports and what `fsm.Switching._autowalk_open` taps, so in this layout a tap meant
+        for the star is delivered to the accounts launcher instead - which opens the
+        PGSharp accounts panel, the screen `fsm.Recovering._panel_close` and the restart
+        ladder above it exist to get back out of. The restart is itself what produces the
+        layout, so a restart shipped without this would have the bot cause the wedge it
+        recovers from.
+
+        Rect overlap, deliberately NOT the narrower "the star's centre is inside the
+        launcher's rect". That narrower condition is what makes the tap land wrong, and it
+        is a strict subset of this one; the wider test also covers the partial stack the
+        user reports having to drag apart by hand, and errs toward separating widgets that
+        were already usable rather than toward tapping a control that opens the panel.
+
+        False whenever either rect is missing. An absent widget is "could not look", never
+        "they are separated" - the same distinction `available` draws for the dump as a
+        whole.
+        """
+        star, launcher = self.star_rect_norm, self.launcher_rect_norm
+        if star is None or launcher is None:
+            return False
+        return (star[0] < launcher[2] and launcher[0] < star[2]
+                and star[1] < launcher[3] and launcher[1] < star[3])
+
+    @property
+    def star_clear_y_norm(self) -> Optional[float]:
+        """Where the star's CENTRE has to end up for it to clear the accounts launcher.
+
+        Derived from the two rects THIS dump reported and nothing else: the launcher's own
+        bottom edge, plus half a star so the star's top edge is level with it, plus one
+        more whole star height of margin.
+
+        The margin is measured in the star's own height because that is the only length
+        the tree offers for this widget, and because it is exactly the amount by which the
+        drag is allowed to fall short. `input swipe` on this overlay does not land where
+        it is aimed: measured, asking for y=626 landed the centre at 837, asking for 339
+        landed at 443, and asking for 356 moved it the other way entirely, to 125. A
+        landing zone a full widget clear of the launcher survives a miss of that size in
+        the near direction; a miss in the other direction is what `fsm.Switching
+        ._separate_star` re-reads the tree for, rather than trusting any one drag.
+
+        BELOW the launcher, not above it: after a restart the launcher's top edge is the
+        top of the usable screen (measured y=152 of 2340, just under the status bar), so
+        there is no room above it, and the separation that was actually verified on the
+        device left the star at (0,389)-(108,497) - below.
+
+        None when either rect is missing, or when the result would push the star off the
+        bottom of the screen. A drag has two endpoints and both have to be somewhere the
+        screen actually has; refusing is what stops this inventing one.
+
+        Clearing the launcher is necessary and not sufficient, and the rest of the
+        judgement is deliberately not here: whether the answer also sits outside the reach
+        ellipse SCANNING taps into is checked by `fsm.Switching._separate_star`, because
+        that ellipse lives in fsm.py and fsm.py is what imports THIS module. A widget
+        geometry module that guessed at the ellipse would be a second copy of it.
+        """
+        star, launcher = self.star_rect_norm, self.launcher_rect_norm
+        if star is None or launcher is None:
+            return None
+        height = star[3] - star[1]
+        y = launcher[3] + height / 2.0 + height
+        return y if y + height / 2.0 <= 1.0 else None
 
     @property
     def active(self) -> Optional[AccountRow]:
@@ -177,6 +263,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         return None
 
     launcher = accounts_tab = close = star = None
+    launcher_rect = star_rect = None
     autowalk_menu = None
     autowalk_icon_rect = None
     autowalk_dialog_open = False
@@ -190,6 +277,10 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
             anc = _clickable_ancestor(n)
             if anc is not None:
                 launcher = _centre_norm(anc, w, h)
+                # The rect as well as the centre, for both floating widgets: two centres
+                # cannot say whether the widgets overlap, and both float (see the module
+                # docstring and AccountView.overlay_collapsed).
+                launcher_rect = _rect_norm(anc, w, h)
         elif _ends_with(n, ID_STAR_ICON):
             # Same idiom as the cooldown launcher just above, deliberately not folded
             # into one branch: the two anchor ids identify two DIFFERENT widgets, and
@@ -198,6 +289,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
             anc = _clickable_ancestor(n)
             if anc is not None:
                 star = _centre_norm(anc, w, h)
+                star_rect = _rect_norm(anc, w, h)
         elif _ends_with(n, ID_SHORTCUT_ITEM):
             if n.get("text") == "AutoWalk":
                 autowalk_menu = _centre_norm(n, w, h)
@@ -247,6 +339,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
     return AccountView(
         rows=tuple(rows),
         launcher_norm=launcher,
+        launcher_rect_norm=launcher_rect,
         accounts_tab_norm=accounts_tab,
         close_norm=close,
         available=True,
@@ -257,6 +350,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         # then open again until the switch times out.
         panel_open=close is not None or bool(rows),
         star_norm=star,
+        star_rect_norm=star_rect,
         autowalk_menu_norm=autowalk_menu,
         autowalk_icon_rect_norm=autowalk_icon_rect,
         autowalk_dialog_open=autowalk_dialog_open,
@@ -271,15 +365,23 @@ DUMP_PATH = "/sdcard/pogobot_ui.xml"
 class UiTreeReader:
     """Runs `uiautomator dump` and parses the result. The only adb caller in this module.
 
-    Blocking, roughly a second per call, so it is used during an account switch and never
-    per frame. Any failure - adb gone, the dump timing out because the UI never went idle,
-    a torn file - yields `available=False`, which the state machine treats as "could not
-    look", not as "there are no accounts". The timeout is applied per subprocess call, not
-    total for read(); worst case blocks for a multiple of it.
+    Blocking, roughly a second per call, so it is used during an account switch or a
+    recovery attempt and never per frame. Any failure - adb gone, the dump timing out
+    because the UI never went idle, a torn file - yields `available=False`, which the
+    state machine treats as "could not look", not as "there are no accounts".
+
+    `timeout` is the budget for the WHOLE of `read()`, shared across its three adb calls.
+    It used to be applied per call, which made it no bound at all: the caller runs this on
+    the run loop's own thread (`Runner._refresh_accounts`), and three calls at the old 20s
+    default was a 60s stall in which no frame is perceived, no key is read and no signal
+    is serviced. Five seconds is five times the measured cost of a real read, and it is
+    deliberately shorter than the ~10s `uiautomator dump` spends waiting for a window that
+    never goes idle: against a rendering Unity surface there is no PGSharp panel to find,
+    so giving up first is the answer we wanted anyway.
     """
 
     def __init__(self, screen_wh: tuple[int, int], serial: Optional[str] = None,
-                 timeout: float = 20.0):
+                 timeout: float = 5.0):
         self.screen_wh = screen_wh
         self.serial = serial
         self.timeout = timeout
@@ -288,14 +390,23 @@ class UiTreeReader:
         return ["adb"] + (["-s", self.serial] if self.serial else []) + list(args)
 
     def _run(self) -> bytes:
+        deadline = time.perf_counter() + self.timeout
+
+        def left() -> float:
+            # Floored, never zero: subprocess.run treats a non-positive timeout as already
+            # expired and raises before the process is even started, which would report a
+            # merely slow first call as "adb went away" rather than as a dump that ran out
+            # of time. Both end in available=False, but only one of them is true.
+            return max(0.05, deadline - time.perf_counter())
+
         # uiautomator can report success while writing nothing; delete the file first
         # so a failed dump is indistinguishable from an empty file, not a stale read.
         subprocess.run(self._adb("shell", "rm", "-f", DUMP_PATH),
-                       capture_output=True, timeout=self.timeout)
+                       capture_output=True, timeout=left())
         subprocess.run(self._adb("shell", "uiautomator", "dump", DUMP_PATH),
-                       capture_output=True, timeout=self.timeout)
+                       capture_output=True, timeout=left())
         return subprocess.run(self._adb("shell", "cat", DUMP_PATH),
-                              capture_output=True, timeout=self.timeout).stdout
+                              capture_output=True, timeout=left()).stdout
 
     def read(self) -> AccountView:
         try:

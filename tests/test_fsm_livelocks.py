@@ -22,6 +22,16 @@ def kinds(effects, t):
     return [e for e in effects if isinstance(e, t)]
 
 
+def spent():
+    """Context fields for a run whose app-restart budget is already gone.
+
+    Every watchdog test below asks the same question - does the 120s gate fire - and past
+    that gate `Recovering.on_timeout` now spends `Config.max_app_restarts` restarts before
+    halting. Exhausting the budget keeps these tests aimed at the gate and its message
+    rather than at the escalation that sits behind it."""
+    return {"app_restarts": DEFAULT.max_app_restarts}
+
+
 # --- v1 SM-01: ENCOUNTER had no timeout branch at all -------------------------
 def test_encounter_escapes_when_it_never_resolves():
     """v1 threw a ball every 3.8s forever into a post-catch dialog."""
@@ -117,9 +127,24 @@ def test_out_of_range_stop_is_refuted_and_cooled_for_a_long_time():
 
 # --- the stuck watchdog must stop rather than tap blindly ---------------------
 def test_watchdog_halts_instead_of_tapping_forever():
-    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=0.0)
+    """`spent()` is what makes this still a test of the HALT. Past the watchdog the
+    ladder now spends `Config.max_app_restarts` app restarts first (see
+    `fsm.Recovering.on_timeout`); with the budget already gone, the halt is what is left,
+    at exactly the same 120s gate as before. The restart rung itself is covered in
+    tests/test_panel_recovery.py."""
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=0.0, **spent())
     out = fsm.step(obs(screen="Menu"), c)
     assert kinds(out, Halt), "a bot that cannot find the map must stop, not keep tapping"
+
+
+def test_watchdog_restarts_the_app_before_it_ever_halts():
+    """The same gate, with the budget intact: restarting is strictly better than halting
+    while a restart has never been tried, and it is still not a blind tap."""
+    from pogobot.effects import RestartApp
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=0.0)
+    out = fsm.step(obs(screen="Menu"), c)
+    assert kinds(out, RestartApp)
+    assert not kinds(out, Halt)
 
 
 # --- the switch/watchdog regression: a switch attempt must not trip the halt alone ----
@@ -141,7 +166,7 @@ def test_non_switch_stuckness_still_halts_exactly_as_tightly():
     """The other half of the fix, and the one that makes it honest: with no switch
     involved (switch_exit_ts left at its 0.0 default), the watchdog must be completely
     untouched - same 120s, same halt, as before this fix existed."""
-    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 121.0)
+    c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 121.0, **spent())
     out = fsm.step(obs(screen="Menu"), c)
     assert kinds(out, Halt)
 
@@ -152,7 +177,7 @@ def test_stuckness_that_begins_after_a_switch_ends_still_halts_at_120s():
     measured from the moment the switch released the screen, not from whenever the map
     was last genuinely seen (which could be far longer ago, as here)."""
     c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 300.0,
-            switch_exit_ts=1000.0 - 121.0)
+            switch_exit_ts=1000.0 - 121.0, **spent())
     out = fsm.step(obs(screen="Menu"), c)
     assert kinds(out, Halt)
 
@@ -165,7 +190,7 @@ def test_halt_message_reports_the_reason_the_gate_actually_used():
     the log line (as this fix's own report was diagnosed from) draws the wrong
     conclusion about what the bot was stuck on."""
     c = ctx(BotState.RECOVERING, now=1000.0, last_map_ts=1000.0 - 300.0,
-            switch_exit_ts=1000.0 - 121.0)
+            switch_exit_ts=1000.0 - 121.0, **spent())
     halts = kinds(fsm.step(obs(screen="Menu"), c), Halt)
     assert halts, "expected a halt"
     assert "121s" in halts[0].reason

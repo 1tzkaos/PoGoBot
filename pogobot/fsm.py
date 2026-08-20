@@ -29,6 +29,7 @@ from .effects import (
     Halt,
     IntentOutcome,
     Note,
+    RestartApp,
     SetFlag,
     SetIntent,
     Swipe,
@@ -103,6 +104,15 @@ class Context:
     #: Reset on every state entry (see runner._RESET_ON_ENTRY), same reasoning as
     #: switch_zoom_reps above - it must never carry between switch attempts.
     switch_goplus_attempts: int = 0
+    #: separating drags `Switching._separate_star` has spent on the PGSharp star this
+    #: switch attempt, counting only ones the actuator actually accepted (see
+    #: `config.StarSeparation.max_drags` for the bound and the measurement that makes more
+    #: than one necessary). Reset on every state entry (see runner._RESET_ON_ENTRY):
+    #: SWITCHING is entered once per attempt, which is exactly the scope of this bound -
+    #: the same reasoning switch_goplus_attempts just above states. Advanced by
+    #: `Runner.apply`, never by this pure handler, which cannot know whether a given Swipe
+    #: reached the device.
+    star_drags: int = 0
     #: ctx.now at the moment the AutoWalk ladder ("autowalk_open" through "autowalk_close"
     #: - see Switching._autowalk_open and neighbours) actually started. 0.0 means it has
     #: not started yet. Zeroed by Runner._begin_switch at the start of every NEW attempt -
@@ -135,6 +145,18 @@ class Context:
     #: without this a failed switch alone reliably tripped the watchdog the moment it
     #: handed off to RECOVERING.
     switch_exit_ts: float = 0.0
+    #: CONSECUTIVE app restarts `Recovering.on_timeout` has spent without the map coming
+    #: back, and `ctx.now` at the moment the most recent one was actually accepted by the
+    #: actuator (0.0 means none has been). Both are written by `Runner.apply` and
+    #: `Runner`'s read loop, never here - a pure handler cannot know whether the
+    #: RestartApp it returned reached the device, the same reasoning `switch_zoom_reps`
+    #: and `switch_clear_presses` above already state. Deliberately NOT in
+    #: `runner._RESET_ON_ENTRY`: RECOVERING is entered and left every few seconds while
+    #: the bot is wedged, so a per-entry reset would make the bound (`Config
+    #: .max_app_restarts`) count to one forever. The count is zeroed by a confirmed map
+    #: instead - see `Config.max_app_restarts` for why that is what makes it a bound.
+    app_restarts: int = 0
+    app_restart_ts: float = 0.0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
@@ -223,6 +245,23 @@ def rocket_screen(obs: Observation, cfg: Config) -> bool:
     return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
 
 
+def reach_distance(cfg: Config, x: float, y: float, scale: float = 1.0) -> float:
+    """How far a normalized point is from the avatar's reach, measured in the reach
+    ellipse's OWN radii: at or below `cfg.reach.tolerance` is in reach, above it is not.
+
+    Split out of `pick_target` so there is exactly one definition of the ellipse. The
+    second consumer is the star-separation check (`Switching._separate_star`), whose whole
+    claim is that the place a drag leaves the PGSharp star is somewhere a target detection
+    could never be tapped - and a claim like that asserted against a re-typed copy of the
+    formula stops meaning anything the moment the real one changes.
+    """
+    rx = max(cfg.reach.radius_x * cfg.range_scale * scale, 1e-6)
+    ry = max(cfg.reach.radius_y * cfg.range_scale * scale, 1e-6)
+    dx = (x - cfg.reach.center_x) / rx
+    dy = (y - cfg.reach.center_y) / ry
+    return (dx * dx + dy * dy) ** 0.5
+
+
 def pick_target(obs: Observation, ctx: Context):
     """Best in-reach, not-cooled detection. Pokemon outrank stops, then confidence."""
     cfg = ctx.cfg
@@ -248,11 +287,7 @@ def pick_target(obs: Observation, ctx: Context):
             continue
         x, y = d.center_norm
         scale = cfg.reach.stop_scale if d.name in STOP_TARGETS else 1.0
-        rx = max(cfg.reach.radius_x * cfg.range_scale * scale, 1e-6)
-        ry = max(cfg.reach.radius_y * cfg.range_scale * scale, 1e-6)
-        dx = (x - cfg.reach.center_x) / rx
-        dy = (y - cfg.reach.center_y) / ry
-        if (dx * dx + dy * dy) ** 0.5 > cfg.reach.tolerance:
+        if reach_distance(cfg, x, y, scale) > cfg.reach.tolerance:
             continue
         if not ctx.is_cool(x, y):
             continue
@@ -737,14 +772,15 @@ class Switching(Handler):
         that just this tick actually succeeded.
 
         Giving up is not the same as walking away. Reaching "autowalk_open"'s OWN
-        deadline check means the star itself was never located across the whole budget -
-        finding it always taps and advances the phase in the SAME tick (see
-        `_autowalk_open`), so that phase is only ever here when nothing was found - and
-        with the star never found the shortcut menu was never opened, so there is nothing
-        to clean up: this confirms immediately, exactly as before this method grew a
-        cleanup step. Every OTHER phase is reachable only through that same star tap, so
-        the menu IS open by the time any of them can be here - and leaving it that way is
-        not cosmetic (see `_autowalk_close`'s own docstring: it sits over the reach
+        deadline check means the star was never TAPPED across the whole budget - locating
+        it normally taps and advances the phase in the SAME tick (see `_autowalk_open`),
+        and the only other way to be here is a star that WAS located and deliberately left
+        alone because it is collapsed onto the accounts launcher (`_separate_star`).
+        Either way the shortcut menu was never opened, so there is nothing to clean up:
+        this confirms immediately, exactly as before this method grew a cleanup step.
+        Every OTHER phase is reachable only through that same star tap, so the menu IS
+        open by the time any of them can be here - and leaving it that way is not
+        cosmetic (see `_autowalk_close`'s own docstring: it sits over the reach
         ellipse SCANNING taps into, and the NEXT switch's own opening tap would toggle it
         SHUT instead of open, silently killing AutoWalk for the rest of the run). So those
         phases get one more chance at a LOCATED star tap before confirming, bounded by
@@ -790,11 +826,132 @@ class Switching(Handler):
                            f"complete in time ({ctx.switch_phase}); the menu may "
                            f"still be open")]
 
+    def _separate_star(self, ctx, v):
+        """Drag the PGSharp star clear of the accounts launcher when the tree says the two
+        floating widgets have collapsed onto each other - before anything taps the star.
+
+        Three answers, and the difference between the last two is the whole point. `None`
+        means the tree makes no such claim and the star is safe to tap. A NON-EMPTY list is
+        the drag. An EMPTY list means they ARE collapsed and this tick has nothing to spend
+        on separating them: the star must not be tapped, and the caller falls through to
+        the ladder's own wall-clock deadline rather than returning, so a star that can
+        never be safely tapped ends the ladder at `config.AutoWalk.budget_s` instead of
+        holding the switch until `Timings.switch_timeout`.
+
+        Why it is worth doing at all: measured immediately after `effects.RestartApp`
+        relaunched the game, the star's clickable rect was (0,152)-(108,260) and the
+        launcher's (0,152)-(272,245), putting the star's own centre (54,206) INSIDE the
+        launcher. `star_norm` IS that centre, so the tap below would be delivered to the
+        accounts launcher, which opens the PGSharp accounts panel - the exact screen
+        `Recovering._panel_close` and the restart ladder above it exist to escape. The
+        restart is what produces the layout, so without this the bot causes the wedge it
+        recovers from.
+
+        HERE, at the one place that taps the star, rather than in RECOVERING where the
+        restart is decided, for two reasons that are both about what the code can actually
+        see:
+
+          * `desired_state` returns SCANNING for RECOVERING the instant `obs.on_map` is
+            true, BEFORE any handler runs, so `Recovering.step` only ever executes off the
+            map. The collapse becomes consequential exactly when the relaunched app is
+            back ON the map - which is precisely when that handler stops running. A rung
+            there would be dead in the case it was written for.
+          * A drag needs a view that is current in a way RECOVERING's is not.
+            `Runner._refresh_accounts` re-reads at `runner.RECOVER_ACCOUNTS_REFRESH` (10s)
+            there and nothing drops the view after an actuation, so a drag decided from it
+            could start from a coordinate the star has already left - putting a swipe on
+            the game's own map, which rotates the camera and silently invalidates every
+            cooldown (the failure `ClearSpatialMemory` exists for). During a switch the
+            view is refreshed at `runner.ACCOUNTS_REFRESH` (2.5s) AND `Runner.apply` drops
+            `ctx.accounts` after every applied effect, so the next drag can only ever be
+            decided from a tree read taken AFTER the previous one landed. That is what
+            makes "check the result, then try again" structurally true here rather than a
+            matter of pacing - which matters because the gesture does not land where it is
+            aimed: asking for y=626 landed the star's centre at 837, asking for 339 landed
+            at 443, and asking for 356 moved it the other way, to 125.
+
+        Covering this one call site covers every star tap there is: `_autowalk_close` and
+        `_autowalk_deadline`'s cleanup tap are reachable only through the tap this rung
+        guards.
+
+        Both endpoints come from rects this dump reported - the start is the star rect's
+        own centre, the end is `accounts.AccountView.star_clear_y_norm`, derived from the
+        launcher's own bottom edge. Nothing here is a remembered coordinate, which for a
+        widget whose entire problem is that it moves is the difference between a fix and a
+        silent miss. The end is also checked against `reach_distance` before it is used:
+        clearing the launcher is not the whole requirement, because a star parked inside
+        the ellipse SCANNING taps into would only have moved the collision.
+        """
+        if not v.overlay_collapsed:
+            return None
+        cfg = ctx.cfg.star_separation
+        if ctx.star_drags >= cfg.max_drags:
+            # Bounded, and the bound resolves to skipping AutoWalk rather than to trying
+            # the tap anyway. A star that will not move is a star whose tap opens the
+            # accounts panel, and a switch that has already confirmed must not be spent
+            # re-opening the screen the recovery ladder is for. The Note is the only
+            # record an operator gets of why AutoWalk stopped happening.
+            return [
+                Note(f"the PGSharp star is still collapsed onto the accounts launcher "
+                     f"after {ctx.star_drags} drag(s); skipping AutoWalk rather than "
+                     f"tapping a control that opens the accounts panel", "warn"),
+                Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                           f"logged into {ctx.switch_target}; the PGSharp star could not "
+                           f"be separated from the accounts launcher"),
+            ]
+        if v.panel_open:
+            # Never drag while the accounts panel is up: during a switch that panel owns
+            # the screen, and the star's rect then names a coordinate underneath it.
+            return []
+        star, clear_y = v.star_rect_norm, v.star_clear_y_norm
+        if star is None or clear_y is None:
+            # `overlay_collapsed` already proves both rects exist, so the only way to be
+            # here is the landing zone refusing to name a place the screen actually has
+            # (see `star_clear_y_norm`). Nothing is invented in its place; the caller's
+            # own wall-clock deadline ends the phase.
+            return []
+        x = (star[0] + star[2]) / 2.0
+        if reach_distance(ctx.cfg, x, clear_y,
+                          max(1.0, ctx.cfg.reach.stop_scale)) <= ctx.cfg.reach.tolerance:
+            # Separating the widgets must not simply move the collision. `star_clear_y_norm`
+            # only knows about the launcher and the bottom of the screen; it cannot know
+            # about the reach ellipse SCANNING taps into, because accounts.py is imported
+            # BY this module and so cannot ask it. The check therefore belongs here, and it
+            # is not academic: both widgets are user-draggable, and with the device's own
+            # measured sizes (star 108x108, launcher 272x93) sitting mid-screen at x=0.5,
+            # the landing zone computes to (0.5, 0.500) - 0.81 radii IN, taking a star that
+            # was 1.42 radii OUT and putting it exactly where `pick_target` selects. Every
+            # SCANNING tap at a detection there would then open PGSharp's shortcut menu
+            # over the map, which is the failure `_autowalk_close`'s own docstring
+            # describes. Widest ellipse of the two `pick_target` uses, since a landing zone
+            # clear of only the narrower one is not clear at all.
+            #
+            # Refusing rather than inventing somewhere else, the same answer the off-screen
+            # branch above gives: this rung knows one landing zone, and if that one is
+            # unusable the honest reply is that it has nothing to offer. The star is still
+            # not tapped, and the caller's own wall-clock deadline ends the phase.
+            return []
+        # Paced on the same gate every other step of this ladder uses, on its own budget
+        # so a withheld drag and a withheld star tap can never be confused for each other.
+        # The runner ticks at frame rate; ungated, this would spend the whole bound inside
+        # one tree refresh, deciding every drag from the same view.
+        if not ctx.ready("star_drag", ctx.cfg.timings.switch_tap):
+            return []
+        return [Swipe(x, (star[1] + star[3]) / 2.0, x, clear_y,
+                      "autowalk: drag the star clear of the accounts launcher",
+                      duration_ms=cfg.duration_ms, budget="star_drag")]
+
     def _autowalk_open(self, obs, ctx):
         """Tap the PGSharp star to open its shortcut menu (see the module docstring and
         accounts.py's for the widget itself). The star is LOCATED fresh from the current
         dump every time, never a remembered coordinate - it is described as draggable and
         was measured at two different positions hours apart.
+
+        Locating it is not enough to tap it: after an app restart PGSharp lays the star on
+        top of the accounts launcher, close enough that the star's own centre falls inside
+        the launcher's clickable rect and this tap opens the accounts panel instead. So
+        every tick asks `_separate_star` first, and a collapsed pair is dragged apart
+        before anything is tapped.
 
         Only reachable from `_goplus`'s completion, so - like the zoom gesture and the
         Go Plus toggle before it - this can never run on a switch that failed or merely
@@ -822,12 +979,20 @@ class Switching(Handler):
             effects.append(SetFlag("switch_autowalk_since", ctx.now))
         v = ctx.accounts
         if v is not None and v.available and v.star_norm is not None:
-            if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
-                return effects
-            return effects + [
-                Tap(*v.star_norm, "autowalk: open the PGSharp shortcut menu", budget="switch"),
-                SetFlag("switch_phase", "autowalk_menu"),
-            ]
+            drag = self._separate_star(ctx, v)
+            if drag is None:
+                if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                    return effects
+                return effects + [
+                    Tap(*v.star_norm, "autowalk: open the PGSharp shortcut menu",
+                        budget="switch"),
+                    SetFlag("switch_phase", "autowalk_menu"),
+                ]
+            if drag:
+                return effects + drag
+            # Collapsed, with nothing to spend on separating them this tick. Deliberately
+            # NOT a return: the star may not be tapped, so the only remaining answer is
+            # the ladder's own deadline below - see `_separate_star`'s three answers.
         if not first_tick:
             gone = self._autowalk_deadline(ctx)
             if gone is not None:
@@ -983,7 +1148,12 @@ class Popup(Handler):
 
 class Recovering(Handler):
     """Escalating unstick. Never blind-taps a fixed coordinate - that is what created the
-    v1 menu loop. BACK first, then a located close button, then halt."""
+    v1 menu loop. The PGSharp panel's own close control, located in the view tree, first;
+    then BACK; then an optically located close button; then, once the map has been gone
+    past the stuck watchdog, a bounded number of app restarts; and only then halt. A
+    restart pauses the whole ladder for as long as the relaunch is cold-starting (see
+    `_restarting`) - the one screen where pressing anything is worse than pressing
+    nothing."""
 
     state = BotState.RECOVERING
     timeout_s = 6.0
@@ -991,11 +1161,89 @@ class Recovering(Handler):
     def step(self, obs, ctx):
         if obs.on_map:
             return [Transition(BotState.SCANNING, IntentOutcome.CARRIED, "recovered to map")]
+        # The restart grace is a HOLD on the whole ladder, not merely a delay on the next
+        # restart decision in `on_timeout`. `on_timeout` hands control back to SCANNING,
+        # which sees no map and returns here within a tick, so every ~6s of the 90s window
+        # is another visit with `taps_in_state` freshly zeroed - roughly fifteen of them,
+        # each spending a BACK, into an app that is cold-starting. That is the press
+        # `config.Timings.switch_clear_max` exists to bound: ~90 BACKs into a screen that
+        # would not clear left PGSharp's panel showing NEITHER account with an asterisk,
+        # the game logged out of both profiles and recoverable only by hand. The located
+        # rung is no safer here - `ctx.accounts` was read before the process was killed,
+        # so its `close_norm` names a window that no longer exists. Nothing on screen
+        # during a cold start is ours to press, so nothing is pressed.
+        if self._restarting(ctx):
+            return []
+        panel = self._panel_close(ctx)
+        if panel is not None:
+            return panel
         if ctx.taps_in_state == 0 and ctx.ready("back", 1.0):
             return [Back("recover: dismiss with BACK")]
         if obs.close_button_xy is not None and ctx.ready("close", ctx.cfg.timings.close_menu):
             return [Tap(*obs.close_button_xy, "recover: located close button", budget="close")]
         return []
+
+    @staticmethod
+    def _restarting(ctx):
+        """True while a restart this handler asked for is still cold-starting the game.
+
+        One predicate, two consumers - `step` holds the ladder, `on_timeout` holds the
+        next restart decision - because two copies of a window this consequential would
+        eventually disagree. `app_restart_ts` is 0.0 until `Runner.apply` sees the
+        actuator ACCEPT a RestartApp, so a restart nobody performed never opens a window.
+        """
+        return bool(ctx.app_restart_ts) and \
+            ctx.now - ctx.app_restart_ts <= ctx.cfg.timings.app_restart_grace
+
+    def _panel_close(self, ctx):
+        """Tap the PGSharp panel's OWN close control when the view tree says that panel is
+        what is in front of us.
+
+        `None` means the tree is making no such claim, and the ladder below runs unchanged.
+        An EMPTY list is the third answer, and distinct on purpose: the tree DOES say the
+        panel is up, but this rung's own pacing withholds the tap this tick. That returns
+        nothing rather than falling through, because while a PGSharp panel is known to be
+        in front of us the rungs below must not run at all - BACK is the press that logged
+        the account out (below), and the optical locator has nothing to find on this
+        screen.
+
+        Placed ABOVE the BACK rung, which is the only ordering the measurements support.
+        The screen this exists for is the PGSharp accounts panel - a native Android
+        overlay listing accounts, drawn over the game. Read at the bot's own resolution it
+        reports screen=Menu@0.95, on_map=False, in_overlay=False, x_button=False,
+        find_close_button=None, detections=[] - so BOTH rungs below are blind to it: the
+        optical locator has nothing to find, and BACK simply does not dismiss it. Measured
+        in logs/trace.jsonl, that is 599 of one run's 1520 frames (39%) spent in a
+        RECOVERING x47 -> SCANNING x1 cycle at screen=Menu@0.941, one BACK per cycle,
+        never recovering.
+
+        Those BACKs are not merely wasted. An unbounded run of them is what
+        `config.Timings.switch_clear_max` exists to stop: ~90 presses into a screen that
+        would not clear left PGSharp's panel showing NEITHER account with an asterisk -
+        the game logged out of both profiles and had to be recovered by hand. So spending
+        a coordinate-free guess before a located coordinate is not a neutral first try; it
+        is the more dangerous of the two, and it goes second.
+
+        This still honours "buttons are LOCATED, never assumed". `close_norm` is some
+        node's own bounds read out of the live view tree (see accounts.py) - exactly the
+        source, and exactly the field, `Switching._verify` already taps to close this same
+        panel. What it is not is instantaneous: `Runner._refresh_accounts` reads the tree
+        on its own throttle (runner.RECOVER_ACCOUNTS_REFRESH), so the view can be up to
+        that old, and a panel that closed in between is described here as still open. One
+        tap per RECOVERING visit is the bound on what that costs, which is what
+        `taps_in_state == 0` buys - the same gate, and the same "one blind action per
+        visit" budget, the BACK rung below already uses. The stale tap lands on the
+        panel's own close control, the least harmful coordinate of the set, and the next
+        refresh corrects the view.
+        """
+        v = ctx.accounts
+        if v is None or not v.available or not v.panel_open or v.close_norm is None:
+            return None
+        if ctx.taps_in_state != 0 or not ctx.ready("close", ctx.cfg.timings.close_menu):
+            return []
+        return [Tap(*v.close_norm,
+                    "recover: close the PGSharp panel located in the view tree",
+                    budget="close")]
 
     def on_timeout(self, obs, ctx):
         # `ctx.last_map_ts` alone regressed here: an account switch legitimately owns the
@@ -1015,11 +1263,60 @@ class Recovering(Handler):
         # ends is still caught at exactly the same 120s this watchdog has always used:
         # with no switch involved, `switch_exit_ts` stays at its 0.0 default and this is
         # exactly the old check.
+        cfg = ctx.cfg
         stale_since = ctx.map_stale_since
-        if ctx.now - stale_since > ctx.cfg.timings.stuck_watchdog:
-            return [Halt(f"no confirmed map for {ctx.now - stale_since:.0f}s; stopping "
-                         f"rather than tapping blindly")]
-        return [Transition(BotState.SCANNING, IntentOutcome.CARRIED, "recovery attempt over")]
+        stale_for = ctx.now - stale_since
+        if stale_for <= cfg.timings.stuck_watchdog:
+            return [Transition(BotState.SCANNING, IntentOutcome.CARRIED,
+                               "recovery attempt over")]
+
+        # Past the watchdog, halting is no longer the only thing left. Every rung of
+        # `step` acts on the SCREEN, and the failure that produced this ladder is a screen
+        # nothing on it can reach - measured, a PGSharp overlay window belonging to the
+        # game's own process (`mCurrentFocus` stays the Unity activity while the panel is
+        # up), so ending that process ends the panel. Restarting is a bigger hammer than
+        # anything above: it kills whatever the game had in flight, which is why it is
+        # only ever reached here, after the whole ladder has failed for longer than the
+        # watchdog, and never as an ordinary recovery step.
+        #
+        # A restart is a COLD start, and for the tens of seconds it takes the map is still
+        # missing - which is the exact condition that authorised the restart. Without the
+        # grace, the next two RECOVERING timeouts (6s each) would read a loading app as a
+        # failed restart and spend the whole budget in a few seconds; see
+        # `Timings.app_restart_grace`. Handled as a wait, not as a shorter watchdog,
+        # because `map_stale_since` legitimately keeps growing throughout: what changed is
+        # that we know why. `step` holds the ladder for the same window (see
+        # `_restarting`), so the visits this hand-off produces press nothing.
+        if self._restarting(ctx):
+            return [Transition(BotState.SCANNING, IntentOutcome.CARRIED,
+                               "waiting out the app restart")]
+
+        if ctx.app_restarts < cfg.max_app_restarts:
+            # The Transition is part of the same answer, not an afterthought: `on_timeout`
+            # fires on every tick where `elapsed` exceeds the budget, and only entering a
+            # state restarts that clock (`Runner.enter_state`). Returning the restart
+            # alone would re-emit it every tick until the grace stamp landed. `Runner
+            # .apply` walks the list in order, so the restart is dispatched while the
+            # state is still RECOVERING and the hand-off follows it - the same ordering
+            # `Switching._autowalk_close` relies on.
+            return [
+                Note(f"no confirmed map for {stale_for:.0f}s and nothing on screen "
+                     f"answered; restarting {cfg.app_package} "
+                     f"({ctx.app_restarts + 1}/{cfg.max_app_restarts})", "warn"),
+                RestartApp(cfg.app_package, cfg.app_activity,
+                           f"recover: restart the app after {stale_for:.0f}s with no map"),
+                Transition(BotState.SCANNING, IntentOutcome.CARRIED,
+                           "restarted the app; waiting for it to load"),
+            ]
+
+        # Reached only once the count EQUALS the budget, so it reports what is spent, not
+        # what is left: `ctx.app_restarts` is the tally of restarts taken, and printing it
+        # next to "left to spend" told an operator the escalation had never fired at the
+        # one moment they read the line. Same standard as
+        # test_fsm_livelocks.test_halt_message_reports_the_reason_the_gate_actually_used.
+        return [Halt(f"no confirmed map for {stale_for:.0f}s, and all "
+                     f"{cfg.max_app_restarts} app restart(s) spent; stopping rather than "
+                     f"tapping blindly")]
 
 
 class Halted(Handler):

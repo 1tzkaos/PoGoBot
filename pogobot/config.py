@@ -245,6 +245,22 @@ class Timings:
     #: budget above; waiting too little burns the whole budget on a false negative.
     switch_login_grace: float = 30.0
 
+    #: How long after an app restart (see effects.RestartApp) RECOVERING waits before it
+    #: is willing to judge that restart a failure and spend another one.
+    #:
+    #: A force-stop plus relaunch is a COLD start: the Niantic splash, asset checks and a
+    #: login run for tens of seconds before the map can possibly be back, and for every
+    #: one of those seconds `map_stale_since` is still older than `stuck_watchdog` (120s)
+    #: - the very condition that authorised the restart. Without this the escalation eats
+    #: its whole budget in the couple of RECOVERING timeouts (6s each) it takes to notice
+    #: the map is still missing, restarting an app that was loading perfectly well.
+    #:
+    #: Real headroom over "tens of seconds", not a tight bound: the cost of waiting too
+    #: long is that a genuinely dead app is left alone for another minute and a half of a
+    #: run that is already doing nothing, while the cost of waiting too little is spending
+    #: the entire restart budget on one app that simply had not finished starting.
+    app_restart_grace: float = 90.0
+
     #: Gap between BACK presses aimed at Pokemon GO's own exit-confirmation dialog (see
     #: perception.exit_dialog_signal, fsm.interrupts). Matches RECOVERING's own retry
     #: cadence for the same physical button; this is a repeat-dismissal pace, not a
@@ -388,6 +404,47 @@ class AutoWalk:
 
 
 @dataclass(frozen=True)
+class StarSeparation:
+    """Dragging PGSharp's floating star clear of its accounts launcher (see
+    `fsm.Switching._separate_star` and `accounts.AccountView.overlay_collapsed`).
+
+    The two widgets both float, and a relaunch of the game lays them on top of each other:
+    measured immediately after `effects.RestartApp`, the star's clickable rect was
+    (0,152)-(108,260) and the launcher's (0,152)-(272,245), leaving the star's own centre
+    (54,206) INSIDE the launcher. A tap aimed at the star lands on the accounts launcher
+    there, opening the very panel the restart ladder exists to escape - so the restart
+    would otherwise cause the wedge it recovers from.
+
+    Only the two numbers that are not derivable from the dump live here. The gesture's
+    endpoints are not among them: both come from rects the tree just reported (see
+    `accounts.AccountView.star_clear_y_norm`), because a remembered coordinate for a
+    widget whose whole problem is that it moves is how this fails silently.
+    """
+
+    #: `input swipe` duration for the drag, in ms. 400ms and 500ms were both run on the
+    #: device and both moved the star; 500 is the one used here because the slower of two
+    #: verified durations is the one less likely to read as a fling. Shorter values were
+    #: never tested and are not assumed to behave the same - the same standard
+    #: `ZoomOut.duration_ms` states.
+    duration_ms: int = 500
+
+    #: Drags one switch attempt may spend before it gives up and skips AutoWalk rather
+    #: than tapping a star it cannot trust (see `fsm.Switching._separate_star`).
+    #:
+    #: More than one is required, not optional: the gesture does NOT land where it is
+    #: aimed. Measured, asking for y=626 landed the star's centre at 837, asking for 339
+    #: landed at 443, and asking for 356 moved it the other way entirely, to 125. So the
+    #: implementation re-reads the tree and judges the result rather than assuming it, and
+    #: this is the bound on how long it may keep judging. Three, because the third is the
+    #: first that is re-testing a hypothesis two drags have already refuted - the same
+    #: reasoning `GoPlusToggle.max_attempts` and `Config.max_app_restarts` state - and
+    #: because each drag costs a `Timings.switch_tap` gate plus a tree refresh
+    #: (`runner.ACCOUNTS_REFRESH`, 2.5s) out of `AutoWalk.budget_s` (30s), which the rest
+    #: of the ladder also has to fit inside.
+    max_drags: int = 3
+
+
+@dataclass(frozen=True)
 class Config:
     rois: Rois = field(default_factory=Rois)
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -397,6 +454,7 @@ class Config:
     zoom: ZoomOut = field(default_factory=ZoomOut)
     goplus: GoPlusToggle = field(default_factory=GoPlusToggle)
     autowalk: AutoWalk = field(default_factory=AutoWalk)
+    star_separation: StarSeparation = field(default_factory=StarSeparation)
 
     det_model: Path = BASE_DIR / "models" / "v3" / "det" / "weights" / "best.pt"
     cls_model: Path = BASE_DIR / "models" / "v3" / "cls" / "weights" / "best.pt"
@@ -440,6 +498,31 @@ class Config:
     switch_every_minutes: float = 0.0
 
     range_scale: float = 1.0
+
+    #: The game's own package and main activity, used by RECOVERING's last-resort restart
+    #: (see effects.RestartApp and fsm.Recovering.on_timeout). Verified on the device:
+    #: PGSharp ships as a modded build of the SAME package, so one name covers both, and
+    #: with the accounts panel up `mCurrentFocus` is still this activity - the panel is an
+    #: overlay window of this process, which is why ending the process ends the panel.
+    #: Here rather than in the effect so a different build is a config edit, not a code
+    #: edit; see effects.RestartApp for the rest of that reasoning.
+    app_package: str = "com.nianticlabs.pokemongo"
+    app_activity: str = "com.nianticproject.holoholo.libholoholo.unity.UnityMainActivity"
+
+    #: Consecutive app restarts RECOVERING may spend before it halts instead (see
+    #: `fsm.Recovering.on_timeout`). "Consecutive" because `Runner` zeroes the count on
+    #: any confirmed map: a restart that actually worked has proved itself and must not
+    #: leave the rest of the run one restart poorer, while an app that crash-loops never
+    #: shows a map and so can never refill the budget - which is the property that makes
+    #: this a bound at all.
+    #:
+    #: Two, not three. Each spent restart costs `Timings.app_restart_grace` (90s) of a run
+    #: that is doing nothing, and kills whatever the game had in flight. The first tests
+    #: "the process is wedged"; the second covers a relaunch that itself landed badly - a
+    #: login screen, a cold start that outran the grace. A third would be re-testing a
+    #: hypothesis two restarts have already refuted, which is the same reasoning
+    #: `runner.SWITCH_MAX_FAILURES` states for switch attempts.
+    max_app_restarts: int = 2
 
     def scaled(self, **kw) -> "Config":
         return replace(self, **kw)

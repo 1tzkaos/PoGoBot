@@ -578,6 +578,11 @@ def test_stuckness_after_a_failed_switch_still_trips_the_watchdog():
     r.apply(fsm.step(off, r.ctx), off)
     assert r.ctx.state is BotState.RECOVERING
     exit_ts = r.ctx.switch_exit_ts        # the instant the switch let go of the screen
+    # Past the watchdog the ladder spends `Config.max_app_restarts` app restarts before it
+    # halts (see fsm.Recovering.on_timeout). This test is about the gate, not the
+    # escalation behind it, so the budget starts gone; tests/test_panel_recovery.py covers
+    # the restarts themselves.
+    r.ctx.app_restarts = r.cfg.max_app_restarts
 
     r.ctx.now = exit_ts + r.cfg.timings.stuck_watchdog + 1.0
     r.apply(fsm.step(off, r.ctx), off)

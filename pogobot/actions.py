@@ -31,7 +31,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Mapping, Optional, Sequence
 
-from .effects import Back, DoubleTapDrag, Effect, Swipe, Tap, is_actuation
+from .effects import Back, DoubleTapDrag, Effect, RestartApp, Swipe, Tap, is_actuation
 from .observation import Tristate
 
 DEFAULT_RESOLUTION = (1080, 2340)
@@ -227,6 +227,28 @@ class Actuator:
                         f"input swipe {x1} {y1} {x2} {y2} {ms}")
             return Command(_adb_argv(self.adb, self.serial, "shell", shell_cmd),
                            effect.budget, effect.reason, (x2, y2), _CLOCK())
+        if isinstance(effect, RestartApp):
+            # One invocation, for the same reason DoubleTapDrag is one: a separate
+            # `subprocess.run` per command would let the worker interleave something else
+            # between the stop and the start, and - worse here than there - a failure
+            # partway through would leave the game force-stopped with nothing having
+            # relaunched it, which is a bot staring at the Android launcher rather than a
+            # bot that is merely still stuck.
+            #
+            # The sleep is the settle described on the effect; `am start` fired straight
+            # after `am force-stop` races the teardown. It runs on the DEVICE rather than
+            # here so the whole thing stays one command, and it is bounded by ADB_TIMEOUT
+            # above, which is what makes a long settle a configuration error rather than a
+            # silent hang.
+            # `:g` so a whole number of seconds is written as an integer: toybox `sleep`
+            # takes fractions, but an integer is what every shell that has ever shipped on
+            # Android accepts, and there is nothing to gain from the more exotic form.
+            settle = max(0, int(effect.settle_ms)) / 1000.0
+            shell_cmd = (f"am force-stop {effect.package}; "
+                         f"sleep {settle:g}; "
+                         f"am start -n {effect.package}/{effect.activity}")
+            return Command(_adb_argv(self.adb, self.serial, "shell", shell_cmd),
+                           effect.budget, effect.reason, None, _CLOCK())
         return None
 
     # ------------------------------------------------------------- dispatch
