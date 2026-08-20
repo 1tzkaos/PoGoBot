@@ -28,6 +28,7 @@ from .effects import (
     Halt,
     IntentOutcome,
     Note,
+    RestartApp,
     SetFlag,
     SetIntent,
     Swipe,
@@ -60,6 +61,30 @@ ENCOUNTER_RING_SECONDS = 6.0
 # happens during a switch and nowhere else.
 ACCOUNTS_REFRESH = 2.5
 
+# How often the same dump is re-read while RECOVERING, which is the other state that can
+# be looking at the PGSharp panel - see fsm.Recovering._panel_close for what reads it and
+# why the panel is invisible to every optical signal the bot has.
+#
+# Four times the switch cadence above, because nothing here is racing a budget. A switch
+# has to catch an asterisk inside `Timings.switch_timeout` (240s) and re-reads as often as
+# it can afford; RECOVERING's own deadline is the 120s stuck watchdog and the restart
+# ladder below it, both of which have room for a dozen reads. Against that, the dump
+# blocks this very thread for ~1s - and for up to `accounts.UiTreeReader.timeout` when the
+# window will not go idle, which is exactly what a rendering game does - and RECOVERING is
+# not only the wedged case: it is entered briefly after every encounter, popup or stop
+# that times out, so a switch-rate refresh would buy a stall on each of those to answer a
+# question that is almost always "no panel". The stall is bounded twice over: by that
+# reader timeout, and by `_refresh_accounts` stamping this throttle from when the read
+# FINISHED, so a slow read is always followed by a full interval of live frames.
+#
+# 10s is also the age the view fed to `_panel_close` can reach, and that bound is the
+# reason it is not longer: the observed livelock cycles RECOVERING -> SCANNING about every
+# 7s (47 RECOVERING frames at ~8fps plus a single SCANNING one), so a panel that closes is
+# described as still open for at most one or two more visits before the next read corrects
+# it. The stall only ever lands on a bot that is already not playing: a second lost in
+# RECOVERING delays the return to the map by a second, and nothing else.
+RECOVER_ACCOUNTS_REFRESH = 10.0
+
 # A switch that expires without confirming is not retried immediately.
 #
 # Observed live: the login tap is accepted, PGSharp closes its own panel, and the account
@@ -86,7 +111,7 @@ SWITCH_MAX_FAILURES = 3
 
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps", "switch_goplus_attempts",
-                   "switch_clear_presses")
+                   "switch_clear_presses", "star_drags")
 
 
 class Runner:
@@ -544,21 +569,53 @@ class Runner:
     # ---------------------------------------------------------------- accounts
 
     def _refresh_accounts(self, real: float) -> None:
-        """Re-read the UI tree. Only during a switch: the dump blocks for ~1s, and it is
-        only during a switch that the panel is open for it to see anything.
+        """Re-read the UI tree, in the two states that can be looking at the PGSharp panel.
+
+        SWITCHING is the state that OPENS the panel, and reads at ACCOUNTS_REFRESH because
+        it is chasing an asterisk inside a bounded budget. RECOVERING is the state that
+        finds one already open and cannot see it any other way: measured at the bot's own
+        resolution the accounts panel reports screen=Menu@0.95, in_overlay=False,
+        x_button=False and no close button, so the tree is the only channel that knows it
+        is there (see fsm.Recovering._panel_close). It gets its own, longer throttle -
+        RECOVER_ACCOUNTS_REFRESH - because the read blocks this thread and RECOVERING is
+        entered briefly after every ordinary timeout, not only when the bot is wedged; see
+        that constant for the whole trade.
+
+        Everywhere else this still returns without reading: outside these two states the
+        panel is shut, so a blocking dump could only ever report `rows=()`.
 
         Paced on the REAL clock, like every other pacing decision in the loop: a paused run
         freezes `ctx.now`, and a frozen clock never reaches its own next deadline.
         """
-        if self.tree_reader is None or self.ctx.state is not BotState.SWITCHING:
+        switching = self.ctx.state is BotState.SWITCHING
+        if self.tree_reader is None \
+                or not (switching or self.ctx.state is BotState.RECOVERING):
             return
-        if real - self._accounts_read_at < ACCOUNTS_REFRESH:
+        if real - self._accounts_read_at < (ACCOUNTS_REFRESH if switching
+                                            else RECOVER_ACCOUNTS_REFRESH):
             return
-        self._accounts_read_at = real
+        t0 = time.perf_counter()
         try:
             self.ctx.accounts = self.tree_reader.read()
         except Exception:
             log.exception("account tree read failed")
+            return
+        finally:
+            # Stamped from when the read FINISHED, not when it started. The dump blocks
+            # this thread, so a start-to-start throttle is no throttle at all once a read
+            # runs long: a read that costs more than the interval makes the next one
+            # eligible the instant it returns, and the loop never gets a frame back
+            # between them. End-to-start guarantees a whole interval of seeing the screen
+            # after every interval of not seeing it. Expressed as an offset from `real` -
+            # the loop's single clock sample, passed in - rather than a fresh
+            # perf_counter, so this method still takes its clock as an argument.
+            self._accounts_read_at = real + (time.perf_counter() - t0)
+        if not switching:
+            # Everything below belongs to a switch in flight. `_last_seen_active` is the
+            # record of who the tree named during THIS attempt and is spent by
+            # `_on_switch_failed`; the AutoWalk icon colour is read out of a shortcut menu
+            # only `Switching` ever opens. Writing either from RECOVERING would be
+            # answering a question nobody asked with a reading taken off the wrong screen.
             return
         if self.ctx.accounts.available and self.ctx.accounts.active is not None:
             # The asterisk is ground truth about who is logged in, and `verify` re-reads it
@@ -848,9 +905,48 @@ class Runner:
                         # legitimate multi-minute LOADING screen (see
                         # config.Timings.switch_clear_max).
                         self.ctx.switch_clear_presses += 1
+                    elif budget == "star_drag" and isinstance(e, Swipe):
+                        # Same reasoning as every counter above: `_separate_star` is pure
+                        # and cannot know whether its Swipe reached the device, and this
+                        # bound is what stops a star that will not move being dragged for
+                        # the rest of the switch (config.StarSeparation.max_drags).
+                        self.ctx.star_drags += 1
+                        # ...and restarting the AutoWalk ladder's own clock is part of the
+                        # same fact, not a second decision. `AutoWalk.budget_s` (30s) is
+                        # sized for the four settle-and-reread cycles the LADDER needs
+                        # (star, menu, dialog, close); making the star tappable is not one
+                        # of them. Each drag costs a whole cycle, because the branch below
+                        # drops `ctx.accounts` after every applied effect - and a cycle is
+                        # not `ACCOUNTS_REFRESH`: `_refresh_accounts` stamps its throttle
+                        # from when the read FINISHED, and the dump was measured at ~3.0s
+                        # (2.96, 3.00, 3.00, 3.00, 4.46), so usable views are ~5.5s apart.
+                        # Three drags is ~16s of a 30s budget. Driven through this Runner
+                        # and the real FSM at that cost, a ladder that completes with zero
+                        # drags is abandoned part-way with two or three: `_autowalk_deadline`
+                        # gives up, and what SCANNING inherits is the shortcut menu sitting
+                        # over the reach ellipse it taps into - which `_autowalk_close`'s
+                        # own docstring describes as silently killing AutoWalk for the rest
+                        # of the run. Only an ACCEPTED drag defers the
+                        # deadline, which is what keeps the deadline a backstop: a drag
+                        # the actuator refuses moves nothing and buys no time, so a star
+                        # that can never be dragged still ends the ladder at `budget_s`
+                        # rather than holding the switch to `Timings.switch_timeout`.
+                        self.ctx.switch_autowalk_since = self.ctx.now
+                    elif budget == "restart" and isinstance(e, RestartApp):
+                        # Same reasoning as every counter above, and it matters more here
+                        # than anywhere else: `Recovering.on_timeout` is pure and cannot
+                        # know whether its RestartApp reached the device. Counting a
+                        # rejected one would spend a restart that never happened, and
+                        # stamping the grace period for it would then sit out
+                        # `app_restart_grace` waiting for an app that was never restarted.
+                        # Only an accepted application does either.
+                        self.ctx.app_restarts += 1
+                        self.ctx.app_restart_ts = self.ctx.now
+                        log.warning("restarted %s (%d consecutive restart(s) with no "
+                                    "confirmed map)", e.package, self.ctx.app_restarts)
                     self.ctx.last_action[budget] = self.ctx.now
                     self.ctx.taps_in_state += 1
-                    if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag)):
+                    if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag, RestartApp)):
                         self.ctx.settle_until = self.ctx.now + self.cfg.timings.ui_settle
                     if self.ctx.state is BotState.SWITCHING:
                         # The launcher tap TOGGLES the overlay, so a second decision taken
@@ -1005,6 +1101,21 @@ class Runner:
 
                 if obs.on_map:
                     self.ctx.last_map_ts = now
+                    # A confirmed map is the only evidence that a restart worked, so it is
+                    # what refills the budget - see Config.max_app_restarts. This makes
+                    # the bound "consecutive restarts that did not bring the map back": an
+                    # app that crash-loops never reaches this line and so can never earn
+                    # another restart, while a wedge cleared hours ago does not leave the
+                    # rest of the run one restart poorer.
+                    self.ctx.app_restarts = 0
+                    # ...and the same evidence closes the cold-start hold. The grace
+                    # window exists because nothing on a relaunching game is ours to
+                    # press; a confirmed map is proof the relaunch is over, so holding
+                    # the ladder for the rest of the 90s would be refusing to recover
+                    # from a screen we can already see. Measured before this line
+                    # existed: with the map confirmed 30s after a restart, `step`
+                    # pressed nothing at 35s, 60s and 89s, and only resumed at 91s.
+                    self.ctx.app_restart_ts = 0.0
                 if fsm.rocket_screen(obs, cfg):
                     self.ctx.last_rocket_ts = now
                 if not paused:

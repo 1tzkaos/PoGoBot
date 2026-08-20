@@ -93,6 +93,38 @@ class DoubleTapDrag:
 
 
 @dataclass(frozen=True)
+class RestartApp:
+    """Force-stop the game and start it again, delivered as ONE adb invocation.
+
+    The last rung of RECOVERING's ladder and the only response left to a process that is
+    wedged behind something no button dismisses. Measured: a PGSharp accounts panel that
+    BACK does not close and `perception.find_close_button` cannot see held 39% of one
+    run's frames in a RECOVERING x47 -> SCANNING x1 cycle, and with the panel up
+    `mCurrentFocus` is still the game's own Unity activity - the panel is an overlay
+    window of THIS process, so ending the process is what ends the panel.
+
+    Modeled as the mechanism and given the package and activity to act on, rather than
+    knowing them: Tap carries a coordinate instead of a purpose for the same reason. The
+    values come from Config (`app_package`, `app_activity`), so the PGSharp build being a
+    mod of the stock package today - exactly the kind of fact that can change under us -
+    is a config edit rather than a code edit.
+
+    `settle_ms` is the pause between the stop and the start, spent inside that one shell
+    command (see actions.Actuator.render): `am start` fired immediately after `am
+    force-stop` races the process teardown and can land on a package that is still going
+    away. It must stay well under `actions.ADB_TIMEOUT` (5s), which bounds the whole
+    invocation - a settle longer than that turns every restart into a timed-out command
+    and trips the actuator's own failure breaker.
+    """
+
+    package: str
+    activity: str
+    reason: str
+    settle_ms: int = 1000
+    budget: str = "restart"
+
+
+@dataclass(frozen=True)
 class Transition:
     to: BotState
     outcome: IntentOutcome
@@ -146,10 +178,10 @@ class Halt:
     reason: str
 
 
-Effect = Union[Tap, Swipe, Back, DoubleTapDrag, Transition, SetIntent, SetFlag, Cooldown,
-               ClearSpatialMemory, Note, Halt]
+Effect = Union[Tap, Swipe, Back, DoubleTapDrag, RestartApp, Transition, SetIntent,
+               SetFlag, Cooldown, ClearSpatialMemory, Note, Halt]
 
-ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag)
+ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag, RestartApp)
 
 
 def is_actuation(effect: Effect) -> bool:

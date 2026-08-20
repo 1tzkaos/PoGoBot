@@ -164,6 +164,42 @@ def test_run_parses_successful_dump_with_fixture_data(monkeypatch):
     assert len(v.rows) == 2
 
 
+def test_the_timeout_bounds_the_whole_read_not_each_adb_call(monkeypatch):
+    """`timeout` is the length of time the bot is allowed to be blind, so it has to bound
+    `read()` itself.
+
+    `Runner._refresh_accounts` calls this on the run loop's own thread: while it blocks,
+    no frame is perceived, no key is read and no stop signal is serviced - and
+    `Context.map_stale_since`, which the recovery ladder escalates on, counts throughout.
+    Applied PER CALL it was no bound at all: three calls at the old 20s default was a 60s
+    stall. Each call now gets only what is left of the one budget."""
+    import time as _time
+    seen = []
+
+    class _Done:
+        stdout = b""
+
+    def fake(cmd, **kw):
+        seen.append(kw["timeout"])
+        _time.sleep(0.02)
+        return _Done()
+
+    monkeypatch.setattr("pogobot.accounts.subprocess.run", fake)
+    UiTreeReader(WH, timeout=1.0).read()
+
+    assert len(seen) == 3
+    assert seen == sorted(seen, reverse=True), f"budget not shared across calls: {seen}"
+    assert max(seen) <= 1.0 and seen[-1] < seen[0]
+
+
+def test_the_default_timeout_is_a_stall_the_run_loop_can_absorb():
+    """Five times the ~1s a real read costs, and deliberately shorter than the ~10s
+    `uiautomator dump` spends waiting for a window that will not go idle: against a
+    rendering game there is no PGSharp panel to find, so giving up first is the answer
+    anyway, and `available=False` already means "could not look"."""
+    assert UiTreeReader(WH).timeout <= 5.0
+
+
 def test_run_with_serial_includes_device_selector(monkeypatch):
     """_run() should include -s <serial> in all adb commands when serial is set."""
     mock_run = MagicMock()
