@@ -411,6 +411,12 @@ class AutoWalk:
     pick AutoWalk from the shortcut menu it opens, press CONTINUE LAST if PGSharp offers
     it or OK otherwise, then tap the star again to close the menu it leaves open.
 
+    A route that is ALREADY running short-circuits that middle step rather than lengthening
+    it: PGSharp answers the menu entry with a "Stop/Pause AutoWalk?" dialog instead of the
+    setup one, which the ladder backs out of and then closes the menu, well inside the
+    budget below. It used to be indistinguishable from "the setup dialog never appeared",
+    which spent the whole of `budget_s` on every single run.
+
     Bounded by WALL-CLOCK time, unlike `ZoomOut.repeats`/`GoPlusToggle.max_attempts`
     above. Those both act on a FIXED coordinate that cannot fail to be found, so counting
     accepted actuations is enough to bound them. Every step here instead depends on

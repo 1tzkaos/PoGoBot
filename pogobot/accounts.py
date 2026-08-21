@@ -17,13 +17,15 @@ bounds. Nothing is a constant, an offset, or a guess, because the failure mode i
 irreversibly deleted account.
 
 The same channel also reads PGSharp's floating "star" shortcut widget, the menu it opens,
-and the AutoWalk dialog that menu can lead to (see `fsm.Switching._autowalk_open` and
-neighbours) - not a second channel, the same dump, parsed further. The star moves (it is
-described as draggable, and was measured at two different positions hours apart - see
-tests/fixtures/uiautomator/star_moved.xml), so it is located the same way the cooldown
-launcher already is: through a stable descendant id (`hl_floating_icon`, confirmed present
-in tests/fixtures/uiautomator/accounts_open.xml) walked up to its nearest clickable
-ancestor, never by class+clickable alone or by a remembered coordinate.
+and the two different AutoWalk dialogs that menu can lead to - the route-setup one, and the
+"Stop/Pause AutoWalk?" one PGSharp answers with instead when a route is already running (see
+`fsm.Switching._autowalk_open` and neighbours) - not a second channel, the same dump, parsed
+further. The star moves (it is described as draggable, and was measured at two different
+positions hours apart - see tests/fixtures/uiautomator/star_moved.xml), so it is located the
+same way the cooldown launcher already is: through a stable descendant id
+(`hl_floating_icon`, confirmed present in tests/fixtures/uiautomator/accounts_open.xml)
+walked up to its nearest clickable ancestor, never by class+clickable alone or by a
+remembered coordinate.
 
 Because BOTH of those widgets float and are draggable, they can also end up drawn on top
 of one another - measured immediately after an app restart, and reproduced in
@@ -67,16 +69,35 @@ ID_STAR_ICON = "hl_floating_icon"
 #: Shortcut-menu entries the star opens ('Map', 'AutoWalk', 'Feeds', ...). Each is its
 #: own directly-clickable text node - the same shape ID_TAB_ACCOUNTS already is.
 ID_SHORTCUT_ITEM = "hl_shortcut_menu_item_txt"
-#: The AutoWalk dialog. `alertTitle`/`button1`/`button2`/`button3` are Android's own
-#: framework AlertDialog ids, not PGSharp's - matched by suffix like everything else here
-#: so the exact package prefix (`android:id/...`) is never assumed. `hl_aw_input` and the
-#: toggle ids are never looked up at all: this module has no coordinate for any of them,
-#: which is what makes them untappable rather than merely un-tapped (see
-#: `fsm.Switching._autowalk_dialog`).
+#: The two AutoWalk dialogs. `alertTitle`/`message`/`button1`/`button2`/`button3` are
+#: Android's own framework AlertDialog ids, not PGSharp's - matched by suffix like
+#: everything else here so the exact package prefix (`android:id/...`) is never assumed,
+#: and never load-bearing on their own, since both dialogs use the same ones.
+#: `hl_aw_input` and the toggle ids are never looked up at all: no coordinate for any of
+#: them exists here, which is what makes them untappable rather than merely un-tapped
+#: (see `fsm.Switching._autowalk_dialog`).
 ID_AW_TITLE = "alertTitle"
 ID_AW_TITLE_TEXT = "Auto-Generated GPX"
-ID_AW_OK = "button1"            # OK - the default (50 POIs)
-ID_AW_CANCEL = "button2"        # CANCEL - never tapped by this module
+#: Android's own AlertDialog message id, and the one sentence that proves AutoWalk is
+#: ALREADY RUNNING. Tapping the shortcut menu's "AutoWalk" entry while a route is active
+#: does not open the setup dialog at all - PGSharp answers with a STOP dialog whose only
+#: text nodes are "AutoWalk" (alertTitle), "Stop/Pause AutoWalk?" (message), "PAUSE"
+#: (button2) and "STOP" (button1). Dumped from the device at the exact moment the ladder
+#: was failing and committed verbatim as tests/fixtures/uiautomator/autowalk_stop_dialog.xml.
+#:
+#: Matched on the MESSAGE rather than the title, and never on the buttons: the title is
+#: only the feature's name ("AutoWalk"), which any future PGSharp dialog about the same
+#: feature would carry too, while this sentence is the one string that states what THIS
+#: dialog is asking. Same discipline as ID_AW_TITLE_TEXT above, for the same reason -
+#: button1/2/3 are generic Android AlertDialog ids and prove nothing about which dialog
+#: owns them.
+ID_AW_MESSAGE = "message"
+ID_AW_RUNNING_MESSAGE = "Stop/Pause AutoWalk?"
+#: OK on the setup dialog - the default (50 POIs). The SAME id is STOP on the stop dialog
+#: above, which is why `parse_dump` refuses to report a coordinate for it once that dialog
+#: has identified itself: see the suppression at the end of `parse_dump`.
+ID_AW_OK = "button1"
+ID_AW_CANCEL = "button2"        # CANCEL, and PAUSE on the stop dialog - never located here
 ID_AW_CONTINUE_LAST = "button3"  # CONTINUE LAST - present only sometimes; preferred when it is
 
 _BOUNDS = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
@@ -96,8 +117,8 @@ class AccountRow:
 @dataclass(frozen=True)
 class AccountView:
     """The current state of the PGSharp overlay: the account-list panel, and (see the
-    module docstring) the star shortcut widget, the menu it opens, and the AutoWalk
-    dialog that menu can lead to. All parsed from the same dump by `parse_dump`."""
+    module docstring) the star shortcut widget, the menu it opens, and whichever of the two
+    AutoWalk dialogs that menu led to. All parsed from the same dump by `parse_dump`."""
 
     rows: tuple[AccountRow, ...] = ()
     launcher_norm: Optional[tuple[float, float]] = None
@@ -139,6 +160,16 @@ class AccountView:
     #: from button1/button2/button3 alone, which are generic Android AlertDialog ids that
     #: could in principle belong to a different dialog.
     autowalk_dialog_open: bool = False
+    #: True only when THIS dump carries the stop dialog's own message text (see
+    #: ID_AW_RUNNING_MESSAGE) - positive proof that AutoWalk is ALREADY RUNNING, since
+    #: PGSharp only offers to stop a route that exists. Its own field rather than a second
+    #: meaning for `autowalk_dialog_open`, because the two dialogs want opposite
+    #: behaviour: the setup dialog is a button to press, this one is a screen to back out
+    #: of. Read by `fsm.Switching._autowalk_dialog`, which treats it as the ladder's goal
+    #: state reached by another route - the same conclusion `fsm.Context
+    #: .switch_autowalk_active` reaches from the icon's colour, arrived at from the dialog
+    #: instead for the ticks where that colour reading has not landed yet.
+    autowalk_running_dialog_open: bool = False
     #: CONTINUE LAST (button3) - present only sometimes; preferred over OK when it is.
     autowalk_continue_last_norm: Optional[tuple[float, float]] = None
     #: OK (button1) - the default (50 POIs).
@@ -281,6 +312,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
     autowalk_menu = None
     autowalk_icon_rect = None
     autowalk_dialog_open = False
+    autowalk_running_dialog_open = False
     autowalk_continue_last = autowalk_ok = None
     for n in root.iter("node"):
         if _ends_with(n, ID_TAB_ACCOUNTS):
@@ -321,10 +353,30 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
             # other dialog could also use, so "this is the AutoWalk dialog" is only ever
             # true when its own title says so.
             autowalk_dialog_open = n.get("text") == ID_AW_TITLE_TEXT
+        elif _ends_with(n, ID_AW_MESSAGE):
+            # The other dialog the same menu entry can produce, told apart the same way:
+            # by its own words. Only ever SET here, never cleared, so a second node whose
+            # id also happens to end in "message" cannot un-say what this one proved.
+            if n.get("text") == ID_AW_RUNNING_MESSAGE:
+                autowalk_running_dialog_open = True
         elif _ends_with(n, ID_AW_CONTINUE_LAST):
             autowalk_continue_last = _centre_norm(n, w, h)
         elif _ends_with(n, ID_AW_OK):
             autowalk_ok = _centre_norm(n, w, h)
+
+    if autowalk_running_dialog_open:
+        # Withhold both button coordinates once the dump has positively said which dialog
+        # is on screen. On THIS one button1 is STOP and button2 is PAUSE, and pressing
+        # either turns the user's route OFF - a worse outcome than failing to turn it on,
+        # because it is the thing they asked the bot to keep running. button2 has never
+        # had a coordinate in this module at all; button1 only does because it shares its
+        # generic Android id with the setup dialog's OK, so refusing to report it here is
+        # the only way to give it the same "untappable rather than merely un-tapped"
+        # guarantee the input field and the toggle groups already have (see the ID_AW_*
+        # block above). `fsm.Switching._autowalk_dialog` gates on
+        # `autowalk_running_dialog_open` as well; this is the half that survives a future
+        # author reordering that gate.
+        autowalk_continue_last = autowalk_ok = None
 
     rows: list[AccountRow] = []
     for row in root.iter("node"):
@@ -371,6 +423,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         autowalk_menu_norm=autowalk_menu,
         autowalk_icon_rect_norm=autowalk_icon_rect,
         autowalk_dialog_open=autowalk_dialog_open,
+        autowalk_running_dialog_open=autowalk_running_dialog_open,
         autowalk_continue_last_norm=autowalk_continue_last,
         autowalk_ok_norm=autowalk_ok,
     )

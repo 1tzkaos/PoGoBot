@@ -456,6 +456,20 @@ no login and no target. So the measured zoom gesture, the "only a positively-rea
 pressed" rule, and the "this account is already autowalking, do not start it again" rule all
 behave identically in both places, by construction rather than by remembering to.
 
+**"Already autowalking" is recognised two ways, and neither of them can turn a route off.**
+The first is the colour of the AutoWalk glyph in the shortcut menu, which exists only while
+that menu is open. The second is PGSharp itself: picking *AutoWalk* while a route is already
+running does not open the route-setup dialog at all - it opens a *Stop/Pause AutoWalk?*
+dialog, which is positive proof the goal state has already been reached. That is treated as
+success, not as a failure to be waited out: the bot backs out of the dialog with the hardware
+Back button, closes the shortcut menu, and logs that a route was already running rather than
+that it started one. It never presses *PAUSE* or *STOP* - neither button is given a
+coordinate at all once that dialog has identified itself by its own message text, so turning
+off a route the operator wanted is unrepresentable rather than merely avoided. Before this,
+that dialog read as "the setup dialog never appeared", so every run burned the full
+30-second AutoWalk budget and then left PGSharp's shortcut menu over the map, where a stray
+tap lands on its *Settings* or *Teleport* entry.
+
 **It can never stop the bot playing.** The whole pass is bounded at 90 seconds - comfortably
 inside the two-minute stuck watchdog - and every way out of it ends in `SCANNING` with the
 bot playing: finishing, the AutoWalk ladder running out of its own 30-second budget, a

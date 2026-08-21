@@ -520,6 +520,17 @@ class Rocket(Handler):
         ]
 
 
+#: The reason carried by the BACK that dismisses PGSharp's "Stop/Pause AutoWalk?" dialog.
+#: One definition because two rungs emit it - `Switching._autowalk_dialog` when it first
+#: recognises the dialog, and `Switching._autowalk_close` if it is somehow still there -
+#: and because it is the string an operator reads to see that the bot backed OUT of that
+#: screen rather than pressing anything on it. BACK is what dismisses it: verified on the
+#: device, and the only dismissal that carries no coordinate at all, so it cannot land on
+#: PAUSE or STOP however the dialog is laid out.
+_AUTOWALK_BACK_REASON = ("autowalk: BACK out of the Stop/Pause dialog - AutoWalk is "
+                         "already running and must not be stopped")
+
+
 class Switching(Handler):
     """Log into another account through the PGSharp overlay.
 
@@ -888,8 +899,24 @@ class Switching(Handler):
             ]
         if elapsed <= cfg.budget_s + cfg.close_grace_s:
             return []             # still inside the cleanup allowance; wait for a view
-        return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                           self._finished(ctx, f"{late}; the menu may still be open"))]
+        # The one exit from this ladder that leaves the shortcut menu open, and it does so
+        # only because no closing tap could be sent - no view, a view with no star in it,
+        # or a star located with `Timings.switch_tap` still shutting the gate above. Worded
+        # from what was CHECKED rather than naming one of those three: the star is very
+        # often present on this path, so blaming its absence sent an operator hunting a
+        # star-detection bug that was not there.
+        # Said out loud at warn level rather than left to the CONFIRMED transition
+        # line, which reads like a tidy finish: measured at 1080x2340 the menu's eight
+        # entries cover x 12-339, y 563-1331, so anything the bot taps under them lands on
+        # an entry instead - "Settings" opens the PGSharp settings page (which wedged a
+        # live run) and "Teleport" would move the player.
+        return [
+            Note("PGSharp's shortcut menu was left OPEN: no closing tap could be sent "
+                 "before the cleanup allowance ran out. A tap aimed underneath it will "
+                 "land on one of its entries instead", "warn"),
+            Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                       self._finished(ctx, f"{late}; the menu may still be open")),
+        ]
 
     def _separate_star(self, ctx, v):
         """Drag the PGSharp star clear of the accounts launcher when the tree says the two
@@ -1112,32 +1139,71 @@ class Switching(Handler):
         return gone if gone is not None else []
 
     def _autowalk_dialog(self, obs, ctx):
-        """The 'Auto-Generated GPX' dialog: press CONTINUE LAST when PGSharp offers it,
-        otherwise OK (defaults to 50 POIs) - exactly the rule given in the task brief.
+        """Whichever dialog the "AutoWalk" entry actually produced. Two are possible and
+        they want opposite treatment.
 
-        Never touches the POI-count input field or either toggle group: this module has
-        no coordinate for any of them (see accounts.py), so there is nothing here capable
-        of tapping one even in error. `autowalk_dialog_open` requires the dialog's own
-        title text, not merely the presence of button1/2/3 - generic Android AlertDialog
-        ids some other dialog could also carry - so this never presses a button that
-        belongs to a screen it only coincidentally resembles.
+        The 'Auto-Generated GPX' setup dialog: press CONTINUE LAST when PGSharp offers it,
+        otherwise OK (defaults to 50 POIs).
+
+        The 'Stop/Pause AutoWalk?' dialog: PGSharp answers with this one, not the setup
+        one, when a route is ALREADY RUNNING - which makes it positive proof that the
+        ladder's goal state has already been reached. Dumped from the device mid-failure
+        and committed as tests/fixtures/uiautomator/autowalk_stop_dialog.xml. So it is
+        SUCCESS, not a failure to be waited out: dismiss it and close the menu. Before
+        this branch existed the ladder simply found `autowalk_dialog_open` False, pressed
+        nothing, and burned the whole of `config.AutoWalk.budget_s` - and because the
+        give-up left PGSharp's shortcut menu over the map, a later stray tap could land on
+        its "Settings" or "Teleport" entry (the eight entries cover x 12-339, y 563-1331 of
+        1080x2340). That is what wedged a live run on the PGSharp settings page.
+
+        Dismissed with BACK, never by pressing a button. button1 on that dialog is STOP
+        and button2 is PAUSE - either one turns the user's route OFF, which is strictly
+        worse than failing to turn it on, since keeping it running is the thing they asked
+        for. `accounts.parse_dump` already refuses to report a coordinate for either once
+        the dialog has identified itself, so there is nothing here capable of pressing one;
+        this branch coming FIRST, before any button is even considered, is the second half
+        of the same guarantee.
+
+        Never touches the POI-count input field or either toggle group either: this module
+        has no coordinate for any of them (see accounts.py). Both dialogs are recognised by
+        their OWN text - the setup one by its title, the stop one by its message - never by
+        the presence of button1/2/3, which are generic Android AlertDialog ids some other
+        dialog could also carry.
 
         No `obs.on_map` gate - see `_autowalk_open`'s docstring. This matters most here:
-        the "Auto-Generated GPX" AlertDialog is the one screen in this ladder most likely
-        to read as off-map (a real AlertDialog dims the window behind it), and this is the
-        phase whose job is to act while that dialog is genuinely open.
+        both of these are genuine Android AlertDialogs, which dim the window behind them,
+        so this is the phase most likely to read as off-map on the exact tick it must act.
         """
         v = ctx.accounts
-        if v is not None and v.available and v.autowalk_dialog_open:
-            target = v.autowalk_continue_last_norm or v.autowalk_ok_norm
-            if target is not None:
+        if v is not None and v.available:
+            if v.autowalk_running_dialog_open:
+                # Checked before `autowalk_dialog_open` and before any button is read: on
+                # a real dump only one of the two can be true (they are matched on
+                # different text nodes), and if that ever stops holding, the order decides
+                # whether the ladder backs out or presses something. It backs out.
                 if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
                     return []
-                reason = ("autowalk: CONTINUE LAST"
-                          if v.autowalk_continue_last_norm is not None
-                          else "autowalk: OK (default 50 POIs)")
-                return [Tap(*target, reason, budget="switch"),
-                        SetFlag("switch_phase", "autowalk_close")]
+                # No account is named during a preflight rather than one being invented -
+                # see `_label`/`_finished`, the same rule `_autowalk_menu`'s skip follows.
+                who = f" for {ctx.switch_target}" if ctx.switch_target else ""
+                return [
+                    Note(f"AutoWalk is already running{who} - PGSharp offered its "
+                         f"Stop/Pause dialog instead of the route setup one; backing out "
+                         f"of it without pressing PAUSE or STOP and closing the shortcut "
+                         f"menu", "info"),
+                    Back(_AUTOWALK_BACK_REASON, budget="switch"),
+                    SetFlag("switch_phase", "autowalk_close"),
+                ]
+            if v.autowalk_dialog_open:
+                target = v.autowalk_continue_last_norm or v.autowalk_ok_norm
+                if target is not None:
+                    if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                        return []
+                    reason = ("autowalk: CONTINUE LAST"
+                              if v.autowalk_continue_last_norm is not None
+                              else "autowalk: OK (default 50 POIs)")
+                    return [Tap(*target, reason, budget="switch"),
+                            SetFlag("switch_phase", "autowalk_close")]
         gone = self._autowalk_deadline(ctx)
         return gone if gone is not None else []
 
@@ -1177,17 +1243,45 @@ class Switching(Handler):
         and a dimmed window behind it can read as NOT on-map.
         """
         v = ctx.accounts
-        if v is not None and v.available and v.star_norm is not None:
-            if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
-                return []
-            # Tap before Transition: `Runner.apply` walks the list in order, so the tap is
-            # applied while the state is still SWITCHING (or PREFLIGHT, which drives this
-            # same ladder) and the confirmation follows it.
-            return [
-                Tap(*v.star_norm, "autowalk: close the shortcut menu", budget="switch"),
-                Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                           self._finished(ctx)),
-            ]
+        if v is not None and v.available:
+            if v.autowalk_running_dialog_open:
+                # `_autowalk_dialog` advances the phase in the same tick it emits its
+                # BACK, and it is pure - it cannot know whether the actuator accepted that
+                # BACK (rate limit, failure breaker). If it did not, the Stop/Pause dialog
+                # is still in front of the menu, the star tap below would be swallowed by
+                # its scrim, and this phase would confirm with the menu left open - the
+                # exact outcome the whole ladder is being fixed for. Press BACK again
+                # instead: coordinate-free, so it can never land on PAUSE or STOP however
+                # many times it repeats.
+                #
+                # The deadline is consulted FIRST because this is the only rung in the
+                # ladder that can repeat without advancing anything - every other wait
+                # either moves the phase on or falls through to `_autowalk_deadline` at
+                # the bottom, and this one returns before ever reaching it. A dialog that
+                # BACK does not dismiss would otherwise repeat forever: driven through the
+                # real Runner at a 3.0s tick (the one cadence longer than the tree-refresh
+                # throttle, so `ctx.accounts` is never dropped and nothing else breaks the
+                # cycle) it sent 74 BACKs over 246s and ended in `Timings.switch_timeout`,
+                # booking a switch whose login had already confirmed as a FAILURE and
+                # arming the 10-minute backoff - which is precisely what `config.AutoWalk`
+                # says the wall clock exists to prevent.
+                gone = self._autowalk_deadline(ctx)
+                if gone is not None:
+                    return gone
+                if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                    return []
+                return [Back(_AUTOWALK_BACK_REASON, budget="switch")]
+            if v.star_norm is not None:
+                if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
+                    return []
+                # Tap before Transition: `Runner.apply` walks the list in order, so the
+                # tap is applied while the state is still SWITCHING (or PREFLIGHT, which
+                # drives this same ladder) and the confirmation follows it.
+                return [
+                    Tap(*v.star_norm, "autowalk: close the shortcut menu", budget="switch"),
+                    Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                               self._finished(ctx)),
+                ]
         gone = self._autowalk_deadline(ctx)
         return gone if gone is not None else []
 
@@ -1224,13 +1318,24 @@ PREFLIGHT_PHASES = ("zoom", "goplus", "autowalk_open", "autowalk_menu",
 _PREFLIGHT_UNDONE = {
     "zoom": "the zoom-out, Virtual Go Plus and AutoWalk did not happen this run",
     "goplus": "Virtual Go Plus and AutoWalk did not happen this run",
+    # "autowalk_open" is the one autowalk phase at which the shortcut menu is definitely
+    # NOT open: locating the star always taps it and advances the phase in the same tick
+    # (see `Switching._autowalk_open`), so being stuck here means it was never tapped.
     "autowalk_open": "AutoWalk did not start this run",
-    "autowalk_menu": "AutoWalk did not start this run",
-    "autowalk_dialog": "AutoWalk did not start this run",
-    # By this phase AutoWalk has been started; only PGSharp's own shortcut menu is still
-    # open, which is not cosmetic - see `Switching._autowalk_close`.
-    "autowalk_close": "AutoWalk started, but PGSharp's shortcut menu may still be over "
-                      "the map",
+    # At these two the menu IS open - it is what the star tap opened - and the state
+    # timeout is an exit that has no chance to close it. Named for the same reason the
+    # "autowalk_close" entry below names it: a menu left over the map is where a stray tap
+    # becomes a PGSharp settings page or a teleport.
+    "autowalk_menu": "AutoWalk did not start this run, and PGSharp's shortcut menu may "
+                     "still be over the map",
+    "autowalk_dialog": "AutoWalk did not start this run, and PGSharp's shortcut menu may "
+                       "still be over the map",
+    # By this phase a route is running - started here, or found already running when
+    # PGSharp answered with its Stop/Pause dialog (see `Switching._autowalk_dialog`), which
+    # is why this says "is running" rather than "started". Only PGSharp's own shortcut menu
+    # is still open, which is not cosmetic - see `Switching._autowalk_close`.
+    "autowalk_close": "AutoWalk is running, but PGSharp's shortcut menu may still be "
+                      "over the map",
 }
 
 #: The preflight phases that fire a BLIND gesture at a fixed screen coordinate and so
@@ -1376,9 +1481,13 @@ class Preflight(Switching):
         gone = super()._autowalk_deadline(ctx)
         if gone is None or not any(isinstance(e, Transition) for e in gone):
             return gone            # still inside the ladder's own cleanup allowance
+        # No claim about whether a route is running: `_autowalk_dialog` may already have
+        # proved one IS, by recognising PGSharp's Stop/Pause dialog, and then run out of
+        # cleanup allowance before it could shut the menu. Saying "with no route running"
+        # here contradicted that INFO line in the same run.
         return [Note(f"the startup preflight could not start AutoWalk within "
                      f"{ctx.cfg.autowalk.budget_s:.0f}s at the {ctx.switch_phase} step - "
-                     f"playing anyway, with no route running", "warn")] + gone
+                     f"playing anyway", "warn")] + gone
 
     def on_timeout(self, obs, ctx):
         undone = _PREFLIGHT_UNDONE.get(ctx.switch_phase,

@@ -830,10 +830,15 @@ def test_every_timeout_warning_reads_as_a_sentence():
         assert clause.startswith(":") and len(clause) > 10, text
 
 
-def test_the_last_rung_says_autowalk_started_rather_than_that_nothing_happened():
+def test_the_last_rung_says_autowalk_is_running_rather_than_that_nothing_happened():
+    """"is running" rather than "started": by this phase a route is up, but the ladder may
+    have found it ALREADY up rather than started it - PGSharp answers the menu entry with
+    its Stop/Pause dialog when one is running (see tests/test_autowalk_running.py), and
+    "AutoWalk started" would be a plain untruth about that run. What the operator needs
+    from this line either way is that a route is up and only the menu is unaccounted for."""
     c = pctx(phase="autowalk_close", state_since=0.0, now=10_000.0)
     text = kinds(fsm.step(OFF_MAP, c), Note)[0].text
-    assert "AutoWalk started" in text and "shortcut menu" in text, text
+    assert "AutoWalk is running" in text and "shortcut menu" in text, text
 
 
 @pytest.mark.parametrize("phase", ["zoom", "goplus"])
