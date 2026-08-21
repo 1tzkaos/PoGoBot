@@ -24,6 +24,6 @@ __pycache__/
 # Agent working files (plans, reports, ledgers)
 .superpowers/
 
-# The operator's own per-account settings; accounts.example.json is the template,
-# and a real one names real accounts.
-/accounts.json
+# The operator's own settings; config.example.json is the template, and a real one
+# names real accounts.
+/config.json

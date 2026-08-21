@@ -1,0 +1,10 @@
+{
+  "tui": true,
+  "switch_every": 45,
+
+  "accounts": {
+    "default":    { "fight_rockets": true },
+    "TrainerOne": { "fight_rockets": true },
+    "TrainerTwo": { "fight_rockets": false }
+  }
+}
