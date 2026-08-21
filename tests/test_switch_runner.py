@@ -27,7 +27,7 @@ from pogobot import fsm
 from pogobot import runner as runner_mod
 from pogobot.accounts import AccountView, FakeTreeReader
 from pogobot.config import DEFAULT, Config
-from pogobot.effects import BotState, IntentOutcome, Tap, Transition
+from pogobot.effects import BotState, IntentOutcome, RestartApp, Tap, Transition
 from pogobot.frames import Frame
 from pogobot.quota import SpinQuota
 from tests.factories import obs
@@ -640,6 +640,54 @@ def test_a_frame_gap_after_the_switch_exits_still_starves_normally():
     exit_ts = r.ctx.switch_exit_ts
 
     r.ctx.now = exit_ts + r.cfg.timings.stuck_watchdog + 1.0
+    assert r._frames_starved(r.ctx.now)
+
+
+def test_a_cold_start_after_a_restart_is_not_read_as_starvation():
+    """The measured failure this credit exists for.
+
+    `_frames_starved` does not time a run of missing frames - it asks
+    `ctx.map_stale_since` and fires on the first `frame is None` it happens to read. A
+    relaunch cannot show a map while the game cold-starts, so without the credit the run
+    was ALREADY past `stuck_watchdog` the instant the restart began, and the next null
+    frame killed it. On the device: restart at 21:42:49, the FSM still correctly logging
+    "waiting out the app restart" at 21:42:56, and HALTED "no usable frames" at 21:43:01 -
+    twelve seconds into a cold start the bot had itself decided to wait out, with a second
+    restart still unspent.
+    """
+    r = make_runner()
+    r.ctx.state = BotState.RECOVERING
+    r.ctx.now = 1_000.0
+    r.ctx.last_map_ts = r.ctx.now - (r.cfg.timings.stuck_watchdog + 6.0)
+    assert r._frames_starved(r.ctx.now), "precondition: already stale enough to halt"
+
+    cfg = r.cfg
+    r.apply([RestartApp(package=cfg.app_package, activity=cfg.app_activity,
+                        reason="recover: restart the game")], off_map())
+    assert r.ctx.app_restart_ts == r.ctx.now, "the restart was not accepted"
+
+    # Twelve seconds in - exactly where the device run died - the cold start is still
+    # the explanation for the missing map, so a null frame must not end the run.
+    r.ctx.now += 12.0
+    assert not r._frames_starved(r.ctx.now)
+
+    # The credit is a fresh window, not an exemption: one stuck_watchdog after the
+    # relaunch, an unrecovered app is judged exactly as before.
+    r.ctx.now += r.cfg.timings.stuck_watchdog
+    assert r._frames_starved(r.ctx.now)
+
+
+def test_a_confirmed_map_takes_the_restart_credit_back():
+    """The credit lives on `app_restart_ts`, which a confirmed map clears, so it cannot
+    outlive the cold start it was granted for."""
+    r = make_runner()
+    r.ctx.state = BotState.RECOVERING
+    r.ctx.now = 1_000.0
+    cfg = r.cfg
+    r.apply([RestartApp(package=cfg.app_package, activity=cfg.app_activity,
+                        reason="recover: restart the game")], off_map())
+    r.ctx.app_restart_ts = 0.0          # what the read loop does on a confirmed map
+    r.ctx.last_map_ts = r.ctx.now - (r.cfg.timings.stuck_watchdog + 1.0)
     assert r._frames_starved(r.ctx.now)
 
 
