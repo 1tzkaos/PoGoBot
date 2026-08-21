@@ -38,7 +38,7 @@ from .effects import (
 )
 from .frames import Frame, FrameSource
 from .observation import Observation, Tristate
-from . import profiles
+from . import userconfig
 from .quota import SpinQuota
 from .stats import SessionStats, append_session
 
@@ -546,7 +546,7 @@ class Runner:
         if account == self._profile_account:
             return
         self._profile_account = account
-        settings = profiles.settings_for(self.account_profiles, account)
+        settings = userconfig.settings_for(self.account_profiles, account)
         new = self._base_cfg.scaled(**settings) if settings else self._base_cfg
         changed = {k: v for k, v in settings.items()
                    if getattr(self._base_cfg, k) != v}
@@ -1163,6 +1163,11 @@ class Runner:
     # ---------------------------------------------------------------- loop
 
     def run(self) -> int:
+        # Before the snapshot below and before the banner: `cli` sets `stats.account` after
+        # constructing the Runner, so this is the first moment the account is known, and a
+        # banner reading "rockets=True" one line above "settings for X: fight_rockets=false"
+        # is a contradiction the operator has to resolve for themselves.
+        self._apply_account_profile()
         cfg = self.cfg
         next_infer = 0.0
         frames = 0

@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import profiles
+from . import userconfig
 from .config import BASE_DIR, Config
 
 #: `--reset-spins` with no value means "every account" - the same thing a bare
@@ -76,9 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="log into another account when this one exhausts its 24h spin cap")
     p.add_argument("--switch-every", type=float, default=None, metavar="MINUTES",
                    help="rotate accounts every MINUTES regardless of state")
-    p.add_argument("--accounts-file", type=Path, default=BASE_DIR / "accounts.json",
-                   help="per-account settings, e.g. Team GO Rocket on for one account and "
-                        "off for another (JSON; optional - see accounts.example.json)")
+    p.add_argument("--config-file", type=Path, default=BASE_DIR / "config.json",
+                   help="run settings and per-account settings (JSON; optional - see "
+                        "config.example.json). Command-line flags win over the file.")
     p.add_argument("--pause-file", type=Path, default=BASE_DIR / "logs" / "PAUSE",
                    help="while this file exists the bot perceives but sends no input; "
                         "also toggled by SIGUSR1, or the p key on the preview window")
@@ -300,6 +300,23 @@ def resolve_device(name: str):
     return "cpu"
 
 
+def explicit_options(argv) -> set:
+    """The option dests the operator actually TYPED.
+
+    Parsing a second time with every default suppressed is the only way argparse will say
+    this: a normal namespace cannot distinguish "--max-size 1280" from the default 1280,
+    and treating a default as a choice would let it silently beat the config file on every
+    single key.
+    """
+    p = build_parser()
+    for action in p._actions:
+        action.default = argparse.SUPPRESS
+    try:
+        return set(vars(p.parse_args(argv)))
+    except SystemExit:
+        return set()
+
+
 def config_from_args(a) -> Config:
     cfg = Config()
     overrides = {}
@@ -341,12 +358,26 @@ def config_from_args(a) -> Config:
 
 
 def main(argv=None) -> int:
-    a = build_parser().parse_args(argv)
+    parser = build_parser()
+    a = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if a.verbose else logging.INFO,
         format="%(asctime)s %(levelname)-5s %(message)s", datefmt="%H:%M:%S",
     )
     log = logging.getLogger("pogobot")
+
+    # The file, then the flags on top - and BEFORE config_from_args, which reads the
+    # namespace this rewrites. Logging is already configured above so the file's own
+    # warnings (an unknown key, a bad value) are visible rather than swallowed, which is
+    # the whole point of reporting them.
+    user_cfg = userconfig.load(a.config_file)
+    applied = userconfig.apply_run_settings(user_cfg, parser, a,
+                                            explicit_options(argv), str(a.config_file))
+    if applied:
+        log.info("%s: %s", Path(a.config_file).name, ", ".join(applied))
+    if a.verbose and not logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.getLogger().setLevel(logging.DEBUG)
+
     cfg = config_from_args(a)
 
     from ultralytics import YOLO
@@ -463,8 +494,8 @@ def main(argv=None) -> int:
                                       lifetime=total if stats_path else None,
                                       quota=quota, pause_file=a.pause_file)
 
-    account_profiles = profiles.load_profiles(a.accounts_file)
-    log.info("%s", profiles.describe(account_profiles))
+    account_profiles = userconfig.load_profiles(user_cfg, str(a.config_file))
+    log.info("%s", userconfig.describe(account_profiles))
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
                     trace_path=trace, display=not a.no_display, stats_path=stats_path,
                     dashboard=dashboard, encounter_dump=a.collect_encounters,
