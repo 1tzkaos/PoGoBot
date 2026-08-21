@@ -354,14 +354,36 @@ class Reach:
 @dataclass(frozen=True)
 class ZoomOut:
     """The one-finger zoom-out gesture fired once a confirmed account switch is back on
-    the map (see `fsm.Switching._zoom`). Values are read directly off the measurement in
-    the task brief, not re-derived: a tap followed by a press-and-drag UP from
-    (540, 1170) on a 1080x2340 screen, repeated twice, produced a map-region diff of 43.1
-    after the first application and 17.6 after the second, against an 11.1 no-input
-    baseline - i.e. the first pass does most of the work and the second lands near
-    whatever ceiling the game's zoom-out actually has. A third application was never
-    measured to do anything further, so `repeats` stops at the number that was tested,
-    not at a round number.
+    the map (see `fsm.Switching._zoom`).
+
+    The original values came from a brief that measured only a "map-region diff" - i.e.
+    that the screen CHANGED. That is not evidence of zooming out: a pan changes the screen
+    too, and so does zooming in. Run live, the gesture at those values produced no visible
+    change in map scale at all, and the bot played zoomed in for whole sessions while the
+    trace showed both drags firing exactly as configured.
+
+    Re-measured on the device against side-by-side captures, which is the only check that
+    can tell the three apart:
+
+    - Direction UP is correct. Two drags of 1050px on a 2340px screen visibly shrank the
+      trainer and widened the view; five drags widened it much further.
+    - The old distance is what was wrong. 370px (15.8% of screen height) moved the scale
+      so little it could not be told from the map's own animation, which is exactly why a
+      diff-based measurement mistook it for working.
+    - `input touchscreen swipe` - the source qualifier the v1 code used - was tried at the
+      old distance and changed nothing, so the qualifier was never the missing piece.
+
+    Not fixable by pinching instead: `input` has no multi-pointer command (`motionevent`
+    takes one pointer), two concurrent `input swipe` processes do not pinch (they are read
+    as two separate gestures and land on whatever UI is under them), and `sendevent` is
+    "Permission denied" under SELinux Enforcing even though shell holds group `input`.
+    The one-finger gesture is the only one available.
+
+    `repeats` stays at 2. Zooming out further is not free: measured at a very wide zoom the
+    detector found no stops or gyms at all, so there is a ceiling past which the bot sees
+    LESS. Two applications of the corrected distance is the setting that was checked
+    against detector yield (Pokemon per frame went 1.0 -> 1.5, stops unchanged) rather than
+    the widest view obtainable.
     """
 
     #: (0.5, 0.5) is screen centre in EITHER orientation and resolution, unlike the
@@ -369,15 +391,17 @@ class ZoomOut:
     #: read on - normalizing to the centre is what makes this gesture resolution
     #: independent, exactly like every other coordinate in the system (see effects.py).
     center_x: float = 0.5
-    center_y: float = 0.5
-    #: Normalized drag distance. Measured: dragging UP 370px on a 2340px-tall screen.
-    #: Expressed as a fraction of screen height so it survives any capture resolution,
-    #: the same reasoning `Cooldowns.radius_frac` uses for screen width.
-    drag_frac: float = 370.0 / 2340.0
-    #: The `input swipe` duration, in ms, used for the drag half of the gesture. 400ms is
-    #: what was actually run on the device for both applications that produced the
-    #: measurements above; untested durations are not assumed to behave the same.
-    duration_ms: int = 400
+    #: Starts BELOW centre so a drag this long still ends on screen: 0.60 - 0.449 = 0.151.
+    center_y: float = 0.60
+    #: Normalized drag distance. Measured: dragging UP 1050px on a 2340px-tall screen is
+    #: what visibly changes the map's scale; the previous 370px did not. Expressed as a
+    #: fraction of screen height so it survives any capture resolution, the same reasoning
+    #: `Cooldowns.radius_frac` uses for screen width.
+    drag_frac: float = 1050.0 / 2340.0
+    #: The `input swipe` duration, in ms, used for the drag half of the gesture. 700ms is
+    #: what was actually run on the device for the drags that visibly zoomed out; untested
+    #: durations are not assumed to behave the same.
+    duration_ms: int = 700
     #: Two applications were measured; a third was not. Stopping at the tested number
     #: rather than guessing further reductions exist past what was actually observed.
     repeats: int = 2
