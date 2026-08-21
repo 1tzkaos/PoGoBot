@@ -538,9 +538,10 @@ class Runner:
         check on the common path.
 
         Both `self.cfg` and `ctx.cfg` are replaced: the FSM reads `ctx.cfg` (see
-        `pick_target` and `desired_state` for the two `fight_rockets` sites), while the
-        runner's own logging reads `self.cfg`, and one of them holding a stale answer is
-        how "it says rockets are off but it keeps fighting them" happens.
+        `pick_target`, `desired_state`'s ROCKET gate, and `rocket_exit_screen` for the
+        three `fight_rockets` sites), while the runner's own logging reads `self.cfg`, and
+        one of them holding a stale answer is how "it says rockets are off but it keeps
+        fighting them" happens.
         """
         account = self.stats.account
         if account == self._profile_account:
