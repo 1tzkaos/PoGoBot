@@ -582,6 +582,42 @@ gesture, so `balls thrown` and `targets tapped` are decisions rather than action
 sessions are written with `"dry_run": true` and excluded from the lifetime totals, which
 report how many were left out.
 
+## Per-account settings
+
+Accounts are not interchangeable. One may be worth fighting Team GO Rocket on and another
+not, and a command-line flag cannot say "different for that account": `--no-rockets`
+belongs to the invocation, so before this it followed the bot across every switch.
+
+Create `accounts.json` in the repo root (copy `accounts.example.json`):
+
+```json
+{
+  "default":    { "fight_rockets": true },
+  "TrainerOne": { "fight_rockets": true },
+  "TrainerTwo": { "fight_rockets": false }
+}
+```
+
+Names are the ones PGSharp shows in its account panel, which are also the names in the
+startup log (`logged in as ...`) and in your session stats. The `default` entry covers
+every account without one of its own, including a session that never managed to read the
+overlay. Anything an account does not set falls through to whatever the run itself was
+started with, so a file that only names one account leaves the rest exactly as they were.
+
+Settings are re-applied whenever the logged-in account changes, so a switch mid-run picks
+up the new account's answers rather than carrying the old one's across.
+
+| key | meaning |
+|---|---|
+| `fight_rockets` | engage Team GO Rocket on this account |
+
+The file is optional: no file means every account uses the run's own settings. A malformed
+file is reported and ignored rather than being fatal, and an unrecognised key is called out
+by name at startup - in a hand-edited file a typo like `fight_rocket` would otherwise look
+exactly like leaving it at the default.
+
+Point elsewhere with `--accounts-file PATH`.
+
 ## Configuration
 
 | flag | default | meaning |
@@ -607,6 +643,7 @@ report how many were left out.
 | `--infer-fps` | `8.0` | inference rate |
 | `--trace PATH` | `logs/trace.jsonl` | one JSON record per tick |
 | `--tui` | off | live terminal dashboard instead of scrolling log lines |
+| `--accounts-file PATH` | `accounts.json` | per-account settings (see above) |
 | `--pause-file PATH` | `logs/PAUSE` | while this file exists the bot sends no input |
 | `--collect-encounters DIR` | – | save frames around each encounter ending, for labelling a catch detector |
 | `--stats-file PATH` | `logs/sessions.jsonl` | append each finished session, report lifetime totals |
