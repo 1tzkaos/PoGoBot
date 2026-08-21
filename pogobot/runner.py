@@ -23,7 +23,7 @@ from .effects import (
     BotState,
     ClearSpatialMemory,
     Cooldown,
-    DoubleTapDrag,
+    Pinch,
     Effect,
     Halt,
     IntentOutcome,
@@ -999,7 +999,7 @@ class Runner:
                         self.ctx.throws_this_encounter += 1
                     elif budget == "tap" and isinstance(e, Tap):
                         self.stats.targets_tapped += 1
-                    elif budget == "zoom" and isinstance(e, DoubleTapDrag):
+                    elif budget == "zoom" and isinstance(e, Pinch):
                         # Counted here, not by a self-reported SetFlag from _zoom: the
                         # handler is pure and cannot know whether the actuator actually
                         # accepted this gesture (rate-limit / queue backpressure can
@@ -1076,7 +1076,7 @@ class Runner:
                                     "confirmed map)", e.package, self.ctx.app_restarts)
                     self.ctx.last_action[budget] = self.ctx.now
                     self.ctx.taps_in_state += 1
-                    if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag, RestartApp)):
+                    if isinstance(e, (Tap, Swipe, Back, Pinch, RestartApp)):
                         self.ctx.settle_until = self.ctx.now + self.cfg.timings.ui_settle
                     if self.ctx.state in (BotState.SWITCHING, BotState.PREFLIGHT):
                         # The launcher tap TOGGLES the overlay, so a second decision taken

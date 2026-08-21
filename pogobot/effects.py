@@ -130,6 +130,39 @@ class RestartApp:
 
 
 @dataclass(frozen=True)
+class Pinch:
+    """A real two-finger pinch, which `adb shell input` cannot express.
+
+    Zooming the map is the one thing this bot needs that a single pointer cannot do:
+    `input swipe` and `input motionevent` each take one x/y, and Pokemon GO's map zoom is a
+    pinch. The one-finger double-tap-drag the game documents for humans was measured on the
+    device at every distance, duration and anchor and never once changed the map's scale
+    when injected; so were `input touchscreen swipe`, two concurrent swipes,
+    `KEYCODE_ZOOM_OUT` and a trackball roll. Writing the events directly is refused -
+    `sendevent` on /dev/input/eventN is Permission denied under SELinux even though shell
+    sits in group `input`, and this is a `user` build with no `su` and `adb root` refused.
+
+    So this goes through the framework instead, the way scrcpy does: `app_process` as the
+    shell uid, calling `InputManager.injectInputEvent` with a genuine two-pointer
+    MotionEvent (see tools/pinch/). The shell uid already holds INJECT_EVENTS, which is
+    what makes scrcpy able to drive the phone at all.
+
+    Gaps are fractions of screen HEIGHT, like every other distance in this system, so the
+    gesture survives any capture resolution. `start_gap > end_gap` brings the fingers
+    together, which zooms OUT.
+    """
+
+    x: float
+    y: float
+    start_gap: float
+    end_gap: float
+    reason: str
+    steps: int = 25
+    duration_ms: int = 700
+    budget: str = "zoom"
+
+
+@dataclass(frozen=True)
 class Transition:
     to: BotState
     outcome: IntentOutcome
@@ -183,10 +216,10 @@ class Halt:
     reason: str
 
 
-Effect = Union[Tap, Swipe, Back, DoubleTapDrag, RestartApp, Transition, SetIntent,
+Effect = Union[Tap, Swipe, Back, DoubleTapDrag, Pinch, RestartApp, Transition, SetIntent,
                SetFlag, Cooldown, ClearSpatialMemory, Note, Halt]
 
-ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag, RestartApp)
+ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag, Pinch, RestartApp)
 
 
 def is_actuation(effect: Effect) -> bool:
