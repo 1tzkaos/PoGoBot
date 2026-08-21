@@ -1684,7 +1684,27 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     if obs.on_map and ctx.state in (BotState.POPUP, BotState.RECOVERING, BotState.BOOT,
                                     BotState.ENCOUNTER, BotState.ROCKET, BotState.POKESTOP):
         return BotState.SCANNING
-    if obs.in_overlay and ctx.state in (BotState.SCANNING, BotState.TARGETING):
+    # ROCKET joins these two only once the fight is demonstrably over. A Rocket screen
+    # carries its own X, which is why POPUP must never outrank ROCKET while one is up -
+    # closing the grunt dialogue instead of fighting it is the failure the ordering at the
+    # top of this function exists to prevent. But the fight ENDS on screens that are not
+    # Rocket screens and that `Rocket.step` has nothing to say about: it taps an
+    # affirmative pill if one is present, advances dialogue while the classifier still
+    # reads Rocket, and otherwise returns nothing at all. The reward and "NEW LEVEL
+    # UNLOCKS" screens that follow a fight are neither, so with ROCKET missing from this
+    # branch a located X sat unpressed until the 150s handler timeout expired.
+    #
+    # Measured live, one episode: 1188 frames - 148s - in ROCKET on screen=Menu@0.857 with
+    # `close=True` the whole way, emitting not one effect, before `Rocket.on_timeout`
+    # handed it to RECOVERING, which pressed the very button that had been located all
+    # along. A live fight cannot reach this branch at all: the rocket-hold above returns
+    # None while `rocket_recent` and off-map, and an on-map frame is taken by the branch
+    # before this one. The `not rocket_recent` term is therefore belt-and-braces -
+    # deleting it alone leaves the whole suite green - and is kept only so the
+    # precondition is stated where the branch is read, and so loosening that hold cannot
+    # silently turn this into a preemption of a fight in progress.
+    if obs.in_overlay and (ctx.state in (BotState.SCANNING, BotState.TARGETING)
+                           or (ctx.state is BotState.ROCKET and not rocket_recent)):
         return BotState.POPUP
     return None
 

@@ -380,3 +380,49 @@ def test_reward_encounter_is_taken_once_rocket_screens_stop():
             last_rocket_ts=100.0 - DEFAULT.timings.rocket_hold - 1)
     t = kinds(fsm.step(obs(screen="PokemonEncounter", conf=0.99), c), Transition)
     assert t and t[0].to is BotState.ENCOUNTER
+
+
+# --- a finished Rocket fight left a located X unpressed for 148s --------------
+def _post_fight():
+    """The screen a Rocket fight ENDS on: a closable overlay that is not a Rocket screen.
+
+    `screen="Menu"` rather than the factory's default, because `obs(on_map=False)` alone
+    does not mean off-map - the default `screen="Overworld"` at conf 0.99 satisfies
+    `Observation.on_map` on its own and the overlay would never be believed.
+    """
+    return obs(screen="Menu", conf=0.86, x_button=True, close_xy=(0.50, 0.885))
+
+
+def test_a_finished_rocket_fight_presses_the_x_it_can_already_see():
+    """Measured live: 1188 frames - 148s - in ROCKET on screen=Menu@0.857 with the close
+    button located the whole way, emitting not one effect, until the 150s handler timeout
+    handed it to RECOVERING, which pressed exactly that button. `Rocket.step` has nothing
+    to say about a post-fight reward screen, and ROCKET was missing from the branch that
+    routes a located X to POPUP."""
+    c = ctx(BotState.ROCKET, now=100.0,
+            last_rocket_ts=100.0 - DEFAULT.timings.rocket_hold - 1.0)
+    assert fsm.desired_state(_post_fight(), c) is BotState.POPUP
+
+
+def test_a_live_rocket_fight_is_still_never_preempted_by_the_overlay():
+    """The property that must not regress: a Rocket screen carries its own X, so POPUP
+    outranking ROCKET would close the grunt dialogue instead of fighting it.
+
+    What ENFORCES it is the rocket-hold branch earlier in `desired_state`, which returns
+    None outright while `rocket_recent` and off-map - the overlay branch is never reached.
+    The `not rocket_recent` term in that branch is therefore belt-and-braces, and this
+    test says so rather than pretending to kill it: deleting that term alone leaves every
+    test here green, because the hold above already answered. It is kept because the term
+    is free and states the precondition locally, so loosening the hold cannot silently
+    turn the overlay branch into a preemption of a live fight.
+    """
+    c = ctx(BotState.ROCKET, now=100.0, last_rocket_ts=100.0)
+    assert fsm.desired_state(_post_fight(), c) is None, "the rocket hold must answer first"
+
+
+def test_the_map_still_outranks_a_finished_fight():
+    """Unchanged precedence: the map coming back is still what ends ROCKET, and it is
+    checked before the overlay branch."""
+    c = ctx(BotState.ROCKET, now=100.0,
+            last_rocket_ts=100.0 - DEFAULT.timings.rocket_hold - 1.0)
+    assert fsm.desired_state(obs(on_map=True, x_button=True), c) is BotState.SCANNING
