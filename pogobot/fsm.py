@@ -192,12 +192,28 @@ class Context:
         switch involved, `switch_exit_ts` stays at its 0.0 default and this reduces to
         `last_map_ts` exactly.
 
+        `app_restart_ts` earns the same credit, for the same reason and a measured
+        failure. A relaunch this handler asked for cannot show a map while the game is
+        cold-starting, which `Timings.app_restart_grace` puts at tens of seconds, and
+        `Recovering._restarting` correctly holds the whole ladder silent for it. Without
+        the credit, staleness kept counting from BEFORE the restart, so the run was
+        already past `stuck_watchdog` the instant the relaunch began - and the runner's
+        frame guard does not measure a run of missing frames, it asks this property and
+        fires on the first `frame is None` it happens to read. Measured on the device: a
+        restart at 21:42:49, the FSM still correctly logging "waiting out the app
+        restart" at 21:42:56, and HALTED "no usable frames" at 21:43:01 - twelve seconds
+        into a cold start the bot had itself decided to wait out, with a second restart
+        still unspent. The bound does not weaken: restarts are capped by
+        `Config.max_app_restarts`, `app_restart_ts` is cleared the moment a map is
+        confirmed, and once the budget is gone staleness simply measures from the last
+        relaunch, so the halt still arrives one `stuck_watchdog` later.
+
         The single property exists so every `stuck_watchdog` consumer - the pure FSM
         check in `Recovering.on_timeout` and the runner's own "no usable frames" guard
         in its read loop - shares one definition of staleness instead of two that can
         drift apart.
         """
-        return max(self.last_map_ts, self.switch_exit_ts)
+        return max(self.last_map_ts, self.switch_exit_ts, self.app_restart_ts)
 
     def ready(self, budget: str, gap: float, ignore_settle: bool = False) -> bool:
         """True when `budget` has been idle for `gap` and the UI is not mid-transition.
