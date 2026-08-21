@@ -1505,11 +1505,23 @@ class Recovering(Handler):
         refresh corrects the view.
         """
         v = ctx.accounts
-        if v is None or not v.available or not v.panel_open or v.close_norm is None:
+        if v is None or not v.available:
+            return None
+        # Two different PGSharp pages can be in front of us, with different close controls
+        # and different ids. The accounts panel is the one this rung was written for. The
+        # SETTINGS page is the other, and it wedged a live run the same way: its close
+        # control is `hl_st_close` ("OK", top-left), so `close_norm` was None,
+        # `panel_open` was False, and this returned None while the optical locator found
+        # nothing and BACK did not dismiss it either. Its coordinate is kept in its own
+        # field rather than folded into `close_norm`, because `panel_open`/`close_norm`
+        # mean "the accounts panel" to `Switching`, which steers by them.
+        target = (v.close_norm if v.panel_open and v.close_norm is not None
+                  else v.settings_close_norm)
+        if target is None:
             return None
         if ctx.taps_in_state != 0 or not ctx.ready("close", ctx.cfg.timings.close_menu):
             return []
-        return [Tap(*v.close_norm,
+        return [Tap(*target,
                     "recover: close the PGSharp panel located in the view tree",
                     budget="close")]
 

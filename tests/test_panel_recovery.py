@@ -556,3 +556,54 @@ def test_the_restart_counters_survive_a_state_entry():
     r.ctx.app_restarts, r.ctx.app_restart_ts = 2, 1_234.0
     r.enter_state(BotState.RECOVERING, IntentOutcome.CARRIED, "again")
     assert (r.ctx.app_restarts, r.ctx.app_restart_ts) == (2, 1_234.0)
+
+
+# ------------------------------------------------- the PGSharp SETTINGS page
+
+def _settings_view():
+    """The real settings page, parsed from a committed dump of the wedged phone."""
+    import pathlib
+    from pogobot.accounts import parse_dump
+    xml = (pathlib.Path(__file__).resolve().parent / "fixtures" / "uiautomator"
+           / "pgsharp_settings.xml").read_text(encoding="utf-8")
+    return parse_dump(xml, (1080, 2340))
+
+
+def test_the_settings_page_is_not_mistaken_for_the_accounts_panel():
+    """`panel_open` and `close_norm` mean the ACCOUNTS panel, and `Switching` steers by
+    them - it looks for rows and taps login buttons. The settings page must not answer
+    either question, or a switch would believe the roster was on screen."""
+    v = _settings_view()
+    assert v.available
+    assert not v.panel_open
+    assert v.close_norm is None
+    assert v.rows == ()
+
+
+def test_the_settings_page_close_control_is_located():
+    """Its own id, `hl_st_close` - the "OK" top-left. Observed on the device at bounds
+    [30,167][197,311]; the centre of that rect is what cleared the page by hand."""
+    v = _settings_view()
+    assert v.settings_close_norm is not None
+    x, y = v.settings_close_norm
+    assert (round(x * 1080), round(y * 2340)) == (114, 239)   # rect centre, (30+197)/2
+
+
+def test_recovering_presses_the_settings_page_close():
+    """The wedge this fixes: with only `hl_page_close` known, this rung returned None on
+    the settings page while the optical locator found nothing and BACK did not dismiss it
+    either."""
+    c = recovering(_settings_view(), now=10_000.0, last_map_ts=0.0)
+    taps = [e for e in fsm.step(PANEL_FRAME, c) if isinstance(e, Tap)]
+    assert taps, "nothing was pressed on the settings page"
+    assert (taps[0].x, taps[0].y) == _settings_view().settings_close_norm
+
+
+def test_the_accounts_panel_still_wins_when_both_could_answer():
+    """The accounts panel keeps priority: it is the page `Switching` also drives, and its
+    control is the one the rest of this file measures."""
+    from dataclasses import replace
+    v = replace(_open_panel(), settings_close_norm=(0.9, 0.9))
+    c = recovering(v, now=10_000.0, last_map_ts=0.0)
+    taps = [e for e in fsm.step(PANEL_FRAME, c) if isinstance(e, Tap)]
+    assert taps and (taps[0].x, taps[0].y) == CLOSE_NORM

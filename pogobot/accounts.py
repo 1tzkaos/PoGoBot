@@ -54,6 +54,12 @@ ID_LOGIN = "hl_account_item_logicon"
 ID_DELETE = "hl_account_item_delete"
 ID_TAB_ACCOUNTS = "hl_cdhist_cat_accounts"
 ID_CLOSE = "hl_page_close"
+#: The PGSharp SETTINGS page's own close control - the "OK" top-left. A different page
+#: from the accounts panel and a different id, which is exactly why the recovery ladder
+#: could not escape it: `close_norm` stayed None, `panel_open` stayed False, and
+#: `fsm.Recovering._panel_close` had nothing to tap. Observed live with the bot wedged on
+#: it, text="OK", bounds [30,167][197,311].
+ID_SETTINGS_CLOSE = "hl_st_close"
 ID_COOLDOWN_TEXT = "hl_cd_text"
 #: The icon ImageView inside the star widget - see the module docstring. Located the
 #: same way ID_COOLDOWN_TEXT is: walk up from this id to the nearest clickable ancestor.
@@ -102,6 +108,13 @@ class AccountView:
     launcher_rect_norm: Optional[tuple[float, float, float, float]] = None
     accounts_tab_norm: Optional[tuple[float, float]] = None
     close_norm: Optional[tuple[float, float]] = None
+    #: The settings page's close control, kept SEPARATE from `close_norm` on purpose.
+    #: `close_norm` and `panel_open` mean "the accounts panel", and `Switching` steers by
+    #: them - it looks for account rows and taps login buttons. Folding the settings page
+    #: into those would have a switch believe the roster was on screen when it is not.
+    #: The recovery ladder wants the weaker question, "is SOME PGSharp page in front of
+    #: us and where is its close control", and that is this field.
+    settings_close_norm: Optional[tuple[float, float]] = None
     available: bool = False
     panel_open: bool = False
     #: The star widget's own current position - see ID_STAR_ICON. None means "not found
@@ -263,6 +276,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         return None
 
     launcher = accounts_tab = close = star = None
+    settings_close = None
     launcher_rect = star_rect = None
     autowalk_menu = None
     autowalk_icon_rect = None
@@ -273,6 +287,8 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
             accounts_tab = _centre_norm(n, w, h)
         elif _ends_with(n, ID_CLOSE):
             close = _centre_norm(n, w, h)
+        elif _ends_with(n, ID_SETTINGS_CLOSE):
+            settings_close = _centre_norm(n, w, h)
         elif _ends_with(n, ID_COOLDOWN_TEXT):
             anc = _clickable_ancestor(n)
             if anc is not None:
@@ -342,6 +358,7 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         launcher_rect_norm=launcher_rect,
         accounts_tab_norm=accounts_tab,
         close_norm=close,
+        settings_close_norm=settings_close,
         available=True,
         # Account rows are only ever in the tree while the panel is open, so either
         # signal alone proves it. Hanging this on `hl_page_close` by itself made one

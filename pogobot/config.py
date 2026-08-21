@@ -50,7 +50,28 @@ class Thresholds:
 
     map_ball_red: float = 0.10
     map_bino_orange: float = 0.03
-    x_button_mint: float = 0.035
+    #: Mint fraction of `Rois.bottom_button` needed to believe a close X is on screen.
+    #: This is what `Observation.in_overlay` rides on, and so what routes a closable
+    #: screen to POPUP at all - `find_close_button` locating the X is not enough on its
+    #: own.
+    #:
+    #: Lowered from 0.035 after a live wedge on a Gym screen: the X was located at
+    #: (0.500, 0.890) the whole time, but the ROI measured mint=0.0321, so `x_button` read
+    #: False, `in_overlay` stayed False, and nothing ever routed it to POPUP. Measured at
+    #: the resolution the bot actually runs (scrcpy scales the long side to `max_size`, so
+    #: a 1080x2340 phone streams at 590x1280); the same frame reads 0.0296 at native
+    #: resolution, which is why the fixture is committed at stream size.
+    #:
+    #: Swept over the 235-frame labelled corpus, counting frames that newly read True:
+    #:   0.035  ->  baseline                                     gym screen: MISSED
+    #:   0.032  ->  identical in every class                     gym screen: MISSED
+    #:   0.030  ->  identical in every class                     gym screen: found  <- chosen
+    #:   0.028  ->  Pokestop 1/4 -> 2/4                          gym screen: found
+    #: Nothing changes anywhere down to 0.030 - notably PokemonEncounter stays 0/53, which
+    #: matters because a true `x_button` VETOES `encounter_signal`, so a false one here
+    #: would suppress encounters rather than merely add a stray tap. 0.028 was left on the
+    #: table because it is the first value that moves any count at all.
+    x_button_mint: float = 0.030
     x_button_teal: float = 0.015
     encounter_ball: float = 0.020
     encounter_flee_white: float = 0.010
