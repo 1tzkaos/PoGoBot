@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import profiles
 from .config import BASE_DIR, Config
 
 #: `--reset-spins` with no value means "every account" - the same thing a bare
@@ -75,6 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="log into another account when this one exhausts its 24h spin cap")
     p.add_argument("--switch-every", type=float, default=None, metavar="MINUTES",
                    help="rotate accounts every MINUTES regardless of state")
+    p.add_argument("--accounts-file", type=Path, default=BASE_DIR / "accounts.json",
+                   help="per-account settings, e.g. Team GO Rocket on for one account and "
+                        "off for another (JSON; optional - see accounts.example.json)")
     p.add_argument("--pause-file", type=Path, default=BASE_DIR / "logs" / "PAUSE",
                    help="while this file exists the bot perceives but sends no input; "
                         "also toggled by SIGUSR1, or the p key on the preview window")
@@ -459,12 +463,14 @@ def main(argv=None) -> int:
                                       lifetime=total if stats_path else None,
                                       quota=quota, pause_file=a.pause_file)
 
+    account_profiles = profiles.load_profiles(a.accounts_file)
+    log.info("%s", profiles.describe(account_profiles))
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
                     trace_path=trace, display=not a.no_display, stats_path=stats_path,
                     dashboard=dashboard, encounter_dump=a.collect_encounters,
                     dialogue_dump=a.collect_dialogues,
                     quota=quota, pause_file=a.pause_file, tree_reader=tree_reader,
-                    roster=roster)
+                    roster=roster, account_profiles=account_profiles)
     if dashboard is None:
         # No dashboard means Runner kept the SessionStats it built itself; name it here
         # so the very first session's spins are booked under the identified account rather

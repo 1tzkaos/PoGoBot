@@ -1,0 +1,11 @@
+{
+  "default": {
+    "fight_rockets": true
+  },
+  "TrainerOne": {
+    "fight_rockets": true
+  },
+  "TrainerTwo": {
+    "fight_rockets": false
+  }
+}

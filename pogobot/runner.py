@@ -38,6 +38,7 @@ from .effects import (
 )
 from .frames import Frame, FrameSource
 from .observation import Observation, Tristate
+from . import profiles
 from .quota import SpinQuota
 from .stats import SessionStats, append_session
 
@@ -109,6 +110,10 @@ SWITCH_BACKOFF_BASE = 600.0
 # catching anything - to re-test a hypothesis that has already been refuted twice.
 SWITCH_MAX_FAILURES = 3
 
+#: "no profile applied yet", distinct from an account of None (which is a real state: a
+#: session that never learned its name still gets the `default` entry).
+_UNSET = object()
+
 # States whose per-visit bookkeeping must reset on entry.
 _RESET_ON_ENTRY = ("spun_disc", "taps_in_state", "switch_zoom_reps", "switch_goplus_attempts",
                    "switch_clear_presses", "star_drags")
@@ -122,8 +127,18 @@ class Runner:
                  dialogue_dump: Optional[Path] = None,
                  quota: Optional[SpinQuota] = None,
                  pause_file: Optional[Path] = None, tree_reader=None,
-                 roster: tuple[str, ...] = ()):
+                 roster: tuple[str, ...] = (),
+                 account_profiles: Optional[dict] = None):
         self.cfg = cfg
+        #: The run's own settings, before any per-account override. Overrides are applied
+        #: ON TOP of this rather than on top of each other, so switching A -> B -> A gives
+        #: A exactly what it had the first time instead of accumulating B's answers.
+        self._base_cfg = cfg
+        self.account_profiles = dict(account_profiles or {})
+        #: Which account `self.cfg` currently reflects. Deliberately a sentinel rather than
+        #: None, because None is a real account state ("we never learned who we are") and
+        #: must still get the defaults applied once.
+        self._profile_account: object = _UNSET
         self.source = source
         self.actuator = actuator
         self.perceptor = perceptor
@@ -512,6 +527,34 @@ class Runner:
                     "targeting PokeStops only until %d are collected (or %.0fs)",
                     cfg.restock_after_failures, cfg.restock_target_stops,
                     cfg.restock_max_seconds)
+
+    def _apply_account_profile(self) -> None:
+        """Point `cfg` at the settings for whoever we are logged in as.
+
+        Checked every tick rather than hooked onto the places the account changes, because
+        there are several - startup, a confirmed switch, and a failed one that hands back
+        whatever the overlay last named - and a hook missing from one of them would be a
+        silently wrong setting rather than a crash. The comparison is a string identity
+        check on the common path.
+
+        Both `self.cfg` and `ctx.cfg` are replaced: the FSM reads `ctx.cfg` (see
+        `pick_target` and `desired_state` for the two `fight_rockets` sites), while the
+        runner's own logging reads `self.cfg`, and one of them holding a stale answer is
+        how "it says rockets are off but it keeps fighting them" happens.
+        """
+        account = self.stats.account
+        if account == self._profile_account:
+            return
+        self._profile_account = account
+        settings = profiles.settings_for(self.account_profiles, account)
+        new = self._base_cfg.scaled(**settings) if settings else self._base_cfg
+        changed = {k: v for k, v in settings.items()
+                   if getattr(self._base_cfg, k) != v}
+        self.cfg = new
+        self.ctx.cfg = new
+        if changed:
+            log.info("settings for %s: %s", account or "an unidentified account",
+                     ", ".join(f"{k}={str(v).lower()}" for k, v in sorted(changed.items())))
 
     def _update_restock(self) -> None:
         """Leave restock mode once the bag is plausibly refilled, or the budget expires."""
@@ -1294,6 +1337,7 @@ class Runner:
                 # have run. It cannot delay a switch by more than its own bounded budget:
                 # `_maybe_switch` refuses any state but SCANNING, so the trigger simply
                 # stays due until the preflight hands the screen back.
+                self._apply_account_profile()
                 self._refresh_accounts(real)
                 self._maybe_preflight(obs)
                 self._maybe_switch(obs)
