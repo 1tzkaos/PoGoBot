@@ -25,16 +25,24 @@ from __future__ import annotations
 import queue
 import re
 import subprocess
+from pathlib import Path
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Mapping, Optional, Sequence
 
-from .effects import Back, DoubleTapDrag, Effect, RestartApp, Swipe, Tap, is_actuation
+from .effects import (Back, DoubleTapDrag, Effect, Pinch, RestartApp, Swipe, Tap,
+                      is_actuation)
 from .observation import Tristate
 
 DEFAULT_RESOLUTION = (1080, 2340)
+
+#: Where the pinch injector lives on the device. /data/local/tmp is the one directory the
+#: shell uid can both write and execute from, and is where scrcpy puts its own server jar
+#: for the same reason.
+_PINCH_REMOTE = "/data/local/tmp/pogobot-pinch.dex"
+_PINCH_LOCAL = Path(__file__).resolve().parent / "vendor" / "pinch.dex"
 
 MIN_INTERVAL = 0.25
 """Per-budget floor, in seconds. This is a safety net, not the schedule: the intended
@@ -194,6 +202,27 @@ class Actuator:
         py = int(round(min(max(y_norm, 0.0), 1.0) * (h - 1)))
         return min(max(px, 0), w - 1), min(max(py, 0), h - 1)
 
+    def _ensure_pinch(self) -> None:
+        """Put the injector on the device once per process.
+
+        Failure is deliberately not raised: the caller is mid-render, and a zoom that
+        cannot be pushed should cost the run a zoom, not the run. The command that follows
+        will fail on its own and be counted like any other failed actuation.
+        """
+        if getattr(self, "_pinch_pushed", False) or self.dry_run:
+            return
+        self._pinch_pushed = True
+        try:
+            subprocess.run(_adb_argv(self.adb, self.serial, "push",
+                                     str(_PINCH_LOCAL), _PINCH_REMOTE),
+                           capture_output=True, timeout=self.timeout)
+        except Exception:
+            # Swallowed on purpose, and this module has no logger by design: the caller is
+            # mid-render and the command that follows will fail on its own, be counted in
+            # `_counts["failed"]` like any other refused actuation, and show up in
+            # `stats()`. Raising here would turn a missing zoom into a dead run.
+            pass
+
     def render(self, effect: Effect) -> Optional[Command]:
         """Effect -> Command, or None if the effect is not an actuation."""
         if isinstance(effect, Tap):
@@ -211,6 +240,19 @@ class Actuator:
         if isinstance(effect, Back):
             return Command(_adb_argv(self.adb, self.serial, "shell", "input", "keyevent", "4"),
                            effect.budget, effect.reason, None, _CLOCK())
+        if isinstance(effect, Pinch):
+            # Pushed lazily rather than at construction: a dry run, a replay and every unit
+            # test build an Actuator, and none of them should touch a device. The file is
+            # 3.3KB and the push is once per process.
+            self._ensure_pinch()
+            w, h = self.screen_wh
+            px, py = self.to_device(effect.x, effect.y)
+            g0 = max(1, int(effect.start_gap * h))
+            g1 = max(1, int(effect.end_gap * h))
+            shell_cmd = (f"CLASSPATH={_PINCH_REMOTE} app_process / pinch.Pinch "
+                         f"{px} {py} {g0} {g1} {int(effect.steps)} {int(effect.duration_ms)}")
+            return Command(_adb_argv(self.adb, self.serial, "shell", shell_cmd),
+                           effect.budget, effect.reason, (px, py), _CLOCK())
         if isinstance(effect, DoubleTapDrag):
             # Measured on the device: multi-touch is unavailable (sendevent blocked by
             # SELinux, `input motionevent` is single-pointer, two concurrent `input

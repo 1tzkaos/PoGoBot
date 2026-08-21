@@ -353,57 +353,45 @@ class Reach:
 
 @dataclass(frozen=True)
 class ZoomOut:
-    """The one-finger zoom-out gesture fired once a confirmed account switch is back on
-    the map (see `fsm.Switching._zoom`).
+    """The map zoom-out performed after a confirmed switch and at startup (see
+    `fsm.Switching._zoom`). It is a real two-finger pinch - see `effects.Pinch` and
+    tools/pinch/ for why nothing else works.
 
-    The original values came from a brief that measured only a "map-region diff" - i.e.
-    that the screen CHANGED. That is not evidence of zooming out: a pan changes the screen
-    too, and so does zooming in. Run live, the gesture at those values produced no visible
-    change in map scale at all, and the bot played zoomed in for whole sessions while the
-    trace showed both drags firing exactly as configured.
+    Every number here is measured on the device.
 
-    Re-measured on the device against side-by-side captures, which is the only check that
-    can tell the three apart:
+    The gesture: two fingers on a vertical line through (`center_x`, `center_y`), starting
+    `start_gap` apart and closing to `end_gap`. Fingers together zooms out.
 
-    - Direction UP is correct. Two drags of 1050px on a 2340px screen visibly shrank the
-      trainer and widened the view; five drags widened it much further.
-    - The old distance is what was wrong. 370px (15.8% of screen height) moved the scale
-      so little it could not be told from the map's own animation, which is exactly why a
-      diff-based measurement mistook it for working.
-    - `input touchscreen swipe` - the source qualifier the v1 code used - was tried at the
-      old distance and changed nothing, so the qualifier was never the missing piece.
+    `repeats` is 2 because that is where the bot SEES the most, which is not the same as
+    the widest view. Detector yield per frame, pinching out from the game's own post-login
+    zoom:
 
-    Not fixable by pinching instead: `input` has no multi-pointer command (`motionevent`
-    takes one pointer), two concurrent `input swipe` processes do not pinch (they are read
-    as two separate gestures and land on whatever UI is under them), and `sendevent` is
-    "Permission denied" under SELinux Enforcing even though shell holds group `input`.
-    The one-finger gesture is the only one available.
+        zoomed in (baseline)   0.2 stops/gyms
+        after 1 pinch          0.8
+        after 2 pinches        1.2      <- chosen
+        after 3 pinches        0.2
+        after 4 pinches        0.2
 
-    `repeats` stays at 2. Zooming out further is not free: measured at a very wide zoom the
-    detector found no stops or gyms at all, so there is a ceiling past which the bot sees
-    LESS. Two applications of the corrected distance is the setting that was checked
-    against detector yield (Pokemon per frame went 1.0 -> 1.5, stops unchanged) rather than
-    the widest view obtainable.
+    Past two the map is wide enough that stops and gyms fall below the size the detector
+    was trained on, so zooming further makes the bot blind rather than far-sighted. The
+    earlier one-finger gesture this replaced was justified by a "map-region diff" - i.e.
+    that the screen CHANGED, which a pan and a zoom IN also do - and measured against
+    side-by-side captures it never altered the map's scale at all.
     """
 
-    #: (0.5, 0.5) is screen centre in EITHER orientation and resolution, unlike the
-    #: measured device pixel (540, 1170) which is specific to the 1080x2340 screen it was
-    #: read on - normalizing to the centre is what makes this gesture resolution
-    #: independent, exactly like every other coordinate in the system (see effects.py).
+    #: (0.5, 0.513) is centre-ish, device (540, 1200) on 1080x2340 - the point the pinch
+    #: closes toward. Normalized so the gesture survives any capture resolution.
     center_x: float = 0.5
-    #: Starts BELOW centre so a drag this long still ends on screen: 0.60 - 0.449 = 0.151.
-    center_y: float = 0.60
-    #: Normalized drag distance. Measured: dragging UP 1050px on a 2340px-tall screen is
-    #: what visibly changes the map's scale; the previous 370px did not. Expressed as a
-    #: fraction of screen height so it survives any capture resolution, the same reasoning
-    #: `Cooldowns.radius_frac` uses for screen width.
-    drag_frac: float = 1050.0 / 2340.0
-    #: The `input swipe` duration, in ms, used for the drag half of the gesture. 700ms is
-    #: what was actually run on the device for the drags that visibly zoomed out; untested
-    #: durations are not assumed to behave the same.
+    center_y: float = 1200.0 / 2340.0
+    #: Finger separation at the start and end, as fractions of screen HEIGHT: device 1000px
+    #: closing to 150px on a 2340px screen.
+    start_gap: float = 1000.0 / 2340.0
+    end_gap: float = 150.0 / 2340.0
+    #: Intermediate MOVE events. Too few and the game reads a jump rather than a pinch.
+    steps: int = 25
+    #: Wall-clock length of the gesture.
     duration_ms: int = 700
-    #: Two applications were measured; a third was not. Stopping at the tested number
-    #: rather than guessing further reductions exist past what was actually observed.
+    #: See the yield table above.
     repeats: int = 2
 
 

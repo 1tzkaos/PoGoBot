@@ -20,11 +20,11 @@ from typing import Optional
 from .accounts import AccountView
 from .config import Config, Timings
 from .effects import (
+    Pinch,
     Back,
     BotState,
     Cooldown,
     ClearSpatialMemory,
-    DoubleTapDrag,
     Effect,
     Halt,
     IntentOutcome,
@@ -287,46 +287,6 @@ def reach_distance(cfg: Config, x: float, y: float, scale: float = 1.0) -> float
     dx = (x - cfg.reach.center_x) / rx
     dy = (y - cfg.reach.center_y) / ry
     return (dx * dx + dy * dy) ** 0.5
-
-
-def zoom_anchor(obs, cfg) -> tuple[float, float]:
-    """Where to put the zoom gesture's finger: map, not scenery.
-
-    The gesture is a tap followed by a drag from the same point, and the game decides what
-    that first touch MEANS before any drag arrives. Land it on a PokeStop, a gym or a
-    Pokemon and it opens that thing; the drag then belongs to whatever screen just came up,
-    and no zoom happens at all. Measured while testing the gesture by hand: a run of drags
-    anchored at screen centre ended with `screen=Poi@0.83`, a stop the tap had opened.
-
-    So the anchor is CHOSEN, not fixed - the one place in this system where a coordinate is
-    picked rather than located, because the requirement is the opposite of locating: it
-    must be where nothing is. The detector already reports everything the map has
-    (`obs.detections` carries every class, not just `TARGETABLE`), so the empty spot is
-    whatever candidate sits furthest from all of them.
-
-    The search window keeps the gesture on playable map: `x` avoids the HUD columns and
-    PGSharp's own overlay down the left, and `y` starts far enough down that a drag of
-    `drag_frac` still ends on screen while staying above the avatar and the bottom bar.
-    With no detections at all the window's own centre is returned, which is the old
-    behaviour for an empty map.
-    """
-    z = cfg.zoom
-    lo_y = z.drag_frac + 0.06
-    hi_y = 0.72
-    if hi_y <= lo_y:                      # a drag too long for any on-screen start
-        return z.center_x, min(max(z.drag_frac + 0.02, 0.0), 1.0)
-    xs = [0.20 + i * (0.60 / 6) for i in range(7)]
-    ys = [lo_y + j * ((hi_y - lo_y) / 4) for j in range(5)]
-    pts = [(d.center_norm[0], d.center_norm[1]) for d in obs.detections]
-    if not pts:
-        return z.center_x, (lo_y + hi_y) / 2.0
-    best = None
-    for y in ys:
-        for x in xs:
-            near = min((x - px) ** 2 + (y - py) ** 2 for px, py in pts)
-            if best is None or near > best[0]:
-                best = (near, x, y)
-    return best[1], best[2]
 
 
 def pick_target(obs: Observation, ctx: Context):
@@ -819,7 +779,7 @@ class Switching(Handler):
         `switch_timeout` still bounds the lot if the map never reappears at all.
 
         `ctx.switch_zoom_reps` is NOT advanced here. This handler is pure and cannot know
-        whether the `DoubleTapDrag` it emits will actually reach the device -
+        whether the `Pinch` it emits will actually reach the device -
         `Actuator.apply` can legitimately refuse a live command (rate-limit, queue
         backpressure) without raising. `Runner.apply` increments the counter itself, and
         only when that same actuation is the one that was accepted - the same pattern
@@ -828,11 +788,10 @@ class Switching(Handler):
         fewer than `repeats` real zoom-outs.
         """
         if not obs.on_map:
-            # The gesture's own first touch can open something. `zoom_anchor` avoids
-            # everything the DETECTOR reports, but the detector does not report every
-            # tappable thing on the map - measured live, an anchored drag opened a gym the
-            # detector had not named at all. That matters more here than anywhere else in
-            # this ladder: `desired_state` deliberately returns None for SWITCHING, so the
+            # A pinch cannot open anything by itself, but this phase can still find a
+            # screen in front of it - the game throws up level-ups, medals and Go Plus
+            # catches unprompted, and the earlier one-finger gesture used to open PokeStops
+            # outright. That matters more here than anywhere else in this ladder: `desired_state` deliberately returns None for SWITCHING, so the
             # POPUP route that closes such a screen everywhere else cannot run, and this
             # phase would otherwise sit waiting for a map behind a screen nothing was
             # going to close until `Timings.switch_timeout` (240s) expired.
@@ -851,17 +810,19 @@ class Switching(Handler):
             return [SetFlag("switch_phase", "goplus")] + self._goplus(obs, ctx)
         if not ctx.ready("zoom", 0.0):
             return []                    # let the previous drag's settle window clear
-        ax, ay = zoom_anchor(obs, ctx.cfg)
-        y2 = ay - z.drag_frac
+        # No anchor search any more: a pinch closes two fingers toward a point and never
+        # asks the game to interpret a tap, so it cannot open a PokeStop the way the old
+        # one-finger gesture did (measured: screen=Poi@0.83 after a run of them). The
+        # centre is simply where the map should converge.
         # There is nothing to have confirmed during a preflight - no login was tapped -
         # so the clause naming one is omitted rather than filled with None; see
         # `_label`/`_finished` for the rule the whole chain follows.
         who = f" after confirming {ctx.switch_target}" if ctx.switch_target else ""
         return [
-            DoubleTapDrag(ax, ay, ax, y2,
-                          f"{self._label(ctx)}: zoom out{who} "
-                          f"({ctx.switch_zoom_reps + 1}/{z.repeats})",
-                          duration_ms=z.duration_ms, budget="zoom"),
+            Pinch(z.center_x, z.center_y, z.start_gap, z.end_gap,
+                  f"{self._label(ctx)}: zoom out{who} "
+                  f"({ctx.switch_zoom_reps + 1}/{z.repeats})",
+                  steps=z.steps, duration_ms=z.duration_ms, budget="zoom"),
         ]
 
     def _goplus(self, obs, ctx):

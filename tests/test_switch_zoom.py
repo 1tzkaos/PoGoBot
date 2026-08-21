@@ -1,5 +1,5 @@
 """The post-switch zoom-out: the one-finger tap+drag gesture `Switching` fires once a
-switch is confirmed and the map is back (see `fsm.Switching._zoom` and the `DoubleTapDrag`
+switch is confirmed and the map is back (see `fsm.Switching._zoom` and the `Pinch`
 branch of `actions.Actuator.render`).
 
 Multi-touch is unavailable on the device (sendevent blocked by SELinux, `input
@@ -16,7 +16,7 @@ from pogobot import fsm
 from pogobot.accounts import FakeTreeReader
 from pogobot.actions import Actuator
 from pogobot.config import Config
-from pogobot.effects import BotState, DoubleTapDrag, IntentOutcome, SetFlag, Tap, Transition
+from pogobot.effects import BotState, Pinch, IntentOutcome, SetFlag, Tap, Transition
 from tests.factories import obs
 from tests.test_switch_runner import (
     ROSTER,
@@ -30,60 +30,18 @@ from tests.test_switching import budget, ctx, panel
 # ------------------------------------------------------------------ config constants
 
 def test_the_zoom_constants_match_the_measurement():
-    """The original numbers were justified by a "map-region diff" - i.e. that the screen
-    CHANGED - which a pan and a zoom IN also do. Re-measured against side-by-side captures:
-    direction UP is right, but 370px moved the scale too little to tell from the map's own
-    animation, while 1050px visibly shrank the trainer. See config.ZoomOut."""
+    """A real two-finger pinch: the one-finger gesture never moved the map's scale at all
+    when injected, at any distance, duration or anchor. See config.ZoomOut for the detector
+    yield that fixes `repeats` at 2, and tools/pinch for why a pinch is possible here."""
     z = Config().zoom
     assert z.center_x == pytest.approx(0.5)
-    assert z.drag_frac == pytest.approx(1050.0 / 2340.0)  # 1050px UP on a 2340px screen
-    assert z.duration_ms == 700
-    assert z.repeats == 2                                  # only this many were measured
-    # The drag must still land on screen from the configured start.
-    assert z.center_y - z.drag_frac > 0.0
+    assert z.center_y == pytest.approx(1200.0 / 2340.0)
+    assert z.start_gap == pytest.approx(1000.0 / 2340.0)
+    assert z.end_gap == pytest.approx(150.0 / 2340.0)
+    assert z.start_gap > z.end_gap, "fingers must close, which is what zooms OUT"
+    assert z.duration_ms == 700 and z.steps == 25
+    assert z.repeats == 2                    # where the detector sees most, not the widest
 
-
-def test_the_zoom_anchor_avoids_everything_the_detector_can_see():
-    """The gesture's first touch decides what the game thinks it is. On a PokeStop it
-    opens the stop and the drag belongs to that screen instead - measured by hand as
-    `screen=Poi@0.83` after a run of centre-anchored drags."""
-    from pogobot import fsm
-    from tests.factories import det
-    spots = ((0.50, 0.55), (0.35, 0.60), (0.65, 0.50), (0.50, 0.68))
-    o = obs(detections=tuple(det(n, 0.8, x, y) for n, (x, y) in
-                             zip(("pokestop", "pokemon", "gym", "pokestop"), spots)))
-    ax, ay = fsm.zoom_anchor(o, Config())
-    nearest = min(((ax - x) ** 2 + (ay - y) ** 2) ** 0.5 for x, y in spots)
-    assert nearest > 0.12, f"anchor ({ax:.2f},{ay:.2f}) sits {nearest:.3f} from a detection"
-
-
-def test_the_zoom_anchor_stays_on_playable_map():
-    """Off the HUD columns, off PGSharp's own overlay down the left, and far enough down
-    that the drag still ends on screen."""
-    from pogobot import fsm
-    from tests.factories import det
-    for o in (obs(), obs(detections=tuple(det("pokemon", 0.8, 0.2 + 0.1 * i, 0.5)
-                                          for i in range(7)))):
-        ax, ay = fsm.zoom_anchor(o, Config())
-        assert 0.15 <= ax <= 0.85
-        assert ay - Config().zoom.drag_frac > 0.0
-        assert ay <= 0.75
-
-
-def test_the_zoom_gesture_starts_where_the_anchor_says():
-    """The emitted DoubleTapDrag must use the chosen anchor, not the config centre."""
-    from pogobot import fsm
-    from tests.factories import det
-    o = obs(on_map=True, detections=(det("pokestop", 0.9, 0.5, 0.60),))
-    c = ctx(phase="zoom")
-    drags = [e for e in fsm.step(o, c) if isinstance(e, DoubleTapDrag)]
-    assert drags, "no zoom gesture emitted"
-    ax, ay = fsm.zoom_anchor(o, Config())
-    assert (drags[0].x1, drags[0].y1) == (ax, ay)
-    assert drags[0].x2 == ax and drags[0].y2 == pytest.approx(ay - Config().zoom.drag_frac)
-
-
-# ------------------------------------------------------------------ fsm: when it fires
 
 def test_zoom_does_nothing_until_the_map_is_confirmed_back():
     """`_verify`'s close tap has only just been queued when "zoom" is first entered -
@@ -98,16 +56,13 @@ def test_zoom_does_nothing_until_the_map_is_confirmed_back():
 def test_zoom_fires_the_first_gesture_once_the_map_is_back():
     c = ctx(phase="zoom")
     effects = fsm.step(obs(on_map=True), c)
-    drags = [e for e in effects if isinstance(e, DoubleTapDrag)]
+    drags = [e for e in effects if isinstance(e, Pinch)]
     assert len(drags) == 1
     z = c.cfg.zoom
     d = drags[0]
-    # The start point is now CHOSEN to avoid whatever the detector can see, so it is the
-    # anchor rather than the config centre - see fsm.zoom_anchor and config.ZoomOut.
-    ax, ay = fsm.zoom_anchor(obs(on_map=True), c.cfg)
-    assert d.x1 == pytest.approx(ax) and d.y1 == pytest.approx(ay)
-    assert d.x2 == pytest.approx(ax)                       # straight up, not sideways
-    assert d.y2 == pytest.approx(ay - z.drag_frac)          # UP zooms OUT (measured)
+    assert (d.x, d.y) == (pytest.approx(z.center_x), pytest.approx(z.center_y))
+    assert d.start_gap == pytest.approx(z.start_gap)
+    assert d.end_gap == pytest.approx(z.end_gap)            # fingers close = zoom OUT
     assert d.duration_ms == z.duration_ms
     # No self-reported SetFlag for the rep count: `Runner.apply` owns it, and only when
     # this same gesture is actually accepted by the actuator (see test_switch_zoom_reps_*
@@ -127,7 +82,7 @@ def test_zoom_repeats_exactly_the_configured_number_of_times():
     for _ in range(reps + 3):          # extra ticks to prove it does NOT overshoot either
         effects = fsm.step(obs(on_map=True), c)
         for e in effects:
-            if isinstance(e, DoubleTapDrag):
+            if isinstance(e, Pinch):
                 fired += 1
                 c.switch_zoom_reps += 1
     assert fired == reps
@@ -146,7 +101,7 @@ def test_zoom_hands_off_to_autowalk_only_after_every_repeat_has_fired():
     for _ in range(reps + 1):
         effects = fsm.step(obs(on_map=True), c)
         for e in effects:
-            if isinstance(e, DoubleTapDrag):
+            if isinstance(e, Pinch):
                 c.switch_zoom_reps += 1
             elif isinstance(e, SetFlag) and e.name == "switch_phase" and e.value == "autowalk_open":
                 reached.append(e)
@@ -160,11 +115,10 @@ def test_zoom_gesture_coordinates_never_land_on_a_delete_button():
     c = ctx(phase="zoom")
     deletes = {r.delete_norm for r in c.accounts.rows if r.delete_norm}
     effects = fsm.step(obs(on_map=True), c)
-    drags = [e for e in effects if isinstance(e, DoubleTapDrag)]
+    drags = [e for e in effects if isinstance(e, Pinch)]
     assert drags, "an empty gesture list proves nothing here"
     for d in drags:
-        assert (d.x1, d.y1) not in deletes
-        assert (d.x2, d.y2) not in deletes
+        assert (d.x, d.y) not in deletes
 
 
 # ------------------------------------------------------------------ fsm: when it must NOT fire
@@ -173,7 +127,7 @@ def test_zoom_phase_is_never_entered_from_a_mismatch():
     c = ctx(phase="verify", accounts=panel(active="TrainerOne"))
     effects = fsm.step(obs(on_map=True), c)
     assert not any(isinstance(e, SetFlag) and e.value == "zoom" for e in effects)
-    assert not any(isinstance(e, DoubleTapDrag) for e in effects)
+    assert not any(isinstance(e, Pinch) for e in effects)
 
 
 def test_timeout_from_the_zoom_phase_never_fires_the_gesture():
@@ -182,7 +136,7 @@ def test_timeout_from_the_zoom_phase_never_fires_the_gesture():
     c = ctx(phase="zoom", cfg=budget(17.0))
     c.now = c.state_since + 18.0
     effects = fsm.step(obs(on_map=True), c)
-    assert not any(isinstance(e, DoubleTapDrag) for e in effects)
+    assert not any(isinstance(e, Pinch) for e in effects)
     tr = [e for e in effects if isinstance(e, Transition)][0]
     assert tr.to is BotState.RECOVERING and tr.outcome is IntentOutcome.EXPIRED
 
@@ -194,32 +148,29 @@ def _act(dry_run=True, **kw):
 
 
 def test_the_gesture_renders_as_one_adb_invocation():
-    """Both `input tap` and `input swipe` must reach the device in the SAME `adb shell`
-    call, or the second touch misses the double-tap window `input` needs to read them as
-    one continuous gesture rather than two independent touches."""
+    """One `adb shell` call running the injector, because a pinch is a single continuous
+    two-pointer gesture - it cannot be split across invocations the way two taps could."""
     a = _act()
-    cmd = a.render(DoubleTapDrag(0.5, 0.5, 0.5, 0.342, "zoom out", duration_ms=400))
+    cmd = a.render(Pinch(0.5, 0.5, 0.5, 0.342, "zoom out", duration_ms=400))
     assert cmd.argv[:2] == ("adb", "shell")
-    assert len(cmd.argv) == 3                # ONE shell argument, not two invocations
+    assert len(cmd.argv) == 3                # ONE shell argument
     shell_arg = cmd.argv[2]
-    assert "input tap" in shell_arg and "input swipe" in shell_arg
-    assert shell_arg.index("input tap") < shell_arg.index("input swipe")
-    assert ";" in shell_arg
+    assert "app_process" in shell_arg and "pinch.Pinch" in shell_arg
+    assert "CLASSPATH=" in shell_arg
 
 
 def test_the_gesture_coordinates_convert_like_every_other_effect():
+    """Centre through `to_device` like any Tap; the gaps are fractions of screen HEIGHT."""
     a = _act()
-    cmd = a.render(DoubleTapDrag(0.5, 0.5, 0.5, 0.5 - 370.0 / 2340.0, "zoom",
-                                 duration_ms=400))
-    x1, y1 = a.to_device(0.5, 0.5)
-    x2, y2 = a.to_device(0.5, 0.5 - 370.0 / 2340.0)
-    assert f"{x1} {y1}" in cmd.argv[2]
-    assert f"{x2} {y2}" in cmd.argv[2]
+    cmd = a.render(Pinch(0.5, 0.5, 0.40, 0.05, "zoom", duration_ms=400))
+    px, py = a.to_device(0.5, 0.5)
+    h = a.screen_wh[1]
+    assert f"{px} {py} {int(0.40 * h)} {int(0.05 * h)}" in cmd.argv[2]
 
 
 def test_dry_run_suppresses_the_gesture_like_every_other_actuation():
     a = _act(dry_run=True)
-    accepted = a.apply(DoubleTapDrag(0.5, 0.5, 0.5, 0.34, "zoom"), now=0.0)
+    accepted = a.apply(Pinch(0.5, 0.5, 0.5, 0.34, "zoom"), now=0.0)
     assert accepted is True                  # dry-run still advances FSM pacing
     stats = a.stats()
     assert stats["suppressed_dry_run"] == 1
@@ -228,10 +179,10 @@ def test_dry_run_suppresses_the_gesture_like_every_other_actuation():
 
 def test_the_gesture_has_its_own_rate_limit_budget():
     """Proof "zoom" is tracked independently: exhausting the "tap" budget must not block
-    a DoubleTapDrag issued moments later."""
+    a Pinch issued moments later."""
     a = _act(dry_run=True, intervals={"tap": 5.0, "zoom": 0.25})
     assert a.apply(Tap(0.5, 0.5, "unrelated tap", budget="tap"), now=0.0) is True
-    assert a.apply(DoubleTapDrag(0.5, 0.5, 0.5, 0.34, "zoom", budget="zoom"),
+    assert a.apply(Pinch(0.5, 0.5, 0.5, 0.34, "zoom", budget="zoom"),
                    now=0.5) is True
     assert a.stats()["by_budget"] == {"tap": 1, "zoom": 1}
 
@@ -263,7 +214,7 @@ def test_a_confirmed_switch_fires_the_zoom_gesture_then_rolls_the_session_over(t
             break
     assert r.ctx.state is BotState.SCANNING
     assert r.stats.account == "TrainerTwo"          # _on_switch_confirmed actually ran
-    drags = [e for e in r.actuator.applied if isinstance(e, DoubleTapDrag)]
+    drags = [e for e in r.actuator.applied if isinstance(e, Pinch)]
     assert len(drags) == r.cfg.zoom.repeats
 
 
@@ -294,7 +245,7 @@ class _FlakyAct:
 
 
 def test_switch_zoom_reps_does_not_advance_on_a_rejected_gesture(tmp_path):
-    """A rejected `DoubleTapDrag` (rate-limit / backpressure) must not move
+    """A rejected `Pinch` (rate-limit / backpressure) must not move
     `switch_zoom_reps` - the count has to reflect what was actually sent, or `_zoom` can
     confirm the switch having applied fewer than `repeats` real zoom-outs with nothing
     anywhere recording that anything was skipped."""
@@ -315,7 +266,7 @@ def test_switch_zoom_reps_does_not_advance_on_a_rejected_gesture(tmp_path):
 def test_a_failed_switch_never_fires_the_zoom_gesture():
     r = _quota_switcher()
     assert _fail_a_switch(r, r.ctx.now + 1.0, tap_login=True)
-    assert not any(isinstance(e, DoubleTapDrag) for e in r.actuator.applied)
+    assert not any(isinstance(e, Pinch) for e in r.actuator.applied)
 
 
 def test_zoom_closes_a_screen_its_own_tap_opened():
@@ -329,7 +280,7 @@ def test_zoom_closes_a_screen_its_own_tap_opened():
     assert taps, "nothing was pressed to clear the screen the zoom opened"
     assert (taps[0].x, taps[0].y) == (0.5, 0.885)
     assert taps[0].budget == "close"
-    assert not [e for e in fsm.step(off, c) if isinstance(e, DoubleTapDrag)], \
+    assert not [e for e in fsm.step(off, c) if isinstance(e, Pinch)], \
         "the gesture must not fire while the map is not visible"
 
 
@@ -339,3 +290,31 @@ def test_zoom_still_just_waits_when_no_close_button_is_located():
     c = ctx(phase="zoom")
     off = obs(screen="Menu", conf=0.95, x_button=True, close_xy=None)
     assert fsm.step(off, c) == []
+
+
+# ------------------------------------------------------------------ the injector itself
+
+def test_the_pinch_injector_ships_with_the_package():
+    """`adb shell input` cannot pinch - its CLI builds one pointer - so the gesture is
+    injected by a tiny dex run through app_process as the shell uid, the same route scrcpy
+    uses. It has to travel with the package or the zoom silently does nothing on a fresh
+    checkout. Source and rebuild instructions are in tools/pinch/."""
+    from pogobot import actions
+    assert actions._PINCH_LOCAL.exists(), f"missing {actions._PINCH_LOCAL}"
+    assert actions._PINCH_LOCAL.stat().st_size > 0
+    assert actions._PINCH_LOCAL.read_bytes()[:4] == b"dex\n", "not a dex file"
+
+
+def test_a_dry_run_never_pushes_the_injector():
+    """A preview must not touch the device, and pushing is a device write."""
+    a = Actuator(screen_wh=(1080, 2340), dry_run=True)
+    a.render(Pinch(0.5, 0.5, 0.4, 0.05, "zoom"))
+    assert not getattr(a, "_pinch_pushed", False)
+
+
+def test_the_rendered_command_names_the_remote_injector():
+    from pogobot import actions
+    a = _act()
+    shell_arg = a.render(Pinch(0.5, 0.5, 0.4, 0.05, "zoom")).argv[2]
+    assert actions._PINCH_REMOTE in shell_arg
+    assert shell_arg.startswith("CLASSPATH=")

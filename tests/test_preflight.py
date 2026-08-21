@@ -49,7 +49,7 @@ from pogobot.cli import (IDENTIFY_ATTEMPTS, IDENTIFY_RETRY_WAIT, build_parser,
 from pogobot.config import DEFAULT, Config
 from pogobot.effects import (
     BotState,
-    DoubleTapDrag,
+    Pinch,
     IntentOutcome,
     Note,
     SetFlag,
@@ -152,15 +152,11 @@ def kinds(effects, t):
 
 def test_the_zoom_phase_fires_the_same_measured_gesture():
     out = fsm.step(MAP, pctx(phase="zoom"))
-    drags = kinds(out, DoubleTapDrag)
+    drags = kinds(out, Pinch)
     z = Config().zoom
     assert len(drags) == 1
-    # The start point is CHOSEN to avoid whatever the detector can see - a tap that lands
-    # on a stop opens the stop and the drag belongs to that screen instead, so no zoom
-    # happens (measured by hand as screen=Poi@0.83). See fsm.zoom_anchor.
-    ax, ay = fsm.zoom_anchor(MAP, Config())
-    assert (drags[0].x1, drags[0].y1) == (ax, ay)
-    assert drags[0].y2 == pytest.approx(ay - z.drag_frac)
+    assert (drags[0].x, drags[0].y) == (z.center_x, z.center_y)
+    assert drags[0].end_gap == pytest.approx(z.end_gap)
     assert drags[0].duration_ms == z.duration_ms and drags[0].budget == "zoom"
 
 
@@ -348,7 +344,7 @@ def test_the_startup_preflight_runs_all_three_steps_in_order_then_plays(dt):
     assert r.ctx.state is BotState.SCANNING
 
     applied = r.actuator.applied
-    steps = [("zoom" if isinstance(e, DoubleTapDrag) else
+    steps = [("zoom" if isinstance(e, Pinch) else
               "goplus" if getattr(e, "budget", "") == "goplus" else
               "autowalk" if "autowalk" in getattr(e, "reason", "") else "other")
              for e in applied]
@@ -358,7 +354,7 @@ def test_the_startup_preflight_runs_all_three_steps_in_order_then_plays(dt):
     # a preflight has to get right. "other" would be a tap belonging to no step at all.
     collapsed = [s for i, s in enumerate(steps) if i == 0 or steps[i - 1] != s]
     assert collapsed == ["zoom", "goplus", "autowalk"], steps
-    assert len(kinds(applied, DoubleTapDrag)) == Config().zoom.repeats
+    assert len(kinds(applied, Pinch)) == Config().zoom.repeats
     assert 1 <= steps.count("goplus") <= Config().goplus.max_attempts
     assert _autowalk_reasons(r) == LADDER
     star_taps = [(e.x, e.y) for e in applied
@@ -451,7 +447,7 @@ def test_the_real_run_loop_actually_starts_the_preflight():
     assert r._ticks >= 1, "the loop never completed a tick, so nothing was exercised"
     assert r._preflight_done is True, "run() never started the startup preflight"
     assert r.ctx.state is BotState.PREFLIGHT
-    assert kinds(r.actuator.applied, DoubleTapDrag), "no zoom-out reached the actuator"
+    assert kinds(r.actuator.applied, Pinch), "no zoom-out reached the actuator"
 
 
 def test_a_slow_start_that_reaches_the_map_through_recovering_still_preflights():
@@ -472,7 +468,7 @@ def test_it_is_skipped_when_the_knob_is_off():
     _drive(r, obs(on_map=True, goplus=Tristate.FALSE), dt=0.5, seconds=60.0)
     assert r.ctx.state is not BotState.PREFLIGHT
     assert r._preflight_done is False
-    assert not kinds(r.actuator.applied, DoubleTapDrag)
+    assert not kinds(r.actuator.applied, Pinch)
     assert not [e for e in r.actuator.applied if getattr(e, "budget", "") == "goplus"]
     assert not _autowalk_reasons(r)
     assert r.tree_reader.reads == 0, "a disabled preflight still paid for a tree read"
@@ -522,7 +518,7 @@ def test_without_a_tree_reader_it_still_zooms_and_still_ends_up_playing(caplog):
     with caplog.at_level(logging.WARNING, logger="pogobot"):
         elapsed = _drive(r, obs(on_map=True, goplus=Tristate.FALSE), dt=0.5)
     assert elapsed is not None and r.ctx.state is BotState.SCANNING
-    assert len(kinds(r.actuator.applied, DoubleTapDrag)) == Config().zoom.repeats
+    assert len(kinds(r.actuator.applied, Pinch)) == Config().zoom.repeats
     assert [e for e in r.actuator.applied if getattr(e, "budget", "") == "goplus"]
     assert not _autowalk_reasons(r)
     assert any("AutoWalk" in m and "view tree" in m for m in caplog.messages), caplog.messages
@@ -624,7 +620,7 @@ def test_the_zoom_counter_is_advanced_by_the_runner_here_too():
     r = make_runner()
     r.ctx.state = BotState.PREFLIGHT
     z = Config().zoom
-    r.apply([DoubleTapDrag(z.center_x, z.center_y, z.center_x, 0.3, "preflight: zoom out",
+    r.apply([Pinch(z.center_x, z.center_y, z.center_x, 0.3, "preflight: zoom out",
                            duration_ms=z.duration_ms, budget="zoom")], MAP)
     assert r.ctx.switch_zoom_reps == 1
 
@@ -857,7 +853,7 @@ def test_a_closable_overlay_hands_the_screen_back_during_the_blind_phases(phase)
     tr = kinds(out, Transition)
     assert tr and tr[0].to is BotState.SCANNING, out
     assert kinds(out, Note) and kinds(out, Note)[0].level == "warn"
-    assert not taps(out) and not kinds(out, DoubleTapDrag)
+    assert not taps(out) and not kinds(out, Pinch)
 
 
 @pytest.mark.parametrize("phase", ["autowalk_open", "autowalk_menu", "autowalk_dialog",
@@ -893,7 +889,7 @@ def test_without_a_tree_reader_the_autowalk_ladder_is_not_even_entered():
     assert elapsed is not None and r.ctx.state is BotState.SCANNING
     assert elapsed < Config().autowalk.budget_s, \
         "the preflight waited out a ladder that could never locate anything"
-    assert len(kinds(r.actuator.applied, DoubleTapDrag)) == Config().zoom.repeats
+    assert len(kinds(r.actuator.applied, Pinch)) == Config().zoom.repeats
     assert [e for e in r.actuator.applied if getattr(e, "budget", "") == "goplus"]
 
 
@@ -946,7 +942,7 @@ def test_a_switch_labels_its_gestures_switch_byte_for_byte():
     is the whole claim."""
     from tests.test_switching import ctx as switching_ctx
     c = switching_ctx(phase="zoom", target="TrainerTwo", accounts=_full_view())
-    drags = kinds(fsm.step(MAP, c), DoubleTapDrag)
+    drags = kinds(fsm.step(MAP, c), Pinch)
     assert [d.reason for d in drags] == \
         [f"switch: zoom out after confirming TrainerTwo (1/{Config().zoom.repeats})"]
 
