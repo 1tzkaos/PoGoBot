@@ -272,6 +272,98 @@ def rocket_screen(obs: Observation, cfg: Config) -> bool:
     return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
 
 
+#: How far, in fractions of frame height, a located close button must sit from the located
+#: affirmative pill before `rocket_exit_screen` will believe it is an X at all.
+#:
+#: `find_close_button`'s mask is hue-based and Pokemon GO's affirmative pill is a
+#: green-to-teal GRADIENT, so on the ChooseParty layout the pill's right-hand cap falls
+#: inside MINT_LO..MINT_HI; the clipped cap is round (aspect ~1) and bottom-centred (cx
+#: 0.63, inside that locator's 0.30-0.70 window), so it is returned as the close button.
+#: On all 5 labelled ChooseParty frames it is (0.627, 0.876) while `find_action_pill`
+#: returns (0.545, 0.875) - the same row, 0.08 to the left: the two locators are
+#: describing one control, and the control is USE THIS PARTY. Pressing it STARTS the Team
+#: GO Rocket fight the operator turned off, into a `BotState.ROCKET` that is unreachable
+#: on such a run (`desired_state` gates it on the same flag), so nothing would then drive
+#: the battle. A route whose whole purpose is LEAVING these screens does not get to press
+#: the button that commits to one.
+#:
+#: Measured over all 235 frames of datasets/state_cls5, only 15 locate both a close button
+#: and a pill, and they separate with nothing in between:
+#:   dy 0.0003  x5   Rocket/ChooseParty  - the pill's own cap, must be REFUSED
+#:   dy 0.0766  x1   Rocket/GruntBattleButton (pogo_20260817_151207) - a genuine X
+#:   dy 0.0833  x2   Menu
+#:   dy 0.1320+ x7   Overworld, Rocket/GruntBattleButton
+#: 0.02 sits in that gap with 66x margin over the false positive and 3.8x under the
+#: tightest genuine X. A ROW test rather than a distance test because that is the actual
+#: invariant: on every screen carrying both, the game draws the X as a separate control
+#: BELOW the pill, so a "close button" sharing the pill's row is the pill.
+#:
+#: Fixed here rather than in `find_close_button` deliberately. That locator's thresholds
+#: were swept over this same corpus, and its other consumers depend on them - `Popup.step`,
+#: `Recovering.step`'s third rung, and two rungs of `Switching` - while this route is the
+#: one that newly turns the coordinate into a press, so the veto belongs where the press is
+#: decided. The pre-existing recovery ladder still reaches this coordinate one rung later
+#: (verified unchanged, frame by frame, against HEAD), which is behaviour this change is
+#: not entitled to alter.
+CLOSE_PILL_MIN_DY = 0.02
+
+
+def rocket_exit_screen(obs: Observation, cfg: Config) -> bool:
+    """A Team GO Rocket screen this run will not fight, carrying an X we have LOCATED.
+
+    Turning `fight_rockets` off only ever stopped the bot TAPPING invaded stops
+    (`pick_target` skips ROCKET_TARGETS); it never stopped it MEETING the screens. A
+    balloon invasion arrives unprompted, an invaded stop can be detected as a plain
+    `pokestop` and tapped, and a per-account profile can flip the setting mid-fight.
+    Refusing to fight and never being on the screen are different things, and only the
+    first was implemented: `desired_state` gated the ROCKET route on `cfg.fight_rockets`
+    and nothing else claimed the screen.
+
+    Measured over the 13 labelled Rocket frames in datasets/state_cls5 - the class the
+    deployed classifier actually emits, and by basename exactly datasets/state_v3's
+    GruntBattleButton (5), GruntDialogue (2), ChooseParty (5) and ExitTrainerBattle (1) -
+    with `fight_rockets` False: 3 read `x_button` True, so `in_overlay` was true and the
+    overlay branch in `desired_state` already routed them to POPUP. The other 10 read
+    `x_button` False, so `in_overlay` was false and `desired_state` returned None - no
+    route at all. Those fell through to SCANNING, which saw no map and handed to
+    RECOVERING, whose BACK does not dismiss a Rocket dialogue. Measured in
+    logs/trace.jsonl across one 3h27m run with the setting off for that account: 7.4% of
+    frames RECOVERING where a healthy run sits at 2-3%, five app restarts, zero halts,
+    and 3437 frames wedged on a screen classified Rocket. The 90s before three of those
+    restarts read screens {Rocket: 720/720}, states {RECOVERING: 695, SCANNING: 25},
+    effects {Back: 19, Transition: 37, Tap: 1} - nineteen BACKs that did nothing, escaped
+    only because the restart ladder relaunched the game.
+
+    `close_button_xy` rather than `x_button` is what reaches the frames that had no route.
+    The two answer different questions: `x_button` is a colour fraction over a fixed ROI,
+    `find_close_button` is a shaped-contour search that returns a coordinate. On the same
+    13 frames the finder returns a coordinate on 10, of which 5 are not an X at all but
+    the affirmative pill's own cap - refused by CLOSE_PILL_MIN_DY above, since pressing
+    one would start the fight this run is declining. That leaves 5 frames carrying a
+    genuine X, all GruntBattleButton, so this route claims 5 where the overlay branch
+    claimed 3; the 2 gained read `x_button` False with an X located, and those 2 are the
+    whole difference between escaping and not.
+
+    Requiring the coordinate is also what keeps "buttons are LOCATED, never assumed": with
+    nothing found this is False and the run degrades to the recovery ladder it already had
+    rather than to a remembered coordinate. The 8 frames left to that ladder are so left
+    deliberately - 2 GruntDialogue carry neither signal nor a findable X, 5 ChooseParty
+    carry only the button that would commit to the fight, and 1 is the exit dialog below -
+    because there is nothing on any of them this route may press.
+
+    `rocket_screen` supplies the screen test unchanged, so both of its vetoes carry over:
+    a confirmed map is not a Rocket screen, and Pokemon GO's own exit-confirmation dialog
+    - which classifies as Rocket - stays with `interrupts`' coordinate-free BACK instead
+    of earning a tap near its OK button.
+    """
+    if cfg.fight_rockets:
+        return False
+    if not rocket_screen(obs, cfg) or obs.close_button_xy is None:
+        return False
+    pill = obs.action_pill_xy
+    return pill is None or abs(pill[1] - obs.close_button_xy[1]) >= CLOSE_PILL_MIN_DY
+
+
 def reach_distance(cfg: Config, x: float, y: float, scale: float = 1.0) -> float:
     """How far a normalized point is from the avatar's reach, measured in the reach
     ellipse's OWN radii: at or below `cfg.reach.tolerance` is in reach, above it is not.
@@ -1824,6 +1916,47 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     if obs.on_map and ctx.state in (BotState.POPUP, BotState.RECOVERING, BotState.BOOT,
                                     BotState.ENCOUNTER, BotState.ROCKET, BotState.POKESTOP):
         return BotState.SCANNING
+    # The other arm of the `fight_rockets` question above: a run that will not FIGHT a
+    # Rocket screen still has to be able to LEAVE one, and until this branch existed it
+    # could not - see `rocket_exit_screen` for the 10-of-13 corpus frames with no route at
+    # all and the 90s-plus-an-app-restart each one cost live.
+    #
+    # POPUP is the destination rather than a rung of its own because it already IS this
+    # behaviour: it taps only `obs.close_button_xy` and never a remembered coordinate, it
+    # returns to SCANNING the instant the map is back, and it expires into RECOVERING
+    # after `popup_timeout` (4s). That is what makes the route bounded - the worst case
+    # is one 4s visit per cycle, after which the run is back on exactly the ladder it
+    # would have had - and it is why no new state, handler, timeout or `on_timeout` is
+    # introduced for a screen an existing state can already close.
+    #
+    # The source set is SCANNING/TARGETING: deliberately the same one the overlay branch
+    # below uses, and deliberately NOT RECOVERING. RECOVERING is where the stuck watchdog
+    # and the app-restart ladder live, and both run only out of `Recovering.on_timeout`,
+    # which needs 6s of uninterrupted RECOVERING to be reached at all. A route that could
+    # pull RECOVERING into POPUP would reset that clock on any frame that happened to
+    # locate an X - 16 of 720 in the measured window - and could starve the ladder
+    # indefinitely, trading a 90s wedge the restart eventually cleared for one that
+    # nothing clears. Nothing is lost by leaving RECOVERING alone: its own third rung
+    # already taps a located close button, just after the BACK this route avoids paying.
+    #
+    # POKESTOP is absent too, and that is the one cause in `rocket_exit_screen`'s list
+    # this route does not itself serve: `Scanning.step` sends a `pokestop` detection
+    # straight to POKESTOP, never TARGETING, so a mis-read invaded stop lands there. It is
+    # left out because it needs nothing - `Pokestop.on_timeout` already hands the screen to
+    # POPUP, the same destination, after its own 8s budget and without spending a BACK. The
+    # gap is 8s of waiting on a bounded path, not a wedge, and claiming POKESTOP here would
+    # also preempt `Pokestop.step`'s own confirm-and-dwell on a real stop that happens to
+    # read Rocket.
+    #
+    # Sitting below the map branch keeps the map outranking this, and `rocket_exit_screen`
+    # is False outright whenever `cfg.fight_rockets` is on, so with rockets ON this branch
+    # cannot fire and the ordering that stops POPUP closing a grunt dialogue mid-fight is
+    # untouched. With rockets off mid-fight - a profile can flip it - the rocket-hold
+    # branch at the top of this function still answers first, and ROCKET is absent from
+    # the source set here as well, so a fight in progress cannot be stolen by either
+    # route.
+    if rocket_exit_screen(obs, cfg) and ctx.state in (BotState.SCANNING, BotState.TARGETING):
+        return BotState.POPUP
     # ROCKET joins these two only once the fight is demonstrably over. A Rocket screen
     # carries its own X, which is why POPUP must never outrank ROCKET while one is up -
     # closing the grunt dialogue instead of fighting it is the failure the ordering at the
