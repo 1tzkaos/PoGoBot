@@ -478,19 +478,31 @@ def identify_account(tree_reader: "UiTreeReader", actuator,
     strictly alone: nothing is tapped, and the function returns None. A control that was
     not located - the accounts tab, or the close button - is simply not tapped; a missing
     node still means do nothing, exactly as for the launcher. Whichever read is current by
-    the end, the panel is left as this function found it - closed - by tapping its
-    `close_norm` if one was located; an unavailable read never produces a guessed close.
+    the end, the panel is left CLOSED by tapping its `close_norm` if one was located; an
+    unavailable read never produces a guessed close. A panel found ALREADY open - which is
+    what a previous attempt that could not close it leaves behind - is read where it
+    stands rather than toggled shut by a launcher tap.
     """
     view = tree_reader.read()
     if not view.available or view.launcher_norm is None:
         log.warning("could not locate the PGSharp overlay; per-account tracking is "
                     "unavailable unless --account is given")
         return None
-    actuator.apply(Tap(*view.launcher_norm, "identify: open the PGSharp overlay",
-                       budget=IDENTIFY_BUDGET))
-    if settle:
-        time.sleep(settle)
-    opened = tree_reader.read()
+    if view.panel_open:
+        # The launcher TOGGLES the panel, so tapping it now would SHUT the thing we came
+        # to read. `Switching.step` and `Switching._verify` both guard their launcher taps
+        # with exactly this check; this call site did not, which only became reachable
+        # once `cli.prepare_accounts` began retrying - the paths below that return without
+        # closing (an unavailable second read, or no `close_norm` located) leave the panel
+        # up, so the next attempt used to spend itself closing it and the parity of the
+        # toggles decided whether the run started with PGSharp's panel over the map.
+        opened = view
+    else:
+        actuator.apply(Tap(*view.launcher_norm, "identify: open the PGSharp overlay",
+                           budget=IDENTIFY_BUDGET))
+        if settle:
+            time.sleep(settle)
+        opened = tree_reader.read()
 
     if opened.available and not opened.rows and opened.accounts_tab_norm is not None:
         actuator.apply(Tap(*opened.accounts_tab_norm, "identify: select the Accounts tab",

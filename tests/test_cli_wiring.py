@@ -163,11 +163,18 @@ def _factory(views):
     return make, made
 
 
-def _prepare(cfg=DEFAULT, requested=None, pause_file=None, views=None, act=None):
+def _prepare(cfg=DEFAULT, requested=None, pause_file=None, views=None, act=None,
+             attempts=None, retry_wait=0):
+    """`retry_wait=0` by default for the same reason `settle=0` is: the real values are
+    seconds of real sleep at startup (see cli.IDENTIFY_RETRY_WAIT), and a suite that waits
+    them out is a suite nobody runs. tests/test_preflight.py is where the retry's own count
+    and spacing are asserted."""
     make, made = _factory(views if views is not None else [_closed(), panel(active="TrainerTwo")])
     act = act if act is not None else _Act()
+    kw = {} if attempts is None else {"attempts": attempts}
     result = prepare_accounts(cfg, requested=requested, pause_file=pause_file,
-                              make_reader=make, actuator=act, settle=0)
+                              make_reader=make, actuator=act, settle=0,
+                              retry_wait=retry_wait, **kw)
     return result, made, act
 
 
@@ -180,15 +187,46 @@ def test_identification_is_skipped_when_no_switch_trigger_is_armed():
     switching, --account is how a run gets attributed and an unnamed one stays in the
     unattributed bucket - exactly the behaviour that predates this feature."""
     (reader, account, roster), made, act = _prepare(requested="TrainerOne")
-    assert made == [], "the panel must not even be read"
+    assert [r.reads for r in made] == [0], "the panel must not even be read"
     assert act.applied == []
-    assert (reader, account, roster) == (None, "TrainerOne", ())
+    assert (account, roster) == ("TrainerOne", ())
+    # A reader IS handed back, unused. It is not for identification - nothing above reads
+    # or taps - but for the two callers that need to SEE the view tree on a run with no
+    # switch trigger: `fsm.Preflight._autowalk_open`, which needs the star's bounds, and
+    # `Runner._refresh_accounts`, without which `fsm.Recovering._panel_close` can never
+    # see the PGSharp accounts panel. Returning None here left both silently dead.
+    assert reader is not None
 
 
 def test_an_unswitched_run_without_an_account_stays_unattributed():
     (reader, account, roster), made, act = _prepare()
-    assert (reader, account, roster) == (None, None, ())
+    assert (account, roster) == (None, ())
     assert act.applied == []
+    assert [r.reads for r in made] == [0], "the panel must not even be read"
+
+
+def test_a_run_with_no_switch_trigger_still_gets_a_reader_for_the_preflight():
+    """The preflight is on by default and needs the view tree for one of its three steps.
+
+    `fsm.Preflight._autowalk_open` takes the star's bounds from the tree, so with no reader
+    it gives up immediately and AutoWalk - one of the three things the preflight exists to
+    do - never happens. `Runner._refresh_accounts` also needs one before
+    `fsm.Recovering._panel_close` can see the PGSharp accounts panel at all. Both were
+    silently dead on a default invocation, because switching being off returned None here.
+    """
+    (reader, _, _), made, act = _prepare()
+    assert reader is not None and reader is made[0]
+    assert reader.reads == 0 and act.applied == [], (
+        "the reader is for later use by the preflight and the recovery ladder; startup "
+        "must still neither read the panel nor tap it")
+
+
+def test_no_reader_is_made_when_the_preflight_is_off_too():
+    """Tied to the preflight, not handed out unconditionally: a reader this run will never
+    look at buys nothing, and `_refresh_accounts` would start paying ~3s of blocking dump
+    per RECOVERING visit for a view nothing consumes."""
+    (reader, _, _), made, act = _prepare(DEFAULT.scaled(preflight=False))
+    assert reader is None and made == []
 
 
 def test_identification_is_skipped_while_the_pause_file_exists(tmp_path):

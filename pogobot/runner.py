@@ -142,6 +142,14 @@ class Runner:
         # tree lists no rows at all, so a live read would only ever shrink this to nothing.
         self.roster = tuple(roster)
         self._accounts_read_at = 0.0
+        #: whether the startup preflight has already been started for the game currently
+        #: running (see `_maybe_preflight`). A latch, not a counter: it is set the first
+        #: time the attempt is made, so a preflight that could not finish is still not
+        #: repeated - PREFLIGHT hands control back to SCANNING either way, and re-entering
+        #: it every time the bot returned to SCANNING would be a livelock, not a retry.
+        #: Cleared again only by an accepted `effects.RestartApp` (see `apply`), because a
+        #: cold relaunch undoes all three of the things the preflight sets.
+        self._preflight_done = False
         self._switch_target: Optional[str] = None
         #: consecutive switch attempts that expired without confirming, and the FSM-clock
         #: instant before which no new attempt may start. Reset by a confirmed switch.
@@ -163,6 +171,10 @@ class Runner:
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
         self.ctx.last_map_ts = time.perf_counter()
+        # A standing fact about the run, so a pure handler can tell "no view this tick"
+        # from "there will never be a view" - see `fsm.Context.tree_available` and
+        # `fsm.Preflight._autowalk_open`, the one place the difference is worth 30s.
+        self.ctx.tree_available = tree_reader is not None
         # One full interval in, not on the first tick: `--switch-every 45` means every 45
         # minutes, and rotating out of a fresh account immediately is nobody's intent.
         self._next_rotation = (self.ctx.now + cfg.switch_every_minutes * 60.0
@@ -569,29 +581,49 @@ class Runner:
     # ---------------------------------------------------------------- accounts
 
     def _refresh_accounts(self, real: float) -> None:
-        """Re-read the UI tree, in the two states that can be looking at the PGSharp panel.
+        """Re-read the UI tree, in the three states that can be looking at PGSharp's own
+        windows.
 
         SWITCHING is the state that OPENS the panel, and reads at ACCOUNTS_REFRESH because
-        it is chasing an asterisk inside a bounded budget. RECOVERING is the state that
-        finds one already open and cannot see it any other way: measured at the bot's own
-        resolution the accounts panel reports screen=Menu@0.95, in_overlay=False,
-        x_button=False and no close button, so the tree is the only channel that knows it
-        is there (see fsm.Recovering._panel_close). It gets its own, longer throttle -
-        RECOVER_ACCOUNTS_REFRESH - because the read blocks this thread and RECOVERING is
-        entered briefly after every ordinary timeout, not only when the bot is wedged; see
-        that constant for the whole trade.
+        it is chasing an asterisk inside a bounded budget. PREFLIGHT drives the tail of
+        that same ladder at startup (see fsm.Preflight) and shares the cadence for the same
+        reason: its AutoWalk steps locate the star, the shortcut menu and a dialog button
+        in the live tree, and `config.AutoWalk.budget_s` gives the whole ladder 30s - at
+        RECOVER_ACCOUNTS_REFRESH (10s) it would spend that budget waiting for its second
+        usable view. RECOVERING is the state that finds a panel already open and cannot see
+        it any other way: measured at the bot's own resolution the accounts panel reports
+        screen=Menu@0.95, in_overlay=False, x_button=False and no close button, so the tree
+        is the only channel that knows it is there (see fsm.Recovering._panel_close). It
+        gets its own, longer throttle - RECOVER_ACCOUNTS_REFRESH - because the read blocks
+        this thread and RECOVERING is entered briefly after every ordinary timeout, not
+        only when the bot is wedged; see that constant for the whole trade.
 
-        Everywhere else this still returns without reading: outside these two states the
-        panel is shut, so a blocking dump could only ever report `rows=()`.
+        What a read costs, since PREFLIGHT now buys them at startup: `UiTreeReader.read`
+        blocks THIS thread - the run loop's own - for ~3.0s against the rendering game
+        (measured: 2.96, 3.00, 3.00, 3.00, 4.46), bounded by `UiTreeReader.timeout` (5s),
+        and the throttle below is stamped from when the read FINISHED, so usable views
+        arrive ~5.5s apart. A preflight is therefore a handful of blocked seconds inside
+        `Timings.preflight_timeout` (90s), once per run, before the bot starts playing -
+        against a run that otherwise plays for hours zoomed in with Virtual Go Plus off.
+        Nothing is perceived, no key is read and no signal is serviced while a read blocks,
+        which is why this is throttled at all and why RECOVERING's throttle is four times
+        longer.
+
+        Everywhere else this still returns without reading: outside these states the panel
+        is shut, so a blocking dump could only ever report `rows=()`.
 
         Paced on the REAL clock, like every other pacing decision in the loop: a paused run
         freezes `ctx.now`, and a frozen clock never reaches its own next deadline.
         """
         switching = self.ctx.state is BotState.SWITCHING
+        # The two states that drive PGSharp's overlay themselves, and so need the fast
+        # cadence and the AutoWalk icon reading below. `switching` stays separate from it
+        # because a preflight has no switch attempt to keep books for - see below.
+        driving = switching or self.ctx.state is BotState.PREFLIGHT
         if self.tree_reader is None \
-                or not (switching or self.ctx.state is BotState.RECOVERING):
+                or not (driving or self.ctx.state is BotState.RECOVERING):
             return
-        if real - self._accounts_read_at < (ACCOUNTS_REFRESH if switching
+        if real - self._accounts_read_at < (ACCOUNTS_REFRESH if driving
                                             else RECOVER_ACCOUNTS_REFRESH):
             return
         t0 = time.perf_counter()
@@ -610,14 +642,15 @@ class Runner:
             # the loop's single clock sample, passed in - rather than a fresh
             # perf_counter, so this method still takes its clock as an argument.
             self._accounts_read_at = real + (time.perf_counter() - t0)
-        if not switching:
-            # Everything below belongs to a switch in flight. `_last_seen_active` is the
-            # record of who the tree named during THIS attempt and is spent by
+        if not driving:
+            # The rest belongs to a run that is driving the overlay itself. `_last_seen_active`
+            # is the record of who the tree named during a switch ATTEMPT and is spent by
             # `_on_switch_failed`; the AutoWalk icon colour is read out of a shortcut menu
-            # only `Switching` ever opens. Writing either from RECOVERING would be
+            # only `Switching`/`Preflight` ever open. Writing either from RECOVERING would be
             # answering a question nobody asked with a reading taken off the wrong screen.
             return
-        if self.ctx.accounts.available and self.ctx.accounts.active is not None:
+        if switching and self.ctx.accounts.available \
+                and self.ctx.accounts.active is not None:
             # The asterisk is ground truth about who is logged in, and `verify` re-reads it
             # every couple of seconds right up to the timeout - on the live failure it
             # named the outgoing account fourteen times, the last of them minutes after the
@@ -686,6 +719,89 @@ class Runner:
         # soonest_reset keeps the first name on a tie, which is the "stay put" answer.
         best = self.quota.soonest_reset([current] + order)
         return None if best == current else best
+
+    # ---------------------------------------------------------------- preflight
+
+    def _maybe_preflight(self, obs: Observation) -> None:
+        """Run the startup zoom-out / Virtual Go Plus / AutoWalk pass, ONCE, on the first
+        confirmed map after the game starts (see `fsm.Preflight` for what those steps are
+        and why they are the switch's own methods rather than a second copy).
+
+        Here rather than in `Boot.step` for the same reason `_maybe_switch` is here: which
+        state a run enters is the runner's decision, and only the runner can hold the latch
+        that makes this happen once per RUN rather than once per visit. Hanging it off BOOT
+        alone would also lose the feature on exactly the startups that need it most - BOOT's
+        budget is 30s, a cold-started game is measured in tens of seconds (see
+        `Timings.app_restart_grace`), and a boot that overruns reaches the map through
+        RECOVERING, which never passes through BOOT again.
+
+        Both BOOT and SCANNING are accepted, and the order matters. This is called before
+        `fsm.step`, so on the tick BOOT first sees the map the state is still BOOT and the
+        preflight starts there - the bot never gets a SCANNING tick in which to tap a target
+        first. SCANNING covers the slow-start path above, where BOOT has already timed out.
+
+        `obs.on_map` is required, not merely the state: `_zoom` and `_goplus` both fire at
+        FIXED screen coordinates, so starting them against a loading screen or a post-login
+        modal would be tapping blind - the whole reason `Switching._zoom` waits for the map
+        as well.
+
+        The latch is set BEFORE anything else can fail, so "once" holds however the attempt
+        below turns out. Its scope is one game start, not one process: `apply` clears it
+        again when RECOVERING's `effects.RestartApp` is accepted, since a cold relaunch
+        resets the camera, Virtual Go Plus and the AutoWalk route exactly as a login does -
+        without that, the first restart of a long run hands the reported symptom straight
+        back for the rest of it. Nothing here can stop the bot playing: with the knob off
+        this returns and the run is exactly what it was, and every exit from the state
+        itself lands in SCANNING.
+        """
+        if self._preflight_done or not self.cfg.preflight:
+            return
+        if self.ctx.state not in (BotState.BOOT, BotState.SCANNING) or not obs.on_map:
+            return
+        self._preflight_done = True
+        if self.tree_reader is None:
+            # The zoom-out and the Go Plus toggle are fixed coordinates and an optical
+            # reading, so they run regardless; AutoWalk is located in the uiautomator tree
+            # and there is nothing to locate it with, so `fsm.Preflight._autowalk_open`
+            # ends the state there rather than waiting out `config.AutoWalk.budget_s` for
+            # a widget that cannot appear. Said once, plainly, because the alternative is
+            # an operator watching two of the three steps happen with no stated cause -
+            # which is the class of silence this whole change exists to remove.
+            #
+            # The trigger is NAMED as the usual cause rather than asserted as the only
+            # one: `cli.prepare_accounts` also returns no reader when the pause file is
+            # already present at startup, and a claim that is wrong a third of the time is
+            # how a log line stops being read at all.
+            log.warning("no PGSharp overlay reader this run, so the startup preflight "
+                        "will zoom out and set Virtual Go Plus but cannot start AutoWalk "
+                        "- the star widget is located in the view tree, which is read "
+                        "only when a switch trigger (--switch-on-quota / --switch-every) "
+                        "is armed and the run did not start paused")
+        self._begin_preflight()
+
+    def _begin_preflight(self) -> None:
+        # Same reason `_begin_switch` does this: PREFLIGHT owns the screen for up to
+        # `Timings.preflight_timeout` and fills it with gestures of its own, so anything
+        # that happens afterwards is not evidence that some earlier tap caused it - and an
+        # Intent is exactly that causal claim, which the ledger writes a training sample
+        # on the strength of. Reachable only through the SCANNING entry path, and only
+        # barely (a tap sets its intent and leaves SCANNING in the same tick), which is
+        # precisely why it is one line here rather than an argument in a comment.
+        self._abandon_intent("running the startup preflight before the screen answered")
+        # Same three resets `_begin_switch` performs, and for the same reasons, minus every
+        # one that belongs to a login. `ctx.accounts` goes because whatever view we hold
+        # describes a panel that was shut. `switch_target` is pinned to None because that
+        # is what tells the shared phase methods they are running a preflight and must not
+        # name an account (see `fsm.Switching._label`) - and what stops `Preflight.step`
+        # ever reaching the login-driving branch. `switch_autowalk_since` goes because a
+        # stale value would let the AutoWalk ladder's wall clock expire before it started;
+        # `enter_state` covers the per-visit counters (runner._RESET_ON_ENTRY).
+        self.ctx.accounts = None
+        self.ctx.switch_target = None
+        self.ctx.switch_phase = fsm.PREFLIGHT_PHASES[0]
+        self.ctx.switch_autowalk_since = 0.0
+        log.info("startup preflight: zoom out, Virtual Go Plus, AutoWalk")
+        self.enter_state(BotState.PREFLIGHT, IntentOutcome.CARRIED, "startup preflight")
 
     def _maybe_switch(self, obs: Observation) -> None:
         """Start a switch if a trigger is due and this is a safe moment to leave.
@@ -942,18 +1058,38 @@ class Runner:
                         # Only an accepted application does either.
                         self.ctx.app_restarts += 1
                         self.ctx.app_restart_ts = self.ctx.now
+                        # A cold relaunch resets exactly the three things the preflight
+                        # exists to set: the camera zoom goes back to default, Virtual Go
+                        # Plus goes off, and there is no AutoWalk route - the same state a
+                        # login leaves behind, which is why the switch ladder does all
+                        # three. (`Switching._separate_star`'s own measurement is taken
+                        # "immediately after effects.RestartApp relaunched the game".) A
+                        # run-lifetime latch would therefore hand the reported symptom
+                        # straight back: the run that motivated this change logged 215
+                        # recoveries. Re-arming makes it once per app start rather than
+                        # once per process, which is the scope that matches the cause;
+                        # `Config.max_app_restarts` already bounds how many of those there
+                        # can be, and `_maybe_preflight`'s own `obs.on_map` gate is what
+                        # keeps this from racing the app that is still coming up.
+                        self._preflight_done = False
                         log.warning("restarted %s (%d consecutive restart(s) with no "
                                     "confirmed map)", e.package, self.ctx.app_restarts)
                     self.ctx.last_action[budget] = self.ctx.now
                     self.ctx.taps_in_state += 1
                     if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag, RestartApp)):
                         self.ctx.settle_until = self.ctx.now + self.cfg.timings.ui_settle
-                    if self.ctx.state is BotState.SWITCHING:
+                    if self.ctx.state in (BotState.SWITCHING, BotState.PREFLIGHT):
                         # The launcher tap TOGGLES the overlay, so a second decision taken
                         # from the same view closes the panel the first one opened and the
                         # switch stalls until it times out. Drop the view here, where
                         # every applied effect is already seen: the handler does nothing
                         # while it is None, and the next refresh reflects the tap.
+                        #
+                        # PREFLIGHT is included for the same reason at the other end of the
+                        # ladder: the STAR toggles PGSharp's shortcut menu (see
+                        # `fsm.Switching._autowalk_close`), so a preflight deciding twice
+                        # from one view would close the menu it had just opened and then
+                        # find no "AutoWalk" node to pick.
                         self.ctx.accounts = None
 
     # ---------------------------------------------------------------- trace
@@ -1146,10 +1282,20 @@ class Runner:
                         self._show(window, frame, obs)
                     continue
 
-                # Both are below the `paused` block on purpose: a paused run must not drive
-                # the overlay, and a switch entered while paused would sit in SWITCHING
-                # with the FSM clock frozen, so not even its timeout could end it.
+                # All three are below the `paused` block on purpose: a paused run must not
+                # drive the overlay, and a switch entered while paused would sit in
+                # SWITCHING with the FSM clock frozen, so not even its timeout could end
+                # it. A preflight is in exactly that position - same overlay, same frozen
+                # budget - so it waits for the resume too.
+                #
+                # The preflight goes FIRST so a trigger that is already due on the very
+                # first map frame (an account that starts the run capped, with
+                # --switch-on-quota armed) cannot take the screen before the startup checks
+                # have run. It cannot delay a switch by more than its own bounded budget:
+                # `_maybe_switch` refuses any state but SCANNING, so the trigger simply
+                # stays due until the preflight hands the screen back.
                 self._refresh_accounts(real)
+                self._maybe_preflight(obs)
                 self._maybe_switch(obs)
                 self._update_restock()
                 effects = fsm.step(obs, self.ctx)
