@@ -30,11 +30,57 @@ from tests.test_switching import budget, ctx, panel
 # ------------------------------------------------------------------ config constants
 
 def test_the_zoom_constants_match_the_measurement():
+    """The original numbers were justified by a "map-region diff" - i.e. that the screen
+    CHANGED - which a pan and a zoom IN also do. Re-measured against side-by-side captures:
+    direction UP is right, but 370px moved the scale too little to tell from the map's own
+    animation, while 1050px visibly shrank the trainer. See config.ZoomOut."""
     z = Config().zoom
-    assert z.center_x == pytest.approx(0.5) and z.center_y == pytest.approx(0.5)
-    assert z.drag_frac == pytest.approx(370.0 / 2340.0)   # 370px UP on a 2340px-tall screen
-    assert z.duration_ms == 400
+    assert z.center_x == pytest.approx(0.5)
+    assert z.drag_frac == pytest.approx(1050.0 / 2340.0)  # 1050px UP on a 2340px screen
+    assert z.duration_ms == 700
     assert z.repeats == 2                                  # only this many were measured
+    # The drag must still land on screen from the configured start.
+    assert z.center_y - z.drag_frac > 0.0
+
+
+def test_the_zoom_anchor_avoids_everything_the_detector_can_see():
+    """The gesture's first touch decides what the game thinks it is. On a PokeStop it
+    opens the stop and the drag belongs to that screen instead - measured by hand as
+    `screen=Poi@0.83` after a run of centre-anchored drags."""
+    from pogobot import fsm
+    from tests.factories import det
+    spots = ((0.50, 0.55), (0.35, 0.60), (0.65, 0.50), (0.50, 0.68))
+    o = obs(detections=tuple(det(n, 0.8, x, y) for n, (x, y) in
+                             zip(("pokestop", "pokemon", "gym", "pokestop"), spots)))
+    ax, ay = fsm.zoom_anchor(o, Config())
+    nearest = min(((ax - x) ** 2 + (ay - y) ** 2) ** 0.5 for x, y in spots)
+    assert nearest > 0.12, f"anchor ({ax:.2f},{ay:.2f}) sits {nearest:.3f} from a detection"
+
+
+def test_the_zoom_anchor_stays_on_playable_map():
+    """Off the HUD columns, off PGSharp's own overlay down the left, and far enough down
+    that the drag still ends on screen."""
+    from pogobot import fsm
+    from tests.factories import det
+    for o in (obs(), obs(detections=tuple(det("pokemon", 0.8, 0.2 + 0.1 * i, 0.5)
+                                          for i in range(7)))):
+        ax, ay = fsm.zoom_anchor(o, Config())
+        assert 0.15 <= ax <= 0.85
+        assert ay - Config().zoom.drag_frac > 0.0
+        assert ay <= 0.75
+
+
+def test_the_zoom_gesture_starts_where_the_anchor_says():
+    """The emitted DoubleTapDrag must use the chosen anchor, not the config centre."""
+    from pogobot import fsm
+    from tests.factories import det
+    o = obs(on_map=True, detections=(det("pokestop", 0.9, 0.5, 0.60),))
+    c = ctx(phase="zoom")
+    drags = [e for e in fsm.step(o, c) if isinstance(e, DoubleTapDrag)]
+    assert drags, "no zoom gesture emitted"
+    ax, ay = fsm.zoom_anchor(o, Config())
+    assert (drags[0].x1, drags[0].y1) == (ax, ay)
+    assert drags[0].x2 == ax and drags[0].y2 == pytest.approx(ay - Config().zoom.drag_frac)
 
 
 # ------------------------------------------------------------------ fsm: when it fires
@@ -56,9 +102,12 @@ def test_zoom_fires_the_first_gesture_once_the_map_is_back():
     assert len(drags) == 1
     z = c.cfg.zoom
     d = drags[0]
-    assert d.x1 == pytest.approx(z.center_x) and d.y1 == pytest.approx(z.center_y)
-    assert d.x2 == pytest.approx(z.center_x)               # straight up, not sideways
-    assert d.y2 == pytest.approx(z.center_y - z.drag_frac)  # UP zooms OUT (measured)
+    # The start point is now CHOSEN to avoid whatever the detector can see, so it is the
+    # anchor rather than the config centre - see fsm.zoom_anchor and config.ZoomOut.
+    ax, ay = fsm.zoom_anchor(obs(on_map=True), c.cfg)
+    assert d.x1 == pytest.approx(ax) and d.y1 == pytest.approx(ay)
+    assert d.x2 == pytest.approx(ax)                       # straight up, not sideways
+    assert d.y2 == pytest.approx(ay - z.drag_frac)          # UP zooms OUT (measured)
     assert d.duration_ms == z.duration_ms
     # No self-reported SetFlag for the rep count: `Runner.apply` owns it, and only when
     # this same gesture is actually accepted by the actuator (see test_switch_zoom_reps_*
@@ -267,3 +316,26 @@ def test_a_failed_switch_never_fires_the_zoom_gesture():
     r = _quota_switcher()
     assert _fail_a_switch(r, r.ctx.now + 1.0, tap_login=True)
     assert not any(isinstance(e, DoubleTapDrag) for e in r.actuator.applied)
+
+
+def test_zoom_closes_a_screen_its_own_tap_opened():
+    """`zoom_anchor` avoids what the detector reports, but not what it misses - measured
+    live, an anchored drag opened a gym the detector never named. During SWITCHING
+    `desired_state` returns None, so POPUP cannot come to the rescue and this phase would
+    wait out the whole 240s switch timeout behind that screen."""
+    c = ctx(phase="zoom")
+    off = obs(screen="Menu", conf=0.95, x_button=True, close_xy=(0.5, 0.885))
+    taps = [e for e in fsm.step(off, c) if isinstance(e, Tap)]
+    assert taps, "nothing was pressed to clear the screen the zoom opened"
+    assert (taps[0].x, taps[0].y) == (0.5, 0.885)
+    assert taps[0].budget == "close"
+    assert not [e for e in fsm.step(off, c) if isinstance(e, DoubleTapDrag)], \
+        "the gesture must not fire while the map is not visible"
+
+
+def test_zoom_still_just_waits_when_no_close_button_is_located():
+    """Nothing is invented when the tree/optics name no button: the phase waits exactly as
+    it did before, and the switch's own timeout owns the outcome."""
+    c = ctx(phase="zoom")
+    off = obs(screen="Menu", conf=0.95, x_button=True, close_xy=None)
+    assert fsm.step(off, c) == []

@@ -155,8 +155,12 @@ def test_the_zoom_phase_fires_the_same_measured_gesture():
     drags = kinds(out, DoubleTapDrag)
     z = Config().zoom
     assert len(drags) == 1
-    assert (drags[0].x1, drags[0].y1) == (z.center_x, z.center_y)
-    assert drags[0].y2 == pytest.approx(z.center_y - z.drag_frac)
+    # The start point is CHOSEN to avoid whatever the detector can see - a tap that lands
+    # on a stop opens the stop and the drag belongs to that screen instead, so no zoom
+    # happens (measured by hand as screen=Poi@0.83). See fsm.zoom_anchor.
+    ax, ay = fsm.zoom_anchor(MAP, Config())
+    assert (drags[0].x1, drags[0].y1) == (ax, ay)
+    assert drags[0].y2 == pytest.approx(ay - z.drag_frac)
     assert drags[0].duration_ms == z.duration_ms and drags[0].budget == "zoom"
 
 

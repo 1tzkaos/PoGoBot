@@ -289,6 +289,46 @@ def reach_distance(cfg: Config, x: float, y: float, scale: float = 1.0) -> float
     return (dx * dx + dy * dy) ** 0.5
 
 
+def zoom_anchor(obs, cfg) -> tuple[float, float]:
+    """Where to put the zoom gesture's finger: map, not scenery.
+
+    The gesture is a tap followed by a drag from the same point, and the game decides what
+    that first touch MEANS before any drag arrives. Land it on a PokeStop, a gym or a
+    Pokemon and it opens that thing; the drag then belongs to whatever screen just came up,
+    and no zoom happens at all. Measured while testing the gesture by hand: a run of drags
+    anchored at screen centre ended with `screen=Poi@0.83`, a stop the tap had opened.
+
+    So the anchor is CHOSEN, not fixed - the one place in this system where a coordinate is
+    picked rather than located, because the requirement is the opposite of locating: it
+    must be where nothing is. The detector already reports everything the map has
+    (`obs.detections` carries every class, not just `TARGETABLE`), so the empty spot is
+    whatever candidate sits furthest from all of them.
+
+    The search window keeps the gesture on playable map: `x` avoids the HUD columns and
+    PGSharp's own overlay down the left, and `y` starts far enough down that a drag of
+    `drag_frac` still ends on screen while staying above the avatar and the bottom bar.
+    With no detections at all the window's own centre is returned, which is the old
+    behaviour for an empty map.
+    """
+    z = cfg.zoom
+    lo_y = z.drag_frac + 0.06
+    hi_y = 0.72
+    if hi_y <= lo_y:                      # a drag too long for any on-screen start
+        return z.center_x, min(max(z.drag_frac + 0.02, 0.0), 1.0)
+    xs = [0.20 + i * (0.60 / 6) for i in range(7)]
+    ys = [lo_y + j * ((hi_y - lo_y) / 4) for j in range(5)]
+    pts = [(d.center_norm[0], d.center_norm[1]) for d in obs.detections]
+    if not pts:
+        return z.center_x, (lo_y + hi_y) / 2.0
+    best = None
+    for y in ys:
+        for x in xs:
+            near = min((x - px) ** 2 + (y - py) ** 2 for px, py in pts)
+            if best is None or near > best[0]:
+                best = (near, x, y)
+    return best[1], best[2]
+
+
 def pick_target(obs: Observation, ctx: Context):
     """Best in-reach, not-cooled detection. Pokemon outrank stops, then confidence."""
     cfg = ctx.cfg
@@ -788,19 +828,37 @@ class Switching(Handler):
         fewer than `repeats` real zoom-outs.
         """
         if not obs.on_map:
+            # The gesture's own first touch can open something. `zoom_anchor` avoids
+            # everything the DETECTOR reports, but the detector does not report every
+            # tappable thing on the map - measured live, an anchored drag opened a gym the
+            # detector had not named at all. That matters more here than anywhere else in
+            # this ladder: `desired_state` deliberately returns None for SWITCHING, so the
+            # POPUP route that closes such a screen everywhere else cannot run, and this
+            # phase would otherwise sit waiting for a map behind a screen nothing was
+            # going to close until `Timings.switch_timeout` (240s) expired.
+            #
+            # So close it here, with the same located button POPUP would use and the same
+            # one-blind-action-per-visit budget the recovery ladder uses. Nothing is
+            # invented: with no located button this still just waits, exactly as before.
+            if obs.close_button_xy is not None \
+                    and ctx.ready("close", ctx.cfg.timings.close_menu):
+                return [Tap(*obs.close_button_xy,
+                            f"{self._label(ctx)}: close what the zoom tap opened",
+                            budget="close")]
             return []
         z = ctx.cfg.zoom
         if ctx.switch_zoom_reps >= z.repeats:
             return [SetFlag("switch_phase", "goplus")] + self._goplus(obs, ctx)
         if not ctx.ready("zoom", 0.0):
             return []                    # let the previous drag's settle window clear
-        y2 = z.center_y - z.drag_frac
+        ax, ay = zoom_anchor(obs, ctx.cfg)
+        y2 = ay - z.drag_frac
         # There is nothing to have confirmed during a preflight - no login was tapped -
         # so the clause naming one is omitted rather than filled with None; see
         # `_label`/`_finished` for the rule the whole chain follows.
         who = f" after confirming {ctx.switch_target}" if ctx.switch_target else ""
         return [
-            DoubleTapDrag(z.center_x, z.center_y, z.center_x, y2,
+            DoubleTapDrag(ax, ay, ax, y2,
                           f"{self._label(ctx)}: zoom out{who} "
                           f"({ctx.switch_zoom_reps + 1}/{z.repeats})",
                           duration_ms=z.duration_ms, budget="zoom"),
