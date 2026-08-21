@@ -40,6 +40,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="consecutive times recovery may force-stop and relaunch the game "
                         "before halting instead (0 never restarts it)")
     p.add_argument("--no-rotate", action="store_true")
+    p.add_argument("--no-preflight", action="store_true",
+                   help="skip the startup pass that zooms out, turns Virtual Go Plus back "
+                        "on and starts AutoWalk once the map is first confirmed")
     p.add_argument("--dry-run", action="store_true",
                    help="perceive and decide, but never touch the device")
     p.add_argument("--no-display", action="store_true")
@@ -99,8 +102,45 @@ def _pause_file_present(pause_file) -> bool:
         return False
 
 
+#: Times `prepare_accounts` will try to read the PGSharp account panel before giving up.
+#:
+#: One read used to be the whole of it, and a single failure disabled account switching for
+#: an entire run with nothing said afterwards: logs/sessions.jsonl recorded `ended 08-20
+#: 18:59:47 account=None uptime=4h09m28s`, and because `Runner.choose_next_account` refuses
+#: to act without a known origin inside a known roster, the run never attempted a switch -
+#: 115,210 frames, zero SWITCHING - so the zoom-out, Virtual Go Plus and AutoWalk steps that
+#: live inside a switch never ran either. Run by hand on the same phone minutes later the
+#: identical read worked ("logged in as NickStanki (L62), 2 account(s) available", 14.0s),
+#: which is what makes the failure SITUATIONAL - most likely the game or the PGSharp overlay
+#: was not ready yet at the moment the bot happened to look - and a situational failure is
+#: exactly the kind a second look fixes.
+#:
+#: Three, on the same reasoning `Config.max_app_restarts`, `runner.SWITCH_MAX_FAILURES` and
+#: `StarSeparation.max_drags` all state: the first is the ordinary attempt, the second is
+#: the one the "not ready yet" hypothesis predicts will succeed, and the third is already
+#: re-testing a hypothesis two attempts have refuted. Past that the cause is not timing, and
+#: more looks only delay a run that is going to have to be restarted anyway.
+IDENTIFY_ATTEMPTS = 3
+
+#: Seconds between those attempts.
+#:
+#: The gap is not the whole wait - each attempt is itself a multi-second probe of the very
+#: thing being waited for: a successful identification was measured at 14.0s end to end, and
+#: a failing one still spends up to `accounts.UiTreeReader.timeout` (5s) inside its first
+#: blocking dump before it can report anything. So three attempts at this spacing span
+#: roughly half a minute of real wall clock, which is the order of a cold app start (see
+#: `Timings.app_restart_grace`, sized for "tens of seconds" of exactly that).
+#:
+#: Real headroom rather than a tight bound, and the asymmetry is why: waiting too long costs
+#: a few seconds of startup on a run that lasts hours, while waiting too little costs the
+#: whole run's switching - and with it the three post-login steps - with no further attempt
+#: and, before this, no further warning either.
+IDENTIFY_RETRY_WAIT = 10.0
+
+
 def prepare_accounts(cfg: Config, *, requested, pause_file, make_reader, actuator,
-                     settle: float = 1.0):
+                     settle: float = 1.0, attempts: int = IDENTIFY_ATTEMPTS,
+                     retry_wait: float = IDENTIFY_RETRY_WAIT):
     """Decide who this run belongs to, and hand back what a switch will need.
 
     Returns `(tree_reader, account, roster)`; a `None` reader means switching is not
@@ -125,6 +165,14 @@ def prepare_accounts(cfg: Config, *, requested, pause_file, make_reader, actuato
     one's 24h window - so the bot spins past a cap it cannot see - and starts the
     round-robin from the wrong origin. `quota._normalize_account` raises rather than guess
     for the same reason; here there is a right answer, so it is used, loudly.
+
+    The read is RETRIED, up to `attempts` times `retry_wait` apart, and its failure is
+    announced rather than logged in passing - see IDENTIFY_ATTEMPTS above for the run that
+    made both necessary. Nothing is invented when it still fails: no account name is
+    guessed and no roster is fabricated, because either would be worse than knowing nothing.
+    A guessed name books every spin to an account that may be capped, and an invented roster
+    would have `Runner.choose_next_account` name a login target that PGSharp's own panel
+    would not find - the tap goes nowhere and the attempt burns `Timings.switch_timeout`.
     """
     log = logging.getLogger("pogobot")
     if not switching_enabled(cfg):
@@ -132,7 +180,17 @@ def prepare_accounts(cfg: Config, *, requested, pause_file, make_reader, actuato
             log.info("account switching is off, so the PGSharp account panel is left "
                      "alone; spins are recorded unattributed (pass --account NAME to "
                      "book them to an account)")
-        return None, requested, ()
+        # A reader is still handed back when anything else needs to SEE the view tree,
+        # even though nothing here will open the panel to identify anyone. Two things do,
+        # and both were silently dead on a default invocation because this returned None:
+        # `fsm.Preflight._autowalk_open` needs the star's bounds, so AutoWalk - one of the
+        # three steps the preflight exists to perform - was skipped on every run without a
+        # switch trigger; and `Runner._refresh_accounts` needs a reader before
+        # `fsm.Recovering._panel_close` can ever see the PGSharp accounts panel, so the
+        # recovery from that panel could not fire either. Constructing the reader is free
+        # (it holds a serial and a screen size); what costs is a `read()`, which only
+        # those two callers make, on their own throttles.
+        return (make_reader() if cfg.preflight else None), requested, ()
     if _pause_file_present(pause_file):
         log.warning("paused at startup (%s exists), so the account panel is not opened "
                     "and account switching is unavailable this run - a switch has no "
@@ -147,12 +205,72 @@ def prepare_accounts(cfg: Config, *, requested, pause_file, make_reader, actuato
     # session stats, legacy attribution) falls back to the unattributed bucket for this
     # run. `identify_account` logs its own outcome.
     reader = make_reader()
-    panel = identify_account(reader, actuator, settle=settle)
+    panel = None
+    spent = 0
+    dry_run = bool(getattr(actuator, "dry_run", False))
+    attempts = max(1, attempts)      # one look is the floor; zero would read nothing at all
+    for attempt in range(1, attempts + 1):
+        spent = attempt
+        panel = identify_account(reader, actuator, settle=settle)
+        # An ACTIVE account is what "read it" means here, not merely a panel that answered.
+        # Both halves of what a switch needs come from the asterisk: it is the origin
+        # `Runner.choose_next_account` rotates from, and without it a roster - even a full
+        # one - names no starting point, so the whole feature stays inert exactly as it did
+        # on the four-hour run. Retrying a panel that opened on nobody is also the case
+        # `Timings.switch_clear_max` records as reachable in the field (PGSharp showing
+        # NEITHER account with an asterisk), and one more look costs a few seconds.
+        if panel is not None and panel.active is not None:
+            if attempt > 1:
+                log.info("read the PGSharp account panel on attempt %d of %d",
+                         attempt, attempts)
+            break
+        if dry_run and (panel is None or not panel.panel_open):
+            # A dry run suppresses the launcher tap in `Actuator.apply`, so the panel was
+            # never opened and no number of further looks can open it. Retrying here would
+            # spend the whole budget - `IDENTIFY_RETRY_WAIT` of real `time.sleep` between
+            # multi-second blocking dumps - to reach a give-up line that then blames the
+            # phone for a suppression this process chose. The retry is for a SITUATIONAL
+            # failure; this one is structural.
+            break
+        if attempt < attempts:
+            log.warning("could not read who is logged in (attempt %d of %d); retrying in "
+                        "%.0fs - the game or the PGSharp overlay may still be starting up",
+                        attempt, attempts, retry_wait)
+            if retry_wait:
+                time.sleep(retry_wait)
     # The roster is cached from this one read and never re-enumerated: the panel is
     # closed for the rest of the run, so a live read would list no accounts at all.
     # An account added to PGSharp mid-run is therefore not noticed until a restart.
     found = panel.active.name if panel is not None and panel.active else None
     roster = panel.names if panel is not None else ()
+    if found is None:
+        # Loud, and in the same shape as the paused-at-startup warning above, because it
+        # has the same consequence and used to be the only one of the two that was silent
+        # about it. What follows from an unknown account is not "slightly worse tracking":
+        # `Runner.choose_next_account` returns None for a session with no origin, so NO
+        # switch is ever attempted, and the zoom-out, Virtual Go Plus and AutoWalk steps
+        # that live inside a switch never run either. Measured: 4h09m, account=None,
+        # 115,210 frames, zero SWITCHING, and the operator reasonably assumed a switch had
+        # happened. The startup preflight (fsm.Preflight) now covers those three steps
+        # once at startup regardless, which is why this says switching rather than
+        # everything.
+        #
+        # The stated CAUSE has to match the run that actually happened: under --dry-run the
+        # launcher tap was suppressed by this process, so telling an operator to "restart
+        # with both on screen" sends them to look at a phone that is behaving perfectly.
+        cause = ("--dry-run suppresses the tap that opens the panel, so it could not be "
+                 "read at all; this is expected in a dry run."
+                 if dry_run else
+                 "This is usually the game or the PGSharp overlay not being up yet when "
+                 "the bot started - restart the bot with both on screen.")
+        log.warning("ACCOUNT SWITCHING IS DISABLED for this run: the PGSharp account panel "
+                    "did not name an active account in %d attempt(s), so there is no "
+                    "roster and no account to rotate from, and no switch will be "
+                    "attempted. %s %s",
+                    spent, cause,
+                    f"Spins are booked to --account {requested} meanwhile." if requested
+                    else "Spins meanwhile go to the unattributed bucket; --account NAME "
+                         "books them to an account.")
     if found and requested and requested != found:
         log.warning("--account %s contradicts the PGSharp overlay, which says %s is "
                     "logged in; going with %s. The overlay is the only thing that can "
@@ -200,6 +318,17 @@ def config_from_args(a) -> Config:
     overrides["dry_run"] = bool(a.dry_run)
     overrides["fight_rockets"] = not a.no_rockets
     overrides["auto_rotate"] = not a.no_rotate
+    # Negated flag over a positive one, like --no-rockets and --no-rotate beside it: the
+    # feature is on by default (see Config.preflight), so the only thing an invocation ever
+    # needs to say is that it wants it off.
+    #
+    # Never under --replay. A replay exists to reproduce a recorded session, and a preflight
+    # is a state the recording never had: it would take the screen on the first on-map frame
+    # and, while `desired_state` gives PREFLIGHT the screen, ignore the very encounters and
+    # popups the operator opened the recording to look at. There is also nothing for it to
+    # do - the actuator is a NullActuator and there is no device to zoom, toggle or route -
+    # so this is not a feature being withheld, it is a diagnostic being kept honest.
+    overrides["preflight"] = not a.no_preflight and not getattr(a, "replay", None)
     overrides["device"] = a.device
     overrides["switch_on_quota"] = bool(a.switch_on_quota)
     if a.switch_every is not None:

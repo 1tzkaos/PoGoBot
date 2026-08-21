@@ -24,6 +24,11 @@ class BotState(enum.Enum):
     POKESTOP = "POKESTOP"
     ROCKET = "ROCKET"
     SWITCHING = "SWITCHING"
+    #: The startup zoom-out / Virtual Go Plus / AutoWalk pass (see `fsm.Preflight`). Its
+    #: own state rather than a mode of SWITCHING so a trace can still be read for how many
+    #: account switches a run actually performed - the question that diagnosed the failure
+    #: this state exists to fix.
+    PREFLIGHT = "PREFLIGHT"
     POPUP = "POPUP"
     RECOVERING = "RECOVERING"
     HALTED = "HALTED"

@@ -82,6 +82,17 @@ class Context:
     taps_in_state: int = 0
     #: refreshed by the runner from the UI tree; None until first read
     accounts: Optional[AccountView] = None
+    #: whether this run has a uiautomator reader at all, set once by `Runner.__init__`
+    #: from `tree_reader is not None`. `accounts` cannot answer this: it is legitimately
+    #: None between a read and the tap that invalidates it, so "no view right now" and
+    #: "there will never be a view" look identical from inside a handler - and the two
+    #: want opposite behaviour. `Preflight._autowalk_open` is the one that has to tell
+    #: them apart: with no reader its widgets can never be located, so waiting out
+    #: `config.AutoWalk.budget_s` buys nothing and costs 30s of a state that owns the
+    #: screen. Defaults True because a Context nobody has told otherwise is one where the
+    #: phases' own "could not look; wait for the next refresh" handling is the right
+    #: answer; the runner overwrites it with the truth before the first tick.
+    tree_available: bool = True
     switch_target: Optional[str] = None
     switch_phase: str = "open"
     #: applications of the post-switch zoom-out gesture fired so far in the "zoom" phase.
@@ -511,6 +522,13 @@ class Switching(Handler):
     start an AutoWalk route (see `_autowalk_open` and its neighbours), since the user
     wants one running after every switch.
 
+    Everything from "zoom" onward has a SECOND caller: `Preflight` inherits these phases
+    and runs exactly that tail once at startup, because a bot pointed at a freshly
+    logged-in game needs the same three things a login does. Those methods are therefore
+    written to work with no target at all - the only place `switch_target` still appears
+    past "verify" is inside message strings, which ask `_label`/`_finished` rather than
+    interpolate a None. Anything added below "verify" has to keep that true.
+
     `settle` does NOT identify the screens that appear after a login. It cannot: Willow's
     dialogue classifies as Rocket @0.66, and the optical signal that separates a dialogue
     box fires on 5/5 ChooseParty frames, which is a real Rocket screen. What justifies
@@ -545,6 +563,35 @@ class Switching(Handler):
 
     def timeout(self, ctx):
         return ctx.cfg.timings.switch_timeout
+
+    @staticmethod
+    def _label(ctx) -> str:
+        """"switch" or "preflight" - which of the two runs owns these phases right now.
+
+        `switch_target` is the discriminator because it is the one thing a preflight
+        structurally does not have: `Runner._begin_preflight` enters `Preflight` at the
+        "zoom" phase with the target left at None precisely so no branch here can name an
+        account nothing logged into (see `Preflight`). Every branch from "zoom" onward is
+        shared by both runs, so the alternative to asking is a second copy of each of
+        them, differing only in a word.
+        """
+        return "switch" if ctx.switch_target else "preflight"
+
+    @staticmethod
+    def _finished(ctx, detail: str = "") -> str:
+        """The reason string every exit from the zoom -> goplus -> autowalk chain carries.
+
+        In one place because those phases are driven by BOTH a confirmed account switch
+        and the startup preflight, and only the first of the two has an account to name.
+        Left as an f-string on `switch_target` it read "logged into None" during a
+        preflight - the exact false claim that made the failure this whole change exists
+        for so hard to see: logs/sessions.jsonl recorded `account=None` for a four-hour
+        run and nothing said why, so an operator-facing line that invents an account name
+        is the last thing to hand whoever reads the log next.
+        """
+        head = (f"logged into {ctx.switch_target}" if ctx.switch_target
+                else "startup preflight over")
+        return f"{head}; {detail}" if detail else head
 
     def step(self, obs, ctx):
         if ctx.switch_phase == "settle":
@@ -721,9 +768,13 @@ class Switching(Handler):
         if not ctx.ready("zoom", 0.0):
             return []                    # let the previous drag's settle window clear
         y2 = z.center_y - z.drag_frac
+        # There is nothing to have confirmed during a preflight - no login was tapped -
+        # so the clause naming one is omitted rather than filled with None; see
+        # `_label`/`_finished` for the rule the whole chain follows.
+        who = f" after confirming {ctx.switch_target}" if ctx.switch_target else ""
         return [
             DoubleTapDrag(z.center_x, z.center_y, z.center_x, y2,
-                          f"switch: zoom out after confirming {ctx.switch_target} "
+                          f"{self._label(ctx)}: zoom out{who} "
                           f"({ctx.switch_zoom_reps + 1}/{z.repeats})",
                           duration_ms=z.duration_ms, budget="zoom"),
         ]
@@ -758,7 +809,8 @@ class Switching(Handler):
             return [SetFlag("switch_phase", "autowalk_open")] + self._autowalk_open(obs, ctx)
         if not ctx.ready("goplus", g.press_wait):
             return []                    # either mid-settle, or waiting for the press to take
-        return [Tap(g.tap_x, g.tap_y, "switch: re-enable Virtual Go Plus", budget="goplus")]
+        return [Tap(g.tap_x, g.tap_y, f"{self._label(ctx)}: re-enable Virtual Go Plus",
+                    budget="goplus")]
 
     def _autowalk_deadline(self, ctx) -> Optional[list]:
         """Common to every "autowalk_*" phase. Returns the give-up effects once the
@@ -805,10 +857,10 @@ class Switching(Handler):
         elapsed = ctx.now - ctx.switch_autowalk_since
         if elapsed <= cfg.budget_s:
             return None
+        late = f"AutoWalk did not complete in time ({ctx.switch_phase})"
         if ctx.switch_phase == "autowalk_open":
             return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                               f"logged into {ctx.switch_target}; AutoWalk did not "
-                               f"complete in time ({ctx.switch_phase})")]
+                               self._finished(ctx, late))]
         v = ctx.accounts
         if v is not None and v.available and v.star_norm is not None \
                 and ctx.ready("switch", ctx.cfg.timings.switch_tap):
@@ -816,15 +868,12 @@ class Switching(Handler):
                 Tap(*v.star_norm, "autowalk: close the shortcut menu (giving up)",
                     budget="switch"),
                 Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                           f"logged into {ctx.switch_target}; AutoWalk did not "
-                           f"complete in time ({ctx.switch_phase})"),
+                           self._finished(ctx, late)),
             ]
         if elapsed <= cfg.budget_s + cfg.close_grace_s:
             return []             # still inside the cleanup allowance; wait for a view
         return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                           f"logged into {ctx.switch_target}; AutoWalk did not "
-                           f"complete in time ({ctx.switch_phase}); the menu may "
-                           f"still be open")]
+                           self._finished(ctx, f"{late}; the menu may still be open"))]
 
     def _separate_star(self, ctx, v):
         """Drag the PGSharp star clear of the accounts launcher when the tree says the two
@@ -896,8 +945,8 @@ class Switching(Handler):
                      f"after {ctx.star_drags} drag(s); skipping AutoWalk rather than "
                      f"tapping a control that opens the accounts panel", "warn"),
                 Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                           f"logged into {ctx.switch_target}; the PGSharp star could not "
-                           f"be separated from the accounts launcher"),
+                           self._finished(ctx, "the PGSharp star could not be separated "
+                                               "from the accounts launcher")),
             ]
         if v.panel_open:
             # Never drag while the accounts panel is up: during a switch that panel owns
@@ -1027,9 +1076,13 @@ class Switching(Handler):
         v = ctx.accounts
         if v is not None and v.available and v.autowalk_menu_norm is not None:
             if ctx.switch_autowalk_active is Tristate.TRUE:
+                # No account is named during a preflight rather than one being invented -
+                # see `_label`/`_finished`. The rule itself is untouched by which run is
+                # driving it: only a positively-read TRUE skips the tap.
+                who = f" for {ctx.switch_target}" if ctx.switch_target else ""
                 return [
-                    Note(f"AutoWalk already active for {ctx.switch_target}; not tapping "
-                         f"it again - closing the shortcut menu instead", "info"),
+                    Note(f"AutoWalk already active{who}; not tapping it again - "
+                         f"closing the shortcut menu instead", "info"),
                     SetFlag("switch_phase", "autowalk_close"),
                 ] + self._autowalk_close(obs, ctx)
             if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
@@ -1112,11 +1165,12 @@ class Switching(Handler):
             if not ctx.ready("switch", ctx.cfg.timings.switch_tap):
                 return []
             # Tap before Transition: `Runner.apply` walks the list in order, so the tap is
-            # applied while the state is still SWITCHING and the confirmation follows it.
+            # applied while the state is still SWITCHING (or PREFLIGHT, which drives this
+            # same ladder) and the confirmation follows it.
             return [
                 Tap(*v.star_norm, "autowalk: close the shortcut menu", budget="switch"),
                 Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
-                           f"logged into {ctx.switch_target}"),
+                           self._finished(ctx)),
             ]
         gone = self._autowalk_deadline(ctx)
         return gone if gone is not None else []
@@ -1125,6 +1179,204 @@ class Switching(Handler):
         return [
             Note(f"account switch to {ctx.switch_target} never confirmed", "warn"),
             Transition(BotState.RECOVERING, IntentOutcome.EXPIRED, "switch timeout"),
+        ]
+
+
+#: The phases a preflight runs, in the order they chain into each other, and the phase
+#: `Runner._begin_preflight` therefore enters at. One definition, consulted by both the
+#: handler (which refuses any phase outside it) and the runner (which starts the chain), so
+#: "which phases are the preflight" cannot drift into two answers that disagree.
+PREFLIGHT_PHASES = ("zoom", "goplus", "autowalk_open", "autowalk_menu",
+                    "autowalk_dialog", "autowalk_close")
+
+#: What is still unconfirmed when a preflight is abandoned at a given phase, as a COMPLETE
+#: clause. The whole value of the warning `Preflight.on_timeout` writes is naming WHICH of
+#: the three steps did not happen - "the preflight timed out" alone leaves an operator to
+#: guess whether the camera, the toggle or the route is the one that is wrong. Derived from
+#: the chain above: a phase is reached only once every phase before it has finished, so
+#: everything from the stuck phase onward is what is outstanding.
+#:
+#: Whole clauses rather than noun phrases slotted into a shared "... did not happen this
+#: run" tail, because the last rung is not a subset of the others - by then the three steps
+#: HAVE happened and what is outstanding is a menu left open. Slotted into that tail it
+#: read "but nothing, but PGSharp's shortcut menu may still be over the map did not happen
+#: this run", which is both unreadable and, taken at face value, the opposite of the truth,
+#: on the one warning that matters most: a shortcut menu left over the reach ellipse
+#: silently kills AutoWalk for the rest of the run (see `Switching._autowalk_close`). A
+#: change whose whole premise is that a misleading log line hid a failure for four hours
+#: does not get to ship another one.
+_PREFLIGHT_UNDONE = {
+    "zoom": "the zoom-out, Virtual Go Plus and AutoWalk did not happen this run",
+    "goplus": "Virtual Go Plus and AutoWalk did not happen this run",
+    "autowalk_open": "AutoWalk did not start this run",
+    "autowalk_menu": "AutoWalk did not start this run",
+    "autowalk_dialog": "AutoWalk did not start this run",
+    # By this phase AutoWalk has been started; only PGSharp's own shortcut menu is still
+    # open, which is not cosmetic - see `Switching._autowalk_close`.
+    "autowalk_close": "AutoWalk started, but PGSharp's shortcut menu may still be over "
+                      "the map",
+}
+
+#: The preflight phases that fire a BLIND gesture at a fixed screen coordinate and so
+#: refuse to act without `obs.on_map` (`Switching._zoom`, `Switching._goplus`). Named
+#: because they are also the phases that own the screen for no good reason once something
+#: closable is on it - see `Preflight.step`.
+_PREFLIGHT_MAP_PHASES = ("zoom", "goplus")
+
+
+class Preflight(Switching):
+    """The same zoom-out, Virtual Go Plus and AutoWalk steps a confirmed switch runs, once
+    at startup, before the bot is allowed to play.
+
+    The user's report is one cause with three symptoms: a four-hour run that "didn't zoom
+    out, nor did it continue autowalk nor did it turn on the Pokemon Go Plus". All three
+    of those live INSIDE this ladder, which until now ran only after an account switch -
+    and that run performed no switch at all (logs/trace.jsonl for it: 115,210 frames, zero
+    SWITCHING). A bot that has just been pointed at a freshly-logged-in game is in exactly
+    the state a switch leaves behind, so it needs exactly the same three steps.
+
+    A SUBCLASS driving the existing phase methods, rather than a copy of them or a
+    `switch_phase` walked through SWITCHING itself. Three things decided that:
+
+      * Nothing is re-implemented. `_zoom`, `_goplus` and the `_autowalk_*` phases come
+        from `Switching`, so the measured gesture, the three-answer Go Plus reading
+        (ON/UNKNOWN are still never tapped) and the "already autowalking, do not tap it
+        again" rule all keep working here by construction rather than by a second author
+        remembering them. From "zoom" onward those methods only ever named
+        `ctx.switch_target` inside message strings, which is why they are reusable with no
+        login and no target at all - and why those strings now ask `_label`/`_finished`
+        instead of interpolating a None. The two methods below that are not inherited
+        outright still call the inherited one; they add the single thing that genuinely
+        differs between the two runs, and `tests/test_preflight.py` refuses any override
+        that does not delegate.
+      * It is NOT SWITCHING. Reusing that state would have made a preflight
+        indistinguishable from a switch in the one artifact this failure was diagnosed
+        from - counting SWITCHING frames in the trace is precisely what proved no switch
+        ever happened - and would have handed it `Timings.switch_timeout` (240s), the
+        switch failure/backoff bookkeeping in `Runner._count_transition`, and the
+        "account switch never confirmed" wording, none of which describes a startup check.
+      * The import-time contract is satisfied the ordinary way: its own numeric
+        `timeout_s`, its own `on_timeout`.
+
+    Bounded twice, and never able to stop the bot playing. `Timings.preflight_timeout`
+    bounds the state, and every exit - the ladder finishing, the AutoWalk wall clock
+    (`config.AutoWalk.budget_s`) running out, a star that will not separate, no view tree
+    to find one in, a closable overlay arriving over the two blind phases, the state
+    timeout itself - transitions to SCANNING and plays. The only thing a failure changes
+    is what the log says. That budget also sits inside `Timings.stuck_watchdog` (120s), so
+    unlike a switch this needs none of the watchdog credit `Context.switch_exit_ts` grants
+    SWITCHING: a preflight cannot by itself look like a wedged run.
+
+    It runs ONCE per game start - not once per process, because RECOVERING's last resort
+    force-stops and relaunches the game, and a cold relaunch undoes all three of the very
+    things this sets. `Runner._maybe_preflight` owns that (a latch, cleared again only by
+    an accepted `effects.RestartApp`), for the same reason `_maybe_switch` owns when a
+    switch may start: entering a state is the runner's decision, and hanging it off `Boot`
+    alone would lose the feature on any startup that took longer than BOOT's 30s budget
+    and reached the map through RECOVERING instead - a cold start after `RestartApp` is
+    measured in tens of seconds (see `Timings.app_restart_grace`).
+    """
+
+    state = BotState.PREFLIGHT
+    #: Declared so the import-time contract below still sees a numeric budget, and kept
+    #: equal to the config default so the two can never disagree - the same shape, and the
+    #: same reason, as `Switching.timeout_s`.
+    timeout_s = Timings().preflight_timeout
+
+    def timeout(self, ctx):
+        return ctx.cfg.timings.preflight_timeout
+
+    def step(self, obs, ctx):
+        if ctx.switch_phase not in PREFLIGHT_PHASES:
+            # `Switching.step`'s fall-through is the "open" behaviour: it drives the
+            # PGSharp overlay toward a login button for `switch_target`, which a preflight
+            # does not have. Refusing outright means no phase this state was never given
+            # can ever reach that code and tap the account panel at a target of None.
+            return [Transition(BotState.SCANNING, IntentOutcome.CARRIED,
+                               f"preflight has no {ctx.switch_phase!r} phase to run")]
+        if obs.in_overlay and ctx.switch_phase in _PREFLIGHT_MAP_PHASES:
+            # Hand the screen back rather than sit on it. `desired_state` lets this state
+            # own the screen (post-login and PGSharp's own windows must not be chased),
+            # and its POPUP branch only fires from SCANNING/TARGETING - so while a
+            # preflight holds a closable overlay NOTHING closes it, and `_zoom`/`_goplus`
+            # cannot advance either, since both refuse to fire their blind fixed-coordinate
+            # gesture without `obs.on_map`. Measured through the real Runner with a
+            # closable modal arriving one tick in: 4 close attempts over 100s of simulated
+            # clock - none of them until the 90s budget expired - against 36 with this
+            # yield in place, the first of them a second after the modal appeared.
+            #
+            # Only these two phases. The autowalk ones act on coordinates read from the
+            # live tree, under PGSharp's own menu and AlertDialog, which is exactly the
+            # kind of screen that can read as an overlay while the ladder still has to act
+            # on it (see `_autowalk_open`'s docstring) - yielding there would abandon a
+            # half-driven menu over the map, which is the failure `_autowalk_close` exists
+            # to prevent. `in_overlay` and not merely `not on_map`: it demands a smoothed
+            # X button AND no map AND no encounter, so a single misread frame during the
+            # zoom drag cannot end the preflight, while the modal this is for does.
+            #
+            # The preflight is not resumed afterwards: the latch in
+            # `Runner._maybe_preflight` has already been set. Best-effort is the whole
+            # contract of this state - it may never be the reason the bot stops playing.
+            return [
+                Note(f"a closable overlay came up during the startup preflight's "
+                     f"{ctx.switch_phase} step; handing the screen back so it can be "
+                     f"closed - {_PREFLIGHT_UNDONE[ctx.switch_phase]}", "warn"),
+                Transition(BotState.SCANNING, IntentOutcome.CARRIED,
+                           "startup preflight yielding to a closable overlay"),
+            ]
+        return super().step(obs, ctx)
+
+    def _autowalk_open(self, obs, ctx):
+        """The first AutoWalk rung, refused outright when this run has no view tree.
+
+        Every autowalk phase locates its widget - the star, the menu row, the dialog
+        button - in the live uiautomator tree, and `cli.prepare_accounts` hands `Runner` a
+        reader ONLY when a switch trigger is armed, which is not the default. Without one
+        `ctx.accounts` is None forever, so the inherited ladder can do nothing but wait out
+        `config.AutoWalk.budget_s`: measured on a controlled clock, two zoom drags and then
+        30.4s of empty ticks. That is not merely idle - `desired_state` gives this state
+        the screen, so for those 30s an encounter, a Rocket screen or a popup is ignored,
+        and `_goplus` may just have switched Virtual Go Plus on, which is what produces
+        encounters. Ending here instead costs nothing that was reachable anyway; the runner
+        has already said why, once, in `_maybe_preflight`.
+        """
+        if not ctx.tree_available:
+            return [Transition(BotState.SCANNING, IntentOutcome.CONFIRMED,
+                               self._finished(ctx, "AutoWalk needs the PGSharp view "
+                                                   "tree, which this run has no reader "
+                                                   "for"))]
+        return super()._autowalk_open(obs, ctx)
+
+    def _autowalk_deadline(self, ctx):
+        """The inherited give-up, said out loud.
+
+        "AutoWalk is not running" is one of the three symptoms the user actually reported,
+        and every likely way to reach it here - a star that cannot be located, a menu that
+        never renders - leaves through this method as a single INFO state-transition line.
+        The same change deliberately made a failed identification a WARNING; this is the
+        same silence in the same run. `Switching` is left alone: a switch that got as far
+        as this has already logged the login it confirmed.
+        """
+        gone = super()._autowalk_deadline(ctx)
+        if gone is None or not any(isinstance(e, Transition) for e in gone):
+            return gone            # still inside the ladder's own cleanup allowance
+        return [Note(f"the startup preflight could not start AutoWalk within "
+                     f"{ctx.cfg.autowalk.budget_s:.0f}s at the {ctx.switch_phase} step - "
+                     f"playing anyway, with no route running", "warn")] + gone
+
+    def on_timeout(self, obs, ctx):
+        undone = _PREFLIGHT_UNDONE.get(ctx.switch_phase,
+                                       "the startup checks did not all happen this run")
+        return [
+            Note(f"the startup preflight ran out of its {self.timeout(ctx):.0f}s budget "
+                 f"at the {ctx.switch_phase} step - playing anyway: {undone}", "warn"),
+            # SCANNING, never RECOVERING: nothing here is evidence that the bot is stuck.
+            # The screen the preflight was driving is the map (zoom/goplus both wait for
+            # it) or PGSharp's own menu over it, and SCANNING's own map check plus the
+            # recovery ladder already handle whatever is actually in front of us. Sending
+            # a merely-incomplete startup check to RECOVERING would spend a recovery on a
+            # bot that is perfectly able to play.
+            Transition(BotState.SCANNING, IntentOutcome.CARRIED, "preflight timed out"),
         ]
 
 
@@ -1328,8 +1580,8 @@ class Halted(Handler):
 
 
 HANDLERS = {h.state: h() for h in
-            (Boot, Scanning, Targeting, Encounter, Pokestop, Rocket, Switching, Popup,
-             Recovering, Halted)}
+            (Boot, Scanning, Targeting, Encounter, Pokestop, Rocket, Switching, Preflight,
+             Popup, Recovering, Halted)}
 
 # Startup contract: a state without a handler, timeout, or on_timeout is a bug, not a livelock.
 for _s in BotState:
@@ -1381,10 +1633,19 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
     cfg = ctx.cfg
     if ctx.state is BotState.HALTED:
         return None
-    if ctx.state is BotState.SWITCHING:
+    if ctx.state in (BotState.SWITCHING, BotState.PREFLIGHT):
         # A switch owns the screen until it confirms or times out. Post-login screens
         # look like Rocket and like encounters; following them abandons the switch
         # half-done, logged into neither account cleanly.
+        #
+        # PREFLIGHT owns it on the same terms and for the same reason: it drives the very
+        # same PGSharp overlay (see `Preflight`), whose shortcut menu and AutoWalk
+        # AlertDialog are exactly the kind of screen that reads as an overlay, or as
+        # not-on-map, while the ladder still needs to act on it. Both are bounded by their
+        # own state timeout, which is what keeps "owns the screen" from meaning "forever";
+        # PREFLIGHT additionally hands it straight back from its two blind phases when
+        # something closable turns up, since those two need the bare map and nothing else
+        # would ever close it (see `Preflight.step`).
         return None
     # While a Rocket fight is in progress, an encounter-looking screen is almost always
     # part of the fight. Only the map may pull us out; the reward encounter is picked up

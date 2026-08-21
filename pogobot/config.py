@@ -245,6 +245,29 @@ class Timings:
     #: budget above; waiting too little burns the whole budget on a false negative.
     switch_login_grace: float = 30.0
 
+    #: Budget for the whole PREFLIGHT state, read by `fsm.Preflight.timeout` - the startup
+    #: pass that runs a confirmed switch's own zoom-out, Virtual Go Plus and AutoWalk steps
+    #: once before the bot plays.
+    #:
+    #: Derived from the bounds those reused phases already carry, not picked as a round
+    #: number: `ZoomOut.repeats` (2) gestures paced by `ui_settle` (1.2s), then at most
+    #: `GoPlusToggle.max_attempts` (2) presses `GoPlusToggle.press_wait` (6.0s) apart, then
+    #: an AutoWalk ladder that bounds ITSELF at `AutoWalk.budget_s + close_grace_s` (40s) -
+    #: about 55s if every one of them runs long. 90s is real headroom over that, and the
+    #: cost of the headroom is nil: this state has no failure outcome at all (every exit
+    #: goes to SCANNING and plays), so a longer budget only ever buys a slow step the
+    #: chance to finish.
+    #:
+    #: Deliberately kept UNDER `stuck_watchdog` (120s), which is what lets a preflight
+    #: reuse those phases without also needing the watchdog credit `Context.switch_exit_ts`
+    #: grants a switch: SWITCHING can legitimately hide the map for its whole 240s, while a
+    #: preflight cannot occupy the screen long enough to look like a wedged run. Sized
+    #: against the tree-read cost too - `accounts.UiTreeReader.read` blocks the run loop for
+    #: ~3.0s against the rendering game (measured: 2.96, 3.00, 3.00, 3.00, 4.46), and
+    #: `runner.ACCOUNTS_REFRESH` stamps its throttle from when a read FINISHED, so the
+    #: AutoWalk ladder's views land ~5.5s apart and its four steps need most of its 30s.
+    preflight_timeout: float = 90.0
+
     #: How long after an app restart (see effects.RestartApp) RECOVERING waits before it
     #: is willing to judge that restart a failure and spend another one.
     #:
@@ -491,6 +514,22 @@ class Config:
     restock_max_seconds: float = 600.0
     auto_rotate: bool = True
     dry_run: bool = False
+
+    #: Run the startup preflight - the zoom-out, Virtual Go Plus and AutoWalk steps a
+    #: confirmed account switch already performs - once, when the map is first confirmed
+    #: (see `fsm.Preflight` and `runner.Runner._maybe_preflight`).
+    #:
+    #: ON by default, unlike `switch_on_quota`/`switch_every_minutes` beside it. Those two
+    #: change WHICH account a run plays; this only re-applies settings a login resets, on
+    #: the account the run is already on, and every one of its steps is either a no-op or
+    #: already reversible by hand. The failure it prevents is the one that was reported: a
+    #: four-hour run played the whole way through zoomed in, with Virtual Go Plus off and
+    #: no AutoWalk route, because the only code that set those three ran after a switch
+    #: and no switch ever happened. `--no-preflight` turns it off for a run that has been
+    #: set up by hand and does not want its camera or its route touched, and `cli` forces
+    #: it off under `--replay`: a replay reproduces a recording, and a state the recording
+    #: never had would take the screen and ignore the frames it was opened to look at.
+    preflight: bool = True
 
     #: switch accounts when the current one exhausts its 24h spin cap
     switch_on_quota: bool = False

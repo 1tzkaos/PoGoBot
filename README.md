@@ -152,7 +152,9 @@ scrcpy ──▶ capture ──▶ perception ──▶ fsm ──▶ actions �
 ```mermaid
 stateDiagram-v2
     [*] --> BOOT
-    BOOT --> SCANNING: map confirmed
+    BOOT --> PREFLIGHT: map confirmed
+    PREFLIGHT --> SCANNING: startup zoom / Go Plus / AutoWalk done, or its budget spent
+    BOOT --> SCANNING: map confirmed, with --no-preflight
     SCANNING --> TARGETING: tapped a Pokémon
     SCANNING --> POKESTOP: tapped a stop
     TARGETING --> ENCOUNTER: encounter opened
@@ -366,6 +368,17 @@ login button, so it is not done at all unless a switch trigger is armed, and not
 the [pause file](#pausing) is present, because those taps would otherwise be sent by a bot
 that has promised to send nothing.
 
+**That read is retried, and giving up on it is loud.** One failed read used to disable
+switching for the whole run with nothing further said - measured, four hours booked to
+`account=None` with not one switch attempted, which also meant none of the post-login steps
+below ever ran. The same read by hand on the same phone minutes later worked, so the failure
+is usually nothing worse than the game or the PGSharp overlay not being up yet. The bot now
+looks up to three times, ten seconds apart, and when it still cannot name an account it says
+so in one line - account switching is disabled for this run, and why - rather than leaving
+it to be inferred from a switch that never happens. It never guesses a name or invents a
+roster instead: a guessed name books every spin to an account that may be capped, and an
+invented roster sends a login tap at a row PGSharp's panel does not contain.
+
 Without switching, pass `--account NAME` to attribute the run. With neither, the account is
 simply unknown: spins, session stats and the pre-switching legacy log stay in an
 unidentified bucket, exactly as they did before this feature existed.
@@ -417,6 +430,47 @@ unmeasured band between the two signatures.
 
 **A switch attempt is credited a grace period with the stuck watchdog, not exempted from it.** That watchdog halts a run
 whose map has not been seen for two minutes, and a switch legitimately hides the map while driving the PGSharp overlay, so the ordinary staleness measure cannot tell a healthy switch in flight from a wedged one. A switch is credited its own four-minute budget plus the same two-minute grace that other states receive, for a total of six minutes measured from when the switch began. A failed switch that required the full six-minute window used to halt the run on staleness alone; it is now allowed to fail and back off cleanly. Every other kind of stuckness halts exactly as tightly as before: staleness that continues once the switch has released the screen, and a run with no switch in it at all, both still halt at two minutes. The starvation check (a capture source that has gone quiet without dying) is bounded to the six-minute grace during a switch, rather than the tighter two-minute limit. A switch can only start from a confirmed map frame, so every six-minute budget costs a real map sighting; failures are additionally capped at three attempts with escalating backoff.
+
+## The startup preflight
+
+Logging in resets three things - the camera zooms in, Virtual Go Plus goes off, and no
+AutoWalk route is running - and so does starting the bot against a game somebody has just
+logged into by hand. The three steps that put them back already existed, but only inside an
+account switch, so a run that never switched never got any of them. That is exactly what a
+measured four-hour run did: it played the whole time zoomed in, with Virtual Go Plus off and
+no route, because a single failed account read at startup had silently disabled switching
+(above) - one cause the operator reasonably read as three separate bugs.
+
+So the same three steps now also run **once, at startup**, the moment the map is first
+confirmed and before the bot plays:
+
+```
+startup preflight: zoom out, Virtual Go Plus, AutoWalk
+BOOT -> PREFLIGHT (startup preflight)
+PREFLIGHT -> SCANNING (startup preflight over)
+```
+
+It is the switch's own code rather than a copy of it: `PREFLIGHT` is a state whose handler
+inherits the zoom, Go Plus and AutoWalk phases from the switching handler and runs them with
+no login and no target. So the measured zoom gesture, the "only a positively-read *off* is
+pressed" rule, and the "this account is already autowalking, do not start it again" rule all
+behave identically in both places, by construction rather than by remembering to.
+
+**It can never stop the bot playing.** The whole pass is bounded at 90 seconds - comfortably
+inside the two-minute stuck watchdog - and every way out of it ends in `SCANNING` with the
+bot playing: finishing, the AutoWalk ladder running out of its own 30-second budget, a
+PGSharp star that will not separate from the accounts launcher, or the state timing out. The
+only thing a failure changes is what the log says, and what it says is which of the three
+did not happen. AutoWalk is the one step that needs the PGSharp view tree, so on a run with
+no switch trigger armed the other two still run and the log says why the third did not.
+
+It runs once per game start, not on every later return to scanning. Once per *game*, not
+once per process, because recovery's last resort is force-stopping and relaunching Pokémon
+GO, and a cold relaunch undoes all three of the same things a login does - so the pass is
+armed again by a restart and by nothing else. `--no-preflight` turns it off for a run set up
+by hand that does not want its camera or its route touched, and `--replay` never runs it: a
+replay exists to reproduce a recording, and there is no device there to zoom, toggle or
+route in any case.
 
 ## Pausing
 
@@ -533,6 +587,7 @@ report how many were left out.
 | `--account NAME` | – | account this run belongs to; read from the overlay instead when switching is on |
 | `--switch-on-quota` | off | log into another account once this one exhausts its 24h cap |
 | `--switch-every MINUTES` | off | rotate accounts every `MINUTES` regardless of state |
+| `--no-preflight` | off | skip the startup zoom-out / Virtual Go Plus / AutoWalk pass |
 | `--collect-dialogues DIR` | – | save post-login screens here, for labelling a Dialogue class |
 | `--confidence` | `0.15` | detector floor (the FSM acts at 0.30) |
 | `--infer-fps` | `8.0` | inference rate |
