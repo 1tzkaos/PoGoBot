@@ -43,6 +43,73 @@ def device_online(adb: str = "adb", serial: Optional[str] = None) -> bool:
         return False
 
 
+def app_running(package: str, adb: str = "adb", serial: Optional[str] = None) -> bool:
+    """Whether the game's process exists at all. `pidof` is one cheap shell call."""
+    cmd = [adb] + (["-s", serial] if serial else []) + ["shell", "pidof", package]
+    try:
+        r = subprocess.run(cmd, capture_output=True, timeout=5)
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except Exception:
+        return False
+
+
+def app_foreground(package: str, adb: str = "adb", serial: Optional[str] = None) -> bool:
+    cmd = ([adb] + (["-s", serial] if serial else [])
+           + ["shell", "dumpsys", "window"])
+    try:
+        out = subprocess.run(cmd, capture_output=True, timeout=8).stdout.decode(errors="replace")
+    except Exception:
+        return False
+    for line in out.splitlines():
+        if "mCurrentFocus" in line:
+            return package in line
+    return False
+
+
+def ensure_app_running(package: str, activity: str, adb: str = "adb",
+                       serial: Optional[str] = None, timeout: float = 40.0,
+                       log=None) -> bool:
+    """Start the game if it is not already up, and wait for it to reach the foreground.
+
+    The capture layer needs this, not merely the bot's own logic. scrcpy records the
+    display through a hardware encoder, and an encoder emits frames when the display
+    CHANGES: on a launcher sitting perfectly still, nothing is produced at all, and
+    `ScrcpySource` raises `CaptureError: no video ... within 12.0s` before the FSM ever
+    runs. Reproduced exactly that way - `am force-stop`, start the bot, crash - and the
+    same start succeeds the moment the game is on screen, because the game animates
+    constantly.
+
+    Returns whether the game is in the foreground when this gives up waiting. False is not
+    fatal on its own: the caller is better placed to decide, and a game that is slow to the
+    foreground may still get there before BOOT's own budget runs out.
+    """
+    if app_foreground(package, adb, serial):
+        return True
+    started = app_running(package, adb, serial)
+    if log is not None:
+        log.info("the game is %s; starting it before capture opens",
+                 "running but not in front" if started else "not running")
+    cmd = ([adb] + (["-s", serial] if serial else [])
+           + ["shell", "am", "start", "-n", f"{package}/{activity}"])
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=15)
+    except Exception:
+        if log is not None:
+            log.warning("could not start %s", package)
+        return False
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if app_foreground(package, adb, serial):
+            if log is not None:
+                log.info("the game is up")
+            return True
+        time.sleep(1.0)
+    if log is not None:
+        log.warning("%s did not reach the foreground within %.0fs; opening capture anyway",
+                    package, timeout)
+    return False
+
+
 class KeyboardPoller:
     """Publishes a Tristate the loop can read for free.
 

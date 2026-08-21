@@ -349,7 +349,7 @@ def main(argv=None) -> int:
     from .actions import Actuator, NullActuator
     from .stats import SessionStats
     from .capture import ReplaySource, ScrcpySource
-    from .device import KeyboardPoller, device_online, screen_size
+    from .device import KeyboardPoller, device_online, ensure_app_running, screen_size
     from .learning import IntentLedger
     from .perception import Perceptor
     from .runner import Runner
@@ -393,6 +393,9 @@ def main(argv=None) -> int:
             return 2
         screen_wh = screen_size(serial=a.serial)
         log.info("device screen %dx%d", *screen_wh)
+        # Before capture, not after: see device.ensure_app_running for why a still
+        # launcher produces no frames at all and takes ScrcpySource down with it.
+        ensure_app_running(cfg.app_package, cfg.app_activity, serial=a.serial, log=log)
         source = ScrcpySource(cfg, serial=a.serial)
         actuator = Actuator(screen_wh, dry_run=cfg.dry_run, serial=a.serial)
         keyboard = KeyboardPoller(serial=a.serial).start()
