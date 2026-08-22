@@ -37,6 +37,20 @@ def ctx(**kw):
 OFF = obs(screen="Menu", conf=0.97)
 
 
+@pytest.mark.parametrize("state", [BotState.RECOVERING, BotState.ROCKET,
+                                   BotState.SCANNING, BotState.ENCOUNTER,
+                                   BotState.POPUP, BotState.SWITCHING])
+def test_the_game_is_raised_from_any_state(state):
+    """An interrupt, not a rung: measured twice, the bot sat in ROCKET on a browser for the
+    whole 150s ROCKET timeout, so anything scoped to RECOVERING never ran."""
+    c = ctx(app_foreground=Tristate.FALSE)
+    c.state = state
+    out = fsm.step(OFF, c)
+    assert [e for e in out if isinstance(e, ForegroundApp)], f"not raised from {state}"
+    assert not [e for e in out if isinstance(e, (Back, Tap))], \
+        f"something was pressed from {state} while another app owned the screen"
+
+
 def test_the_game_is_raised_before_anything_else_is_pressed():
     """Ahead of BACK, which would navigate the browser rather than the game."""
     out = fsm.step(OFF, ctx(app_foreground=Tristate.FALSE))
@@ -92,13 +106,16 @@ def test_the_handler_writes_nothing_to_the_context():
     assert vars(c) == before
 
 
-def test_the_runner_only_asks_while_recovering():
-    """`dumpsys window` blocks the loop; asking per frame, or in states that have other
-    explanations, would be paying for an answer nobody needs."""
+def test_the_runner_asks_whenever_the_map_is_missing():
+    """Scoping this to RECOVERING was wrong and cost a live run: the bot sat in ROCKET on a
+    browser for the whole 150s ROCKET timeout and never reached RECOVERING, so the check
+    never ran. The gate is "no map", which is true of every wedge worth a `dumpsys` and
+    false on the overwhelming majority of frames."""
     import inspect
     from pogobot import runner as R
     src = inspect.getsource(R.Runner._refresh_foreground)
-    assert "BotState.RECOVERING" in src
+    assert "if on_map:" in src, "the gate should be the map, not a state"
+    assert "BotState.RECOVERING" not in src
     assert "FOREGROUND_CHECK" in src
 
 
@@ -110,7 +127,7 @@ def test_the_run_loop_actually_asks():
     import inspect
     from pogobot import runner as R
     src = inspect.getsource(R.Runner.run)
-    assert "self._refresh_foreground(real)" in src
+    assert "self._refresh_foreground(real, obs.on_map)" in src
 
 
 def test_an_accepted_raise_is_counted_by_the_runner():

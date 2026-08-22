@@ -1646,7 +1646,12 @@ class Popup(Handler):
 
 class Recovering(Handler):
     """Escalating unstick. Never blind-taps a fixed coordinate - that is what created the
-    v1 menu loop. The PGSharp panel's own close control, located in the view tree, first;
+    v1 menu loop.
+
+    Nothing here handles "another app is in front of the game": that is an interrupt (see
+    `interrupts`), because it has to answer from ROCKET and ENCOUNTER too, and measured
+    twice the bot never reached this state at all - it sat in ROCKET on a browser for the
+    whole 150s ROCKET timeout. The PGSharp panel's own close control, located in the view tree, first;
     then BACK; then an optically located close button; then, once the map has been gone
     past the stuck watchdog, a bounded number of app restarts; and only then halt. A
     restart pauses the whole ladder for as long as the relaunch is cold-starting (see
@@ -1672,25 +1677,6 @@ class Recovering(Handler):
         # during a cold start is ours to press, so nothing is pressed.
         if self._restarting(ctx):
             return []
-        # FIRST, ahead of every other rung, because if another app owns the screen then
-        # every one of them is aimed at the wrong window: BACK navigates the browser, the
-        # optical locators are reading a web page, and no map can appear while the game is
-        # behind it. Measured live - a tap on a sponsored stop opened mlb.com in Chrome and
-        # the run spent 603 frames in ROCKET on a cookie banner before the frame guard
-        # killed it, since a near-static page barely encodes any frames either.
-        #
-        # UNKNOWN is not FALSE: until the runner has actually looked (see
-        # `Runner._refresh_foreground`) this rung says nothing and the ladder runs as
-        # before. Bounded by `ctx.foregrounds`, which the Runner owns, so a game that will
-        # not come forward escalates to the restart below instead of retrying for ever.
-        if ctx.app_foreground is Tristate.FALSE \
-                and ctx.foregrounds < ctx.cfg.max_foreground_attempts \
-                and ctx.ready("foreground", ctx.cfg.timings.foreground_retry):
-            return [
-                Note("another app is in front of the game; bringing it back", "warn"),
-                ForegroundApp(ctx.cfg.app_package, ctx.cfg.app_activity,
-                              "recover: bring the game back to the front"),
-            ]
         panel = self._panel_close(ctx)
         if panel is not None:
             return panel
@@ -1888,6 +1874,26 @@ def interrupts(obs: Observation, ctx: Context) -> list[Effect]:
     acceptable trade: the worst a false positive costs is one extra BACK press.
     """
     cfg = ctx.cfg
+    # Before even the exit dialog, because this one says the screen does not belong to the
+    # game at all. Pokemon GO carries sponsored stops, and a tap on one opens the sponsor's
+    # site: captured live, `START ... act=VIEW dat=https://www.mlb.com ... cmp=
+    # com.android.chrome` two seconds after the bot entered ROCKET. Nothing in this system
+    # is safe then. Every locator is reading a web page; `Rocket.step` keeps tapping its
+    # fixed dialogue coordinate INTO that page; BACK navigates it. Measured twice: 603 of
+    # 604 frames, then 370 of 371, spent in ROCKET on a browser - ROCKET holds for its
+    # whole 150s timeout, so a rung in RECOVERING (which is where this check first lived)
+    # never ran at all.
+    #
+    # An interrupt is the only construct that answers regardless of state, which is exactly
+    # the requirement. UNKNOWN is not FALSE: until the runner has looked this says nothing.
+    if ctx.app_foreground is Tristate.FALSE \
+            and ctx.foregrounds < cfg.max_foreground_attempts \
+            and ctx.ready("foreground", cfg.timings.foreground_retry):
+        return [
+            Note("another app is in front of the game; bringing it back", "warn"),
+            ForegroundApp(cfg.app_package, cfg.app_activity,
+                          "bring the game back to the front"),
+        ]
     if obs.exit_dialog.value and ctx.ready("back", cfg.timings.exit_dialog_back):
         return [Back("dismiss Pokemon GO's own exit-confirmation dialog"),
                 Note("exit-confirmation dialog detected; pressing BACK rather than "
