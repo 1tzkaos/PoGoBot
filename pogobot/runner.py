@@ -1085,7 +1085,13 @@ class Runner:
                         # switch_zoom_reps and app_restarts follow: a refused command must
                         # not spend the bound that decides when to escalate to a restart.
                         self.ctx.foregrounds += 1
-                        self.ctx.app_foreground = Tristate.UNKNOWN
+                        # Stays FALSE, not UNKNOWN. Setting it to UNKNOWN here lifted the
+                        # refusal in `fsm.step` for the whole gap until the next check, and
+                        # the bot spent that gap tapping - straight back onto the sponsored
+                        # link it had just been rescued from. Measured: `am start` worked
+                        # every single time and the run still ended in Chrome. Only a check
+                        # that SEES the game may say it is back, and the stamp below makes
+                        # that check happen on the very next tick.
                         self._foreground_checked_at = -1e9
                     elif budget == "zoom" and isinstance(e, Pinch):
                         # Counted here, not by a self-reported SetFlag from _zoom: the
