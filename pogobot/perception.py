@@ -419,6 +419,53 @@ PILL_WHITE_WIDE = 0.05
 PILL_WHITE_MIDDLE = 0.07
 
 
+#: The promotional interstitial's save button: a round control in the bottom-RIGHT, beside
+#: the centre X. Pokemon GO's SPONSORED screens offer "save this promotion" there, and the
+#: operator's rule for the screen is exactly that - if you can save it, it is an ad, and the
+#: only thing to press is the X.
+#:
+#: Measured at stream resolution. On the committed `sponsored_ad` fixture the button sits at
+#: (0.866, 0.884) and is 13.9% of frame width. The only other frame in the labelled corpus
+#: that puts ANY round mint blob in this band is levelup_12, at (0.735, 0.825) and 3.2%
+#: wide - so both gates below are far from either value, and neither is doing the work
+#: alone.
+PROMO_SAVE_MIN_X = 0.80
+PROMO_SAVE_MIN_W = 0.08
+
+
+def promo_save_button(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, float]]:
+    """Locate the promo screen's save control, or None.
+
+    Its presence is the identification, not its coordinate: nothing ever taps this. Saving
+    an advertisement is not something the bot has any business doing, and the button exists
+    here only so the X beside it can be pressed with confidence about what screen this is.
+    """
+    h, w = bgr.shape[:2]
+    y0, y1 = int(h * 0.82), int(h * 0.95)
+    x0 = int(w * 0.72)
+    roi = bgr[y0:y1, x0:]
+    if roi.size == 0:
+        return None
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = cv2.morphologyEx(cv2.inRange(hsv, MINT_LO, MINT_HI), cv2.MORPH_CLOSE,
+                            np.ones((7, 7), np.uint8))
+    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    best = None
+    for c in cnts:
+        x, y, cw, ch = cv2.boundingRect(c)
+        if ch <= 0 or cw < w * PROMO_SAVE_MIN_W:
+            continue
+        if not (0.6 <= cw / ch <= 1.6):
+            continue
+        cx = (x0 + x + cw / 2.0) / w
+        if cx < PROMO_SAVE_MIN_X:
+            continue
+        area = cw * ch
+        if best is None or area > best[0]:
+            best = (area, cx, (y0 + y + ch / 2.0) / h)
+    return None if best is None else (best[1], best[2])
+
+
 def find_action_pill(bgr: np.ndarray, cfg: Config) -> Optional[tuple[float, float]]:
     """Locate the wide green affirmative pill (BATTLE / USE THIS PARTY / CLAIM REWARDS /
     the post-login "Stay Aware of Your Surroundings" splash's OK).
@@ -560,6 +607,7 @@ class Perceptor:
             keyboard=keyboard,
             close_button_xy=find_close_button(bgr, cfg),
             action_pill_xy=find_action_pill(bgr, cfg),
+            promo_save_xy=promo_save_button(bgr, cfg),
             frame_age=frame.age(),
             goplus=goplus_signal(bgr, cfg),
             exit_dialog=exit_dialog_signal(bgr, cfg),
