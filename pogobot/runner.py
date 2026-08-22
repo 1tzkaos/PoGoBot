@@ -535,7 +535,7 @@ class Runner:
                     cfg.restock_after_failures, cfg.restock_target_stops,
                     cfg.restock_max_seconds)
 
-    def _refresh_foreground(self, real: float) -> None:
+    def _refresh_foreground(self, real: float, on_map: bool) -> None:
         """Ask whether the GAME is the app on screen. Only while recovering.
 
         `dumpsys window` costs ~0.1-0.3s and blocks this thread, which is cheap beside a
@@ -546,7 +546,12 @@ class Runner:
 
         Paced on the REAL clock like every other pacing decision in the loop.
         """
-        if self.ctx.state is not BotState.RECOVERING:
+        # Any state, not just RECOVERING: measured twice, the bot sat in ROCKET on a
+        # browser for its whole 150s timeout and never reached RECOVERING at all, so a
+        # check scoped to that state answered a question nobody was asking. The gate is
+        # instead "the map is not visible" - true of every wedge worth this call, false on
+        # the overwhelming majority of frames, so a healthy run never pays for it.
+        if on_map:
             return
         if real - self._foreground_checked_at < FOREGROUND_CHECK:
             return
@@ -1385,7 +1390,7 @@ class Runner:
                 # `_maybe_switch` refuses any state but SCANNING, so the trigger simply
                 # stays due until the preflight hands the screen back.
                 self._apply_account_profile()
-                self._refresh_foreground(real)
+                self._refresh_foreground(real, obs.on_map)
                 self._refresh_accounts(real)
                 self._maybe_preflight(obs)
                 self._maybe_switch(obs)
