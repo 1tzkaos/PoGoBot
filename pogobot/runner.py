@@ -23,6 +23,7 @@ from .effects import (
     BotState,
     ClearSpatialMemory,
     Cooldown,
+    ForegroundApp,
     Pinch,
     Effect,
     Halt,
@@ -38,6 +39,7 @@ from .effects import (
 )
 from .frames import Frame, FrameSource
 from .observation import Observation, Tristate
+from . import device
 from . import userconfig
 from .quota import SpinQuota
 from .stats import SessionStats, append_session
@@ -85,6 +87,10 @@ ACCOUNTS_REFRESH = 2.5
 # it. The stall only ever lands on a bot that is already not playing: a second lost in
 # RECOVERING delays the return to the map by a second, and nothing else.
 RECOVER_ACCOUNTS_REFRESH = 10.0
+
+#: How often RECOVERING may ask which app is on screen. `dumpsys window` blocks the loop
+#: for ~0.1-0.3s - an order cheaper than a uiautomator dump, still far too dear per frame.
+FOREGROUND_CHECK = 5.0
 
 # A switch that expires without confirming is not retried immediately.
 #
@@ -139,6 +145,7 @@ class Runner:
         #: None, because None is a real account state ("we never learned who we are") and
         #: must still get the defaults applied once.
         self._profile_account: object = _UNSET
+        self._foreground_checked_at = -1e9
         self.source = source
         self.actuator = actuator
         self.perceptor = perceptor
@@ -527,6 +534,31 @@ class Runner:
                     "targeting PokeStops only until %d are collected (or %.0fs)",
                     cfg.restock_after_failures, cfg.restock_target_stops,
                     cfg.restock_max_seconds)
+
+    def _refresh_foreground(self, real: float) -> None:
+        """Ask whether the GAME is the app on screen. Only while recovering.
+
+        `dumpsys window` costs ~0.1-0.3s and blocks this thread, which is cheap beside a
+        uiautomator dump but far too dear per frame, so it is asked only in the state that
+        has run out of other explanations and only every `FOREGROUND_CHECK` seconds.
+        Everywhere else the answer stays whatever it was, and UNKNOWN until first asked -
+        which the ladder treats as "say nothing", not as "no".
+
+        Paced on the REAL clock like every other pacing decision in the loop.
+        """
+        if self.ctx.state is not BotState.RECOVERING:
+            return
+        if real - self._foreground_checked_at < FOREGROUND_CHECK:
+            return
+        self._foreground_checked_at = real
+        try:
+            # The Actuator is the one thing that knows which device this run drives; read
+            # it defensively because the test doubles are not Actuators.
+            serial = getattr(self.actuator, "serial", None)
+            up = device.app_foreground(self.cfg.app_package, serial=serial)
+        except Exception:
+            return
+        self.ctx.app_foreground = Tristate.TRUE if up else Tristate.FALSE
 
     def _apply_account_profile(self) -> None:
         """Point `cfg` at the settings for whoever we are logged in as.
@@ -1043,6 +1075,13 @@ class Runner:
                         self.ctx.throws_this_encounter += 1
                     elif budget == "tap" and isinstance(e, Tap):
                         self.stats.targets_tapped += 1
+                    elif budget == "foreground" and isinstance(e, ForegroundApp):
+                        # Counted only when the actuator ACCEPTED it, the same rule
+                        # switch_zoom_reps and app_restarts follow: a refused command must
+                        # not spend the bound that decides when to escalate to a restart.
+                        self.ctx.foregrounds += 1
+                        self.ctx.app_foreground = Tristate.UNKNOWN
+                        self._foreground_checked_at = -1e9
                     elif budget == "zoom" and isinstance(e, Pinch):
                         # Counted here, not by a self-reported SetFlag from _zoom: the
                         # handler is pure and cannot know whether the actuator actually
@@ -1293,6 +1332,8 @@ class Runner:
                     # another restart, while a wedge cleared hours ago does not leave the
                     # rest of the run one restart poorer.
                     self.ctx.app_restarts = 0
+                    self.ctx.foregrounds = 0
+                    self.ctx.app_foreground = Tristate.TRUE
                     # ...and the same evidence closes the cold-start hold. The grace
                     # window exists because nothing on a relaunching game is ours to
                     # press; a confirmed map is proof the relaunch is over, so holding
@@ -1344,6 +1385,7 @@ class Runner:
                 # `_maybe_switch` refuses any state but SCANNING, so the trigger simply
                 # stays due until the preflight hands the screen back.
                 self._apply_account_profile()
+                self._refresh_foreground(real)
                 self._refresh_accounts(real)
                 self._maybe_preflight(obs)
                 self._maybe_switch(obs)

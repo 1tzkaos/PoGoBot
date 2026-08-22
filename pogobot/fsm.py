@@ -20,6 +20,7 @@ from typing import Optional
 from .accounts import AccountView
 from .config import Config, Timings
 from .effects import (
+    ForegroundApp,
     Pinch,
     Back,
     BotState,
@@ -93,6 +94,11 @@ class Context:
     #: phases' own "could not look; wait for the next refresh" handling is the right
     #: answer; the runner overwrites it with the truth before the first tick.
     tree_available: bool = True
+    #: Is the GAME the app on screen? UNKNOWN until something checks, which only the runner
+    #: can do (see Runner._refresh_foreground). A sponsored stop opens the sponsor's site in
+    #: a browser, and every rung of the recovery ladder is wrong while another app owns the
+    #: display - BACK navigates that app, not the game.
+    app_foreground: Tristate = Tristate.UNKNOWN
     switch_target: Optional[str] = None
     switch_phase: str = "open"
     #: applications of the post-switch zoom-out gesture fired so far in the "zoom" phase.
@@ -168,6 +174,10 @@ class Context:
     #: instead - see `Config.max_app_restarts` for why that is what makes it a bound.
     app_restarts: int = 0
     app_restart_ts: float = 0.0
+    #: Times this run has asked for the game to be brought forward. Written by the Runner
+    #: on an ACCEPTED ForegroundApp, and cleared by a confirmed map, so the bound is
+    #: "consecutive attempts that did not get the game back" rather than "per run".
+    foregrounds: int = 0
     stats: dict = field(default_factory=lambda: {"spins": 0, "catches": 0, "rockets": 0})
 
     @property
@@ -1662,6 +1672,25 @@ class Recovering(Handler):
         # during a cold start is ours to press, so nothing is pressed.
         if self._restarting(ctx):
             return []
+        # FIRST, ahead of every other rung, because if another app owns the screen then
+        # every one of them is aimed at the wrong window: BACK navigates the browser, the
+        # optical locators are reading a web page, and no map can appear while the game is
+        # behind it. Measured live - a tap on a sponsored stop opened mlb.com in Chrome and
+        # the run spent 603 frames in ROCKET on a cookie banner before the frame guard
+        # killed it, since a near-static page barely encodes any frames either.
+        #
+        # UNKNOWN is not FALSE: until the runner has actually looked (see
+        # `Runner._refresh_foreground`) this rung says nothing and the ladder runs as
+        # before. Bounded by `ctx.foregrounds`, which the Runner owns, so a game that will
+        # not come forward escalates to the restart below instead of retrying for ever.
+        if ctx.app_foreground is Tristate.FALSE \
+                and ctx.foregrounds < ctx.cfg.max_foreground_attempts \
+                and ctx.ready("foreground", ctx.cfg.timings.foreground_retry):
+            return [
+                Note("another app is in front of the game; bringing it back", "warn"),
+                ForegroundApp(ctx.cfg.app_package, ctx.cfg.app_activity,
+                              "recover: bring the game back to the front"),
+            ]
         panel = self._panel_close(ctx)
         if panel is not None:
             return panel

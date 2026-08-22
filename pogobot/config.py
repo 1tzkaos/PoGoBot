@@ -304,6 +304,9 @@ class Timings:
     #: run that is already doing nothing, while the cost of waiting too little is spending
     #: the entire restart budget on one app that simply had not finished starting.
     app_restart_grace: float = 90.0
+    #: Gap between attempts to raise the game. Measured: `am start` put Pokemon GO in front
+    #: within about a second, so this is a settle window, not a wait for the answer.
+    foreground_retry: float = 4.0
 
     #: Gap between BACK presses aimed at Pokemon GO's own exit-confirmation dialog (see
     #: perception.exit_dialog_signal, fsm.interrupts). Matches RECOVERING's own retry
@@ -600,6 +603,10 @@ class Config:
     #: login screen, a cold start that outran the grace. A third would be re-testing a
     #: hypothesis two restarts have already refuted, which is the same reasoning
     #: `runner.SWITCH_MAX_FAILURES` states for switch attempts.
+    #: How many times to try raising the game before escalating to a restart. Two, because
+    #: a third would mean `am start` is being accepted and ignored, which a relaunch fixes
+    #: and a repeat does not.
+    max_foreground_attempts: int = 2
     max_app_restarts: int = 2
 
     def scaled(self, **kw) -> "Config":
