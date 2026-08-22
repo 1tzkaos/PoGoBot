@@ -106,6 +106,11 @@ class Observation:
     keyboard: Tristate = Tristate.UNKNOWN
     close_button_xy: Optional[tuple[float, float]] = None
     action_pill_xy: Optional[tuple[float, float]] = None
+    #: The SPONSORED interstitial's "save this promotion" control, bottom right beside the
+    #: X. Never tapped - saving an advertisement is not the bot's business - and present
+    #: only so that screen can be told apart from a Rocket fight, which it otherwise
+    #: resembles closely enough to classify as one (see perception.promo_save_button).
+    promo_save_xy: Optional[tuple[float, float]] = None
     frame_age: float = 0.0
     #: Virtual Go Plus toggle: TRUE=ON, FALSE=OFF, UNKNOWN=neither signature matched -
     #: including "no Virtual Go Plus at all". Meaningless unless `on_map` is also true

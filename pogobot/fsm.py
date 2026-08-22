@@ -279,6 +279,19 @@ def rocket_screen(obs: Observation, cfg: Config) -> bool:
     """
     if obs.map_ball.value or obs.exit_dialog.value:
         return False
+    if obs.promo_save_xy is not None:
+        # Pokemon GO's SPONSORED interstitial, vetoed for the same reason the exit dialog
+        # above is: it classifies as Rocket (measured, Rocket@0.62) and carries a pill in
+        # the affirmative's place - "LEARN MORE", which opens the advertiser's site and
+        # takes the bot out of the game entirely. Following it into ROCKET also costs the
+        # 150s that state holds for, during which nothing else may claim the screen.
+        #
+        # The tell is the operator's: an advertisement offers to SAVE itself, from a round
+        # control in the bottom right beside the X. A real fight never does - measured 0 of
+        # 13 across every Rocket-class frame in the corpus, against the ad fixture where it
+        # sits at (0.866, 0.884). Refused here, the screen falls to the ordinary ladder,
+        # which presses the located X beside it.
+        return False
     return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
 
 

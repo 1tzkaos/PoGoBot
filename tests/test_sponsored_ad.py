@@ -104,3 +104,55 @@ def test_the_gate_is_the_thing_that_refuses_it(perceive):
     assert taps and abs(taps[0].y - o.action_pill_xy[1]) < 0.01, (
         "with the bar lowered the ad should be pressed again - if not, something else "
         "is refusing it and this fixture is not testing the gate")
+
+
+# --------------------------------------------- the operator's own tell: it offers to SAVE
+
+def test_the_ad_offers_to_save_itself_and_a_real_fight_never_does():
+    """The identification, in the operator's words: an advertisement has a control in the
+    bottom right to save the promotion, beside the X. Measured 0 of 13 across every
+    Rocket-class frame in the corpus."""
+    from pogobot.perception import promo_save_button
+    ad = promo_save_button(cv2.imread(str(FIXTURES / "sponsored_ad.png")), C)
+    assert ad is not None
+    assert ad[0] > 0.8, "the save control sits in the bottom RIGHT"
+
+    fires = [f for d in ("GruntBattleButton", "GruntDialogue", "ChooseParty",
+                         "ExitTrainerBattle")
+             for f in glob.glob(f"datasets/state_v3/*/{d}/*")
+             if cv2.imread(f) is not None
+             and promo_save_button(cv2.imread(f), C) is not None]
+    assert fires == [], f"a real Rocket screen appeared to offer a save: {fires}"
+
+
+def test_the_ad_is_not_treated_as_a_rocket_fight(perceive):
+    """Following it into ROCKET costs the 150s that state holds for, during which nothing
+    else may claim the screen - which is how three runs ended in a browser."""
+    o = perceive(cv2.imread(str(FIXTURES / "sponsored_ad.png")))
+    assert o.promo_save_xy is not None
+    assert not fsm.rocket_screen(o, C)
+    c = fsm.Context(cfg=C, state=BotState.SCANNING, state_since=99.5, now=100.0)
+    assert fsm.desired_state(o, c) is not BotState.ROCKET
+
+
+def test_a_real_fight_is_still_a_rocket_screen(perceive):
+    """The veto must cost nothing."""
+    kept = 0
+    for f in sorted(glob.glob("datasets/state_v3/*/GruntBattleButton/*")):
+        im = cv2.imread(f)
+        if im is None:
+            continue
+        if fsm.rocket_screen(perceive(im), C):
+            kept += 1
+    assert kept >= 4, f"only {kept} real fights still read as Rocket screens"
+
+
+def test_the_save_control_is_never_tapped(perceive):
+    """Saving an advertisement is not the bot's business; the control exists here only to
+    identify the screen."""
+    o = perceive(cv2.imread(str(FIXTURES / "sponsored_ad.png")))
+    for state in (BotState.SCANNING, BotState.ROCKET, BotState.POPUP, BotState.RECOVERING):
+        c = fsm.Context(cfg=C, state=state, state_since=99.5, now=100.0)
+        for e in fsm.step(o, c):
+            if isinstance(e, Tap):
+                assert abs(e.x - o.promo_save_xy[0]) > 0.05, f"{state} tapped the save button"
