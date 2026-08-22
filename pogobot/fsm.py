@@ -2033,6 +2033,15 @@ def step(obs: Observation, ctx: Context) -> list[Effect]:
     # So the raise is bounded and the refusal is not. With nothing pressed, the map stays
     # gone, and `map_stale_since` walks the run into the restart ladder that does fix it.
     if ctx.app_foreground is Tristate.FALSE:
+        # Nothing is pressed - but sitting still in whatever state we happened to be in is
+        # not enough either. Measured: the bot was in ROCKET, which holds for its whole
+        # 150s timeout, so `Recovering.on_timeout` - the only thing that escalates to a
+        # relaunch - never ran, and the frame guard killed the run first at 120s with
+        # "no usable frames". RECOVERING is the state whose job is escalation, so go there
+        # and let its ladder spend a restart, which does put the game back.
+        if ctx.state is not BotState.RECOVERING:
+            return [Transition(BotState.RECOVERING, IntentOutcome.CARRIED,
+                               "another app is in front of the game")]
         return []
 
     want = desired_state(obs, ctx)

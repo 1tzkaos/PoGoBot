@@ -154,7 +154,14 @@ def test_nothing_is_pressed_once_the_raise_budget_is_spent(state):
             foregrounds=DEFAULT.max_foreground_attempts)
     c.state = state
     out = fsm.step(OFF, c)
-    assert out == [], f"{state} acted on a screen belonging to another app: {out}"
+    pressed = [e for e in out if isinstance(e, (Back, Tap))]
+    assert not pressed, f"{state} pressed something on another app's screen: {pressed}"
+    if state is not BotState.RECOVERING:
+        from pogobot.effects import Transition
+        assert [e for e in out if isinstance(e, Transition)], (
+            f"{state} should hand to RECOVERING, whose ladder is what escalates to a "
+            f"relaunch - measured, ROCKET held for its whole 150s timeout and the run "
+            f"died on the frame guard first")
 
 
 def test_the_refusal_lifts_the_moment_the_game_is_back():
@@ -163,3 +170,10 @@ def test_the_refusal_lifts_the_moment_the_game_is_back():
             foregrounds=DEFAULT.max_foreground_attempts)
     c.state = BotState.RECOVERING
     assert fsm.step(OFF, c), "the ladder should run again once the game is in front"
+
+
+def test_recovering_itself_just_waits():
+    """Once there, nothing more to do but let the ladder's own timeout escalate."""
+    c = ctx(app_foreground=Tristate.FALSE,
+            foregrounds=DEFAULT.max_foreground_attempts)
+    assert fsm.step(OFF, c) == []
