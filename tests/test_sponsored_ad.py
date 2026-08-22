@@ -156,3 +156,22 @@ def test_the_save_control_is_never_tapped(perceive):
         for e in fsm.step(o, c):
             if isinstance(e, Tap):
                 assert abs(e.x - o.promo_save_xy[0]) > 0.05, f"{state} tapped the save button"
+
+
+def test_nothing_at_all_is_pressed_on_the_ad_from_inside_rocket(perceive):
+    """The last blind coordinate, end to end against the real classifier.
+
+    `rocket_pill_min_conf` refuses the LEARN MORE pill, but until `fsm.rocket_dialogue_screen`
+    existed the very next branch tapped a fixed (0.50, 0.62) into the ad's own creative -
+    above the pill, inside a card that is a link. Being in ROCKET is not hypothetical here:
+    `rocket_screen` keeps `desired_state` from ROUTING to this screen, and says nothing about
+    a machine already in the state, which holds for `Rocket.timeout_s` - 150s - while
+    `Rocket.step` runs on every tick. So the whole tick must now produce no tap whatsoever.
+
+    See tests/test_rocket_dialogue.py for the guard itself and the corpus it was measured on.
+    """
+    o = perceive(cv2.imread(str(FIXTURES / "sponsored_ad.png")))
+    c = fsm.Context(cfg=C, state=BotState.ROCKET, state_since=99.5, now=100.0,
+                    last_rocket_ts=100.0)
+    assert fsm.desired_state(o, c) is None, "nothing redirects the machine off this ad"
+    assert [e for e in fsm.step(o, c) if isinstance(e, Tap)] == []
