@@ -537,7 +537,17 @@ class Config:
 
     smooth_window: int = 5
     smooth_needed: int = 3
-    screen_min_conf: float = 0.60
+    screen_min_conf: float = 0.6
+    #: A much higher bar, used only where the consequence of being wrong is pressing a
+    #: button that is not ours. `Rocket.step` taps `action_pill_xy` believing it to be the
+    #: fight's affirmative; on Pokemon GO's own SPONSORED interstitial that pill is
+    #: "LEARN MORE", and pressing it opens the advertiser's site in a browser - measured
+    #: live, `START ... act=VIEW dat=https://www.mlb.com ... cmp=com.android.chrome`,
+    #: after which the bot is no longer looking at the game at all and three runs died
+    #: there. The screens separate cleanly: every labelled Rocket frame in the corpus
+    #: classifies at 1.00, while the ad reads Rocket@0.62 - so 0.6 lets it through and
+    #: 0.90 does not, with the whole gap to spare.
+    rocket_pill_min_conf: float = 0.900
 
     catch_mode: str = "throw"
     target_mode: str = "all"

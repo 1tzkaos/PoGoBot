@@ -603,7 +603,16 @@ class Rocket(Handler):
 
     def step(self, obs, ctx):
         cfg = ctx.cfg
-        if obs.action_pill_xy is not None:
+        if obs.action_pill_xy is not None \
+                and obs.screen.is_("Rocket", min_conf=cfg.rocket_pill_min_conf):
+            # The confidence bar is the point, not the pacing. This branch presses a pill
+            # on the strength of believing the screen is a Rocket fight, and Pokemon GO's
+            # own SPONSORED interstitial reads Rocket@0.62 while carrying a "LEARN MORE"
+            # pill in the same place the affirmative sits. Pressing that opens the
+            # advertiser's site: measured live, and the bot then spends its whole run in a
+            # browser it cannot leave. See config.Config.rocket_pill_min_conf - real fights
+            # classify at 1.00, so the bar costs nothing and refuses the ad outright.
+            #
             # The pill is on screen right now; do not let a generic settle window miss it.
             if ctx.ready("rocket", cfg.timings.rocket_tap, ignore_settle=True):
                 x, y = obs.action_pill_xy
