@@ -295,6 +295,107 @@ def rocket_screen(obs: Observation, cfg: Config) -> bool:
     return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
 
 
+#: Where `Rocket.step` taps to advance a grunt dialogue, and the only press in this file
+#: that is not LOCATED. A dialogue has no button to find - it advances on a tap anywhere -
+#: so no finder can return a coordinate here, and `rocket_dialogue_screen` below carries
+#: the safety a locator carries everywhere else.
+#:
+#: What makes this point safe is the GEOMETRY OF THE FINDERS, not that it has worked
+#: before. "It worked before" is exactly what the bare coordinate asserted, and it was
+#: measurably wrong on three separate screens (see the predicate below). Two of the three
+#: finders cannot reach this point at all: `perception.find_close_button` searches only
+#: y >= 0.74 and `perception.promo_save_button` only y 0.82-0.95 at x >= 0.72, so no X and
+#: no save control this bot is able to locate can ever lie under a tap at y 0.62.
+#: `perception.find_action_pill` searches y >= 0.45 and therefore CAN return a point this
+#: tap would land on - which is why a located pill is the one thing the predicate must
+#: veto, and why that veto is load-bearing rather than defensive.
+ROCKET_DIALOGUE_TAP = (0.50, 0.62)
+
+
+def rocket_dialogue_screen(obs: Observation, cfg: Config) -> bool:
+    """May `ROCKET_DIALOGUE_TAP` be pressed blind on this frame?
+
+    The branch this gates used to ask `screen.is_("Rocket", 0.60)` and nothing else, which
+    is the bar the SPONSORED interstitial clears at 0.62. It is not a rare branch: measured
+    over logs/trace.jsonl, 210,719 ROCKET frames produced 7,507 taps from it.
+
+    Raising its bar the way `Config.rocket_pill_min_conf` raises the affirmative branch's
+    was measured and REJECTED, and that asymmetry is why this predicate reads the frame
+    instead. Over the same trace, restricted to frames the classifier calls Rocket while
+    the machine is in ROCKET: where a pill IS located - the affirmative branch's entire
+    domain - 98.1% classify at >= 0.90 and the median is 1.00, so that bar costs it
+    nothing. Where no pill is located - THIS branch's domain - only 15.5% reach 0.90 and
+    the median is 0.78. A 0.90 bar here would refuse 84.8% of real dialogue advances, and
+    a bot that cannot finish a fight it has entered is worse off than one that occasionally
+    taps an advertisement. Nor can the bar simply be set just above the ad instead: this
+    branch's own live taps run min 0.600, p05 0.649, median 0.78 against the ad's 0.62, so
+    a 0.63 bar would refuse 2.66% of real dialogue advances AND would rest entirely on one
+    creative - the next advertiser's classifies wherever it classifies. Confidence
+    separates these screens poorly and only against a sample of one, so the separation is
+    taken from what the frame SHOWS, which is categorical.
+
+    The three screens the bare coordinate was wrong on, each measured:
+
+      * ChooseParty, 5 of the 13 Rocket-class corpus frames. (0.50, 0.62) lands on the
+        Recommended Battle Party card, on its "Tap to swap Pokemon" row - a tap there opens
+        the swap picker, navigating away from the fight. The screen's real control is USE
+        THIS PARTY, a located pill at (0.545, 0.875) on all five frames, so the pill veto
+        refuses the frame and the affirmative branch presses that pill instead. Committing
+        to the fight becomes something the bot does deliberately rather than by accident.
+
+      * ExitTrainerBattle, 1 of the 13. Pokemon GO's "Exit the Trainer Battle?" card spans
+        y 0.397-0.626 on that frame, with YES at y 0.481-0.542 and NO at 0.572-0.585; this
+        project's own model of the card agrees, `Rois.exit_dialog_card` ending at y 0.62.
+        The tap lands at 0.620 - INSIDE the card, 0.006 of frame height above its bottom
+        edge and 0.035 below NO. Nothing locates those buttons: `find_action_pill`'s
+        white-text gate deliberately sits just above this YES (see
+        perception.PILL_WHITE_MIDDLE, whose sweep admits ExitTrainerBattle at 0.06 and is
+        set to 0.07), so the pill veto cannot see it and `exit_dialog` is what refuses the
+        screen. On a device whose card sits marginally lower the same tap is NO, and on a
+        taller one YES, which forfeits the fight outright.
+
+      * The SPONSORED interstitial. Its pill sits at (0.497, 0.796), so the pill veto
+        already refuses it - the promo term is kept as its own veto because on an
+        advertisement no coordinate is defensible at all. The creative is a link and the
+        tap lands in its body, above LEARN MORE but inside the card. `rocket_screen`
+        vetoes on the same control, and that veto guards only ENTRY through
+        `desired_state`: once the machine is in ROCKET the rocket-hold branch keeps it
+        there and `Rocket.step` runs regardless, for up to the 150s of `Rocket.timeout_s`.
+        This is that veto applied where the press is decided rather than where the route
+        is chosen.
+
+    `exit_dialog` is the third layer on that card, not the first, and it is here because
+    the first two are both accidents of pacing. `interrupts`' coordinate-free BACK is the
+    primary defence and runs first, but only on ticks its own `exit_dialog_back` gate
+    allows. On the ticks it withholds, what actually stops this branch today is the settle
+    window that same BACK opened: `Timings.ui_settle` (1.2s) strictly exceeds
+    `exit_dialog_back` (1.0s), and unlike the affirmative branch above this one does not
+    pass `ignore_settle`, so the state "BACK gate shut AND settle expired" is unreachable.
+    Driven through `fsm.step` on the corpus ExitTrainerBattle frame for 200s at the default
+    infer_fps: 160 BACKs and 0 taps. Move either constant - `exit_dialog_back` to 1.3, or
+    `ui_settle` to 0.8 - and the same frame takes 60 and 86 blind taps INTO the confirm
+    card, whose YES forfeits the fight. Two plain tuning constants an unrelated change may
+    reorder are not a safety argument, which is why the screen is read here instead.
+
+    What it costs, on the same trace: 7,362 of 7,507 dialogue taps survive - 98.07%. Every
+    one of the 145 refused had a pill on screen. A refusal is also cheap by construction:
+    returning no effect leaves the "rocket" budget unstamped, so `Context.ready` is true
+    again on the very next frame and a transient false pill delays a dialogue by one frame
+    (~125ms at the default infer_fps of 8), not by a whole tap interval.
+
+    A located close button is deliberately NOT a veto here. The tap provably cannot reach
+    one - see `ROCKET_DIALOGUE_TAP` - and refusing on it would cost a further 94 taps
+    (1.25%) on frames where nothing has been shown to be at risk.
+    """
+    if obs.exit_dialog.value:
+        return False
+    if obs.promo_save_xy is not None:
+        return False
+    if obs.action_pill_xy is not None:
+        return False
+    return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
+
+
 #: How far, in fractions of frame height, a located close button must sit from the located
 #: affirmative pill before `rocket_exit_screen` will believe it is an X at all.
 #:
@@ -633,8 +734,13 @@ class Rocket(Handler):
             return []
         if not ctx.ready("rocket", cfg.timings.rocket_tap):
             return []
-        if obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf):
-            return [Tap(0.50, 0.62, "rocket: advance dialogue", budget="rocket")]
+        # The one press in this file with no button to locate - a grunt dialogue advances
+        # on a tap anywhere - so the screen is vetted instead of the coordinate being
+        # found. `rocket_dialogue_screen` carries the whole argument for why this point is
+        # safe and what it refuses; the classifier's own confidence is NOT that argument,
+        # because on the frames this branch serves it cannot tell a dialogue from an ad.
+        if rocket_dialogue_screen(obs, cfg):
+            return [Tap(*ROCKET_DIALOGUE_TAP, "rocket: advance dialogue", budget="rocket")]
         return []
 
     def on_timeout(self, obs, ctx):

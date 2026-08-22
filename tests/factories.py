@@ -9,7 +9,8 @@ def sig(value=False, score=0.0, threshold=1.0):
 def obs(*, seq=1, ts=0.0, on_map=False, x_button=False, encounter=False,
         claim=False, out_of_range=False, screen="Overworld", conf=0.99,
         screen_available=True, detections=(), keyboard=Tristate.FALSE,
-        close_xy=None, pill_xy=None, goplus=Tristate.UNKNOWN, exit_dialog=False):
+        close_xy=None, pill_xy=None, goplus=Tristate.UNKNOWN, exit_dialog=False,
+        promo_xy=None):
     return Observation(
         seq=seq, ts=ts, stream_wh=(590, 1280),
         map_ball=sig(on_map, 1.0 if on_map else 0.0),
@@ -20,6 +21,7 @@ def obs(*, seq=1, ts=0.0, on_map=False, x_button=False, encounter=False,
         detections=tuple(detections), keyboard=keyboard,
         close_button_xy=close_xy, action_pill_xy=pill_xy, goplus=goplus,
         exit_dialog=sig(exit_dialog, 1.0 if exit_dialog else 0.0),
+        promo_save_xy=promo_xy,
     )
 
 
