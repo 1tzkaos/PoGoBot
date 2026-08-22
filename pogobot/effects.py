@@ -163,6 +163,33 @@ class Pinch:
 
 
 @dataclass(frozen=True)
+class ForegroundApp:
+    """Bring the game back to the front without killing it.
+
+    Pokemon GO carries sponsored stops and gyms, and a tap on one opens the sponsor's site
+    in a browser: measured live, `ActivityTaskManager: START ... act=VIEW dat=https://
+    www.mlb.com ... cmp=com.android.chrome` two seconds after the bot entered ROCKET and
+    tapped the fixed dialogue coordinate. The game keeps running; it is simply no longer
+    what the screen shows.
+
+    Everything the recovery ladder does is wrong in that state. BACK navigates the BROWSER,
+    the optical locators are reading a web page, and the map can never come back while
+    another app owns the display - which is how one live run spent 603 frames in ROCKET on
+    a cookie banner and then died on the frame guard, because a near-static web page barely
+    encodes any frames either.
+
+    Distinct from `RestartApp` on purpose and ordered before it: this is the cheap answer
+    that keeps the session, the login and the AutoWalk route intact, where a restart throws
+    all three away and costs a cold start.
+    """
+
+    package: str
+    activity: str
+    reason: str
+    budget: str = "foreground"
+
+
+@dataclass(frozen=True)
 class Transition:
     to: BotState
     outcome: IntentOutcome
@@ -216,10 +243,11 @@ class Halt:
     reason: str
 
 
-Effect = Union[Tap, Swipe, Back, DoubleTapDrag, Pinch, RestartApp, Transition, SetIntent,
+Effect = Union[Tap, Swipe, Back, DoubleTapDrag, Pinch, RestartApp, ForegroundApp,
+               Transition, SetIntent,
                SetFlag, Cooldown, ClearSpatialMemory, Note, Halt]
 
-ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag, Pinch, RestartApp)
+ACTUATIONS = (Tap, Swipe, Back, DoubleTapDrag, Pinch, RestartApp, ForegroundApp)
 
 
 def is_actuation(effect: Effect) -> bool:

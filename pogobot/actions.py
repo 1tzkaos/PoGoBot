@@ -32,8 +32,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Mapping, Optional, Sequence
 
-from .effects import (Back, DoubleTapDrag, Effect, Pinch, RestartApp, Swipe, Tap,
-                      is_actuation)
+from .effects import (Back, DoubleTapDrag, Effect, ForegroundApp, Pinch, RestartApp,
+                      Swipe, Tap, is_actuation)
 from .observation import Tristate
 
 DEFAULT_RESOLUTION = (1080, 2340)
@@ -239,6 +239,12 @@ class Actuator:
                            effect.budget, effect.reason, (x2, y2), _CLOCK())
         if isinstance(effect, Back):
             return Command(_adb_argv(self.adb, self.serial, "shell", "input", "keyevent", "4"),
+                           effect.budget, effect.reason, None, _CLOCK())
+        if isinstance(effect, ForegroundApp):
+            # No force-stop: the game is alive, just behind something else. `am start` on
+            # its main activity raises the existing task rather than launching a new one.
+            return Command(_adb_argv(self.adb, self.serial, "shell", "am", "start", "-n",
+                                     f"{effect.package}/{effect.activity}"),
                            effect.budget, effect.reason, None, _CLOCK())
         if isinstance(effect, Pinch):
             # Pushed lazily rather than at construction: a dry run, a replay and every unit
