@@ -2022,6 +2022,18 @@ def step(obs: Observation, ctx: Context) -> list[Effect]:
     fired = interrupts(obs, ctx)
     if fired:
         return fired
+    # Refusing to act on someone else's screen is NOT bounded, and separating the two is
+    # the whole lesson of the run that produced this. `interrupts` raises the game a bounded
+    # number of times, because a game that will not come forward needs a restart rather than
+    # a fourth `am start`. But the bound was also removing the PROTECTION: once it was spent
+    # the handlers ran again and the bot went on pressing things in Chrome - measured, 6
+    # taps into a cookie banner, which is how it got back to the advertisement each time
+    # after the raise had worked.
+    #
+    # So the raise is bounded and the refusal is not. With nothing pressed, the map stays
+    # gone, and `map_stale_since` walks the run into the restart ladder that does fix it.
+    if ctx.app_foreground is Tristate.FALSE:
+        return []
 
     want = desired_state(obs, ctx)
     if want is not None and want is not ctx.state:

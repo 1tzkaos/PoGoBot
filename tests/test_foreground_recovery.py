@@ -142,3 +142,24 @@ def test_an_accepted_raise_is_counted_by_the_runner():
     assert r.ctx.foregrounds == before + 1
     assert r.ctx.app_foreground is Tristate.UNKNOWN, \
         "the old answer must not survive the command that invalidates it"
+
+
+@pytest.mark.parametrize("state", [BotState.ROCKET, BotState.ENCOUNTER,
+                                   BotState.SCANNING, BotState.POPUP])
+def test_nothing_is_pressed_once_the_raise_budget_is_spent(state):
+    """The bound limits RAISING, never the refusal to act. Measured: with the budget spent
+    the handlers ran again and the bot put 6 taps into a cookie banner, which is how it
+    reached the advertisement again after each successful raise."""
+    c = ctx(app_foreground=Tristate.FALSE,
+            foregrounds=DEFAULT.max_foreground_attempts)
+    c.state = state
+    out = fsm.step(OFF, c)
+    assert out == [], f"{state} acted on a screen belonging to another app: {out}"
+
+
+def test_the_refusal_lifts_the_moment_the_game_is_back():
+    """It must not latch: a TRUE reading returns the bot to ordinary play immediately."""
+    c = ctx(app_foreground=Tristate.TRUE,
+            foregrounds=DEFAULT.max_foreground_attempts)
+    c.state = BotState.RECOVERING
+    assert fsm.step(OFF, c), "the ladder should run again once the game is in front"
