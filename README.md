@@ -37,10 +37,11 @@ machine, and acts through `adb`.
 | Target detection | Finds Pokémon, PokéStops, and Rocket stops with a 4-class YOLOv8 detector. Gyms are detected too, but deliberately never tapped. |
 | Two-source perception | Optical signals veto the classifier's read, with an N-of-M stabilizer so no single frame moves the state machine. |
 | Team GO Rocket | Presses BATTLE, confirms the party, then lets the in-game auto-battler fight. The bot does not choose moves. |
+| Weighted targeting | Pokémon are weighted above stops rather than strictly ranked above them, so a dense map yields about 5 Pokémon taps for every 3 stops instead of never touching a stop. Tunable per account. |
 | Restocking | Gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting until it restocks. |
 | Account switching | Optionally logs into another PGSharp account once the current one is spun out, or on a clock. Off by default. |
 | Honest learning loop | Curates frames into a human review queue instead of training on its own guesses. |
-| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. The full suite (479 tests) runs in about 18 seconds. |
+| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. The full suite (949 tests) runs in about 30 seconds. |
 
 ### Failsafes and safety
 
@@ -341,6 +342,54 @@ python3 -m pogobot --reset-spins
 
 Every account tracked keeps its own independent version of this window. See
 [Account switching](#account-switching).
+
+## Target weighting
+
+On a map with both, which do you tap? The bot used to answer "always the Pokémon" - not
+usually, always. Ranking was `(1 if pokemon else 0, confidence)`, so a 0.31-confidence
+Pokémon at the edge of reach outranked a 0.99 PokéStop, and stops were tapped exactly never
+unless you turned Pokémon off entirely with `--target-mode pokestop`.
+
+Now each class carries a weight, and the bot taps whichever class is furthest below its
+share:
+
+```json
+{
+  "accounts": {
+    "Catcher": { "target_weights": { "pokemon": 1.0, "pokestop": 0.2 } },
+    "Farmer":  { "target_weights": { "pokemon": 0.1, "pokestop": 1.0 } }
+  }
+}
+```
+
+Defaults are `pokemon 1.0`, `pokestop 0.6`, `pokestop_rocket 0.6`. A partial block is
+merged onto those, so `{"pokestop": 0.2}` means "the usual, but fewer stops".
+
+These are **ratios, not probabilities or thresholds** - only the proportions matter, so
+`{1.0, 0.6}` and `{10, 6}` behave identically. With the defaults on a map showing both:
+
+```
+P S P S P P S P P S P S P P S P     5 Pokemon : 3 stops
+```
+
+Pokémon open, both classes are interleaved rather than run in blocks, and the ratio holds
+over the last 20 target taps (`target_share_window`). Measuring against lifetime counts
+instead would let a class that was off screen for a long stretch come back owed its whole
+absence - 100 Pokémon taps with no stop in sight would be followed by 60 straight stops,
+the same starvation pointed the other way.
+
+Two consequences worth knowing:
+
+- **A weight of 0 disables the class**, the way `fight_rockets: false` does. It is skipped,
+  not merely ranked last - ranked last still gets tapped whenever nothing else is up.
+- **`pokestop_rocket` defaults to the same weight as `pokestop`**, because that is what the
+  old ranking did (both scored 0, so neither outranked the other). Raising it changes what
+  the bot plays, so that is left to you.
+
+Weights decide *which* eligible target is tapped, never *whether* one may be. Reach, the
+confidence floor, cooldowns, `--target-mode`, a spent spin quota and restocking are all
+filters that run first, and no weight lifts them: an out-of-range stop weighted 1000 is
+still out of range.
 
 ## Account switching
 

@@ -510,6 +510,47 @@ class StarSeparation:
 
 
 @dataclass(frozen=True)
+class TargetWeights:
+    """How often each detection class should be tapped, relative to the others.
+
+    What this replaces: `pick_target` ranked `(1 if pokemon else 0, conf)`, a strict
+    tiering in which ANY Pokemon outranked ANY stop. On a map with both, stops were never
+    tapped at all - not rarely, never - because a single 0.31-confidence Pokemon anywhere
+    in reach beat a 0.99 stop. The only escapes were `--target-mode pokestop` and
+    restocking, both of which turn Pokemon off entirely. There was no way to say "mostly
+    Pokemon, some stops", which is what an operator actually wants.
+
+    These are RATIOS, not probabilities and not thresholds. Only the proportions between
+    them matter: {1.0, 0.6} and {10, 6} schedule identically. With the defaults, a map
+    showing both classes settles at 5 Pokemon taps for every 3 stops.
+
+    A weight of 0 disables the class - it is skipped exactly the way `fight_rockets=false`
+    skips rockets, rather than being ranked last and tapped whenever nothing else is up.
+
+    `pokestop_rocket` defaults to the same weight as `pokestop` because that is what the
+    old tiering did: both ranked 0, so neither outranked the other. Raising it is a real
+    change in what the bot plays, so it is left to the operator rather than assumed here.
+    """
+
+    pokemon: float = 1.0
+    pokestop: float = 0.6
+    pokestop_rocket: float = 0.6
+
+    def of(self, name: str) -> float:
+        """The weight for a detection class; 0 for one that has none.
+
+        Unknown classes weigh nothing rather than defaulting to 1.0: the model gained a
+        `gym` class once already, and a new class silently entering the rotation at full
+        weight is how the bot starts tapping something nobody chose.
+        """
+        return float(getattr(self, name, 0.0))
+
+    def __str__(self) -> str:
+        return ", ".join(f"{f}={getattr(self, f):g}"
+                         for f in ("pokemon", "pokestop", "pokestop_rocket"))
+
+
+@dataclass(frozen=True)
 class Config:
     rois: Rois = field(default_factory=Rois)
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -551,6 +592,16 @@ class Config:
 
     catch_mode: str = "throw"
     target_mode: str = "all"
+    target_weights: TargetWeights = field(default_factory=TargetWeights)
+    #: How many recent target taps the share is measured over.
+    #:
+    #: This bounds the correction. Measured against LIFETIME counts instead, a
+    #: class that was off screen for a long stretch comes back owed its whole
+    #: absence: 100 Pokemon taps with no stop in sight leaves stops "behind" by 60,
+    #: and the next 60 taps are all stops - the same starvation, pointed the other
+    #: way. Over a window, the most a returning class can take in a row is its
+    #: share of the window.
+    target_share_window: int = 20
     fight_rockets: bool = True
 
     # Out of Poke Balls is not observable: with one labelled example and no clean

@@ -76,6 +76,12 @@ class Context:
     left_encounter_ts: float = 0.0
     throws_this_encounter: int = 0
     failed_encounters: int = 0
+    #: Classes of the most recent target taps, oldest first, capped at
+    #: `cfg.target_share_window`. Written by the runner when it applies a
+    #: `SetIntent` (the one place a target tap is decided), read by `pick_target`
+    #: to see which class is behind its share. Handlers never write it - see this
+    #: class's own docstring.
+    recent_targets: list = field(default_factory=list)
     restocking_until: float = 0.0
     restock_stops_at_start: int = 0
     #: set by the runner from the rolling 24h spin quota
@@ -505,10 +511,44 @@ def reach_distance(cfg: Config, x: float, y: float, scale: float = 1.0) -> float
     return (dx * dx + dy * dy) ** 0.5
 
 
+def target_debt(weights, window: list, present: set, name: str) -> float:
+    """How far below its share `name` is, over the recent window. Higher means more owed.
+
+    The share a class is entitled to is its weight over the weights of the classes ACTUALLY
+    ON SCREEN, not over all of them. A map with no stops on it should give Pokemon every
+    tap rather than 62.5% of them and leave the rest to a class that is not there.
+
+    Pure: it reads the window the runner keeps and mutates nothing, so `pick_target` can be
+    called twice on one frame - or in a test - without moving the schedule on.
+    """
+    total = sum(weights.of(n) for n in present)
+    entitled = weights.of(name) / total if total > 0 else 0.0
+    observed = window.count(name) / len(window) if window else 0.0
+    return entitled - observed
+
+
 def pick_target(obs: Observation, ctx: Context):
-    """Best in-reach, not-cooled detection. Pokemon outrank stops, then confidence."""
+    """Best in-reach, not-cooled detection, scheduled by `cfg.target_weights`.
+
+    Selection is in two parts, and keeping them apart is the point. The filters below
+    decide what MAY be tapped - reach, confidence, cooldown, target mode, quota, restock -
+    and none of that is weighted; a stop out of reach is not tapped for any weight. Among
+    what survives, the weights decide what IS tapped.
+
+    The rule is "whichever class is furthest below its share", which is the largest
+    remainder method and settles to the weights exactly. With the defaults on a map showing
+    both classes it produces P S P S P P S P: five Pokemon to three stops, Pokemon first,
+    and never the long run of one class that a strict ordering gives. When only one class
+    is on screen it is the only candidate and takes every tap, so "no Pokemon, plenty of
+    stops" needs no special case.
+
+    Confidence still decides between two detections of the SAME class, which is what it was
+    always doing usefully; what it no longer does is decide between classes, where it was
+    letting a 0.31 Pokemon outrank a 0.99 stop.
+    """
     cfg = ctx.cfg
-    best = None
+    weights = cfg.target_weights
+    eligible = []
     for d in obs.detections:
         if d.name not in TARGETABLE:
             continue
@@ -534,10 +574,23 @@ def pick_target(obs: Observation, ctx: Context):
             continue
         if not ctx.is_cool(x, y):
             continue
-        rank = (1 if d.name == "pokemon" else 0, d.conf)
-        if best is None or rank > best[0]:
-            best = (rank, d)
-    return None if best is None else best[1]
+        if weights.of(d.name) <= 0:
+            # A weight of 0 means "do not play this class", so it is filtered out rather
+            # than ranked last - otherwise it would still be tapped on every frame where
+            # nothing else is eligible, which is the opposite of what 0 says.
+            continue
+        eligible.append(d)
+
+    if not eligible:
+        return None
+    window = ctx.recent_targets[-cfg.target_share_window:] \
+        if cfg.target_share_window > 0 else []
+    present = {d.name for d in eligible}
+    # Ordered, not scored into one number: debt picks the class, weight breaks a tie
+    # between two classes owed the same (the heavier one goes first, so the very first tap
+    # of a run is a Pokemon), and confidence breaks a tie inside a class.
+    return max(eligible, key=lambda d: (target_debt(weights, window, present, d.name),
+                                        weights.of(d.name), d.conf))
 
 
 # ---------------------------------------------------------------- handlers
