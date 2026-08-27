@@ -597,6 +597,34 @@ class Runner:
             return
         self.ctx.app_foreground = Tristate.TRUE if up else Tristate.FALSE
 
+    def _record_target(self, intent) -> None:
+        """Note which class a target tap went to, for `fsm.pick_target`'s share.
+
+        Here rather than at the actuator because this is where the CHOICE is recorded: a
+        gesture the actuator refuses was still the class the scheduler picked, and dropping
+        it would hand that class the next tap as well, and the one after, for as long as
+        the actuator kept refusing. `targets_tapped` counts what was sent; this counts what
+        was chosen, and they are deliberately different numbers.
+
+        Only the runner writes `Context` (see its docstring), which is why the FSM reads
+        this window and never appends to it.
+        """
+        name = getattr(intent, "target_name", None)
+        if name not in fsm.TARGETABLE:
+            # SetIntent also carries non-target intents; only the classes the scheduler
+            # chooses between belong in its window.
+            return
+        window = self.ctx.recent_targets
+        window.append(name)
+        # Trimmed here rather than at the read so the list cannot grow for the length of a
+        # run: at ~1 target tap a second, a six-hour session would otherwise hold 20k
+        # strings that only the last `target_share_window` of are ever read.
+        keep = max(0, self.cfg.target_share_window)
+        if keep <= 0:
+            window.clear()
+        elif len(window) > keep:
+            del window[:-keep]
+
     def _apply_account_profile(self) -> None:
         """Point `cfg` at the settings for whoever we are logged in as.
 
@@ -1096,6 +1124,7 @@ class Runner:
                 self.enter_state(e.to, e.outcome, e.reason)
             elif isinstance(e, SetIntent):
                 self.ctx.intent = e.intent
+                self._record_target(e.intent)
             elif isinstance(e, SetFlag):
                 setattr(self.ctx, e.name, e.value)
             elif isinstance(e, Cooldown):

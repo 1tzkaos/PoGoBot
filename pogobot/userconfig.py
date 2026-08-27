@@ -45,7 +45,7 @@ log = logging.getLogger("pogobot")
 #: Settings an account may override. Anything else in the file is a typo, and typos in a
 #: hand-edited file are silent unless something says so - `fight_rocket` would otherwise
 #: read as "leave it at the default" and the operator would be told nothing.
-KNOWN_KEYS = frozenset({"fight_rockets"})
+KNOWN_KEYS = frozenset({"fight_rockets", "target_weights"})
 
 #: Settings whose VALUE is a credential. The startup line reports what the file
 #: applied, and for these that would put a secret in the log and in any terminal
@@ -79,6 +79,61 @@ def load(path: Optional[Path]) -> dict[str, Any]:
     return raw
 
 
+def _coerce_profile(key: str, value: Any, account: str, where: str) -> Any:
+    """Validate one per-account setting, or `_BAD` with a warning saying why.
+
+    Dispatching on the key rather than testing `isinstance(value, bool)` for everything:
+    that check was correct while `fight_rockets` was the only setting, and reported
+    `target_weights` - an object - as "expected true or false", which is advice that cannot
+    be followed.
+    """
+    if key == "target_weights":
+        return _coerce_weights(value, account, where)
+    if not isinstance(value, bool):
+        log.warning("%s: %r sets %s to %r; expected true or false",
+                    where, account, key, value)
+        return _BAD
+    return value
+
+
+def _coerce_weights(value: Any, account: str, where: str) -> Any:
+    """A `target_weights` object -> a `TargetWeights`, or `_BAD`.
+
+    Partial is the useful case and is merged onto the defaults, so `{"pokestop": 0.2}`
+    means "the usual, but fewer stops" rather than "Pokemon and rockets to zero" - which
+    would silently stop the bot playing them at all.
+    """
+    from dataclasses import fields, replace
+    from .config import TargetWeights
+
+    if not isinstance(value, dict):
+        log.warning('%s: %r sets target_weights to %r; expected an object like '
+                    '{"pokemon": 1.0, "pokestop": 0.6}', where, account, value)
+        return _BAD
+    known = {f.name for f in fields(TargetWeights)}
+    clean: dict[str, float] = {}
+    for name, weight in value.items():
+        if name not in known:
+            log.warning("%s: %r weights unknown target %r; weightable targets are %s",
+                        where, account, name, ", ".join(sorted(known)))
+            continue
+        # `bool` is an `int`, and `{"pokemon": true}` weighing 1.0 would look like it
+        # worked while meaning something the operator did not write.
+        if isinstance(weight, bool) or not isinstance(weight, (int, float)):
+            log.warning("%s: %r sets target_weights.%s to %r; expected a number",
+                        where, account, name, weight)
+            continue
+        if weight < 0:
+            log.warning("%s: %r sets target_weights.%s to %r; weights are ratios and "
+                        "cannot be negative (0 disables the target)",
+                        where, account, name, weight)
+            continue
+        clean[name] = float(weight)
+    if not clean:
+        return _BAD
+    return replace(TargetWeights(), **clean)
+
+
 def load_profiles(raw: dict[str, Any], where: str = "config.json"
                   ) -> dict[str, dict[str, Any]]:
     """The `accounts` block: account name -> settings.
@@ -104,11 +159,10 @@ def load_profiles(raw: dict[str, Any], where: str = "config.json"
                 log.warning("%s: %r sets unknown option %r; known options are %s",
                             p, account, key, ", ".join(sorted(KNOWN_KEYS)))
                 continue
-            if not isinstance(value, bool):
-                log.warning("%s: %r sets %s to %r; expected true or false",
-                            p, account, key, value)
+            coerced = _coerce_profile(key, value, account, p)
+            if coerced is _BAD:
                 continue
-            clean[key] = value
+            clean[key] = coerced
         out[account] = clean
     return out
 
