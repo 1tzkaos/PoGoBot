@@ -47,6 +47,12 @@ log = logging.getLogger("pogobot")
 #: read as "leave it at the default" and the operator would be told nothing.
 KNOWN_KEYS = frozenset({"fight_rockets"})
 
+#: Settings whose VALUE is a credential. The startup line reports what the file
+#: applied, and for these that would put a secret in the log and in any terminal
+#: scrollback or pasted bug report - so they are reported as set, never as what
+#: they were set to. `notify.masked` does the same job for the same URL.
+SECRET_KEYS = frozenset({"discord_webhook"})
+
 #: The key whose settings apply to every account that has no entry of its own.
 DEFAULT_KEY = "default"
 
@@ -177,7 +183,8 @@ def apply_run_settings(raw: dict[str, Any], parser, namespace, explicit: set,
         if coerced is _BAD:
             continue
         setattr(namespace, key, coerced)
-        applied.append(f"{key}={_show(coerced)}")
+        applied.append(f"{key}=<set>" if key in SECRET_KEYS
+                       else f"{key}={_show(coerced)}")
     return applied
 
 

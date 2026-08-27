@@ -134,8 +134,15 @@ class Runner:
                  quota: Optional[SpinQuota] = None,
                  pause_file: Optional[Path] = None, tree_reader=None,
                  roster: tuple[str, ...] = (),
-                 account_profiles: Optional[dict] = None):
+                 account_profiles: Optional[dict] = None,
+                 notifier=None):
         self.cfg = cfg
+        #: Optional Discord notifications. A null object by default so no call
+        #: site below needs a guard (see notify.NullNotifier).
+        if notifier is None:
+            from .notify import NullNotifier
+            notifier = NullNotifier()
+        self.notifier = notifier
         #: The run's own settings, before any per-account override. Overrides are applied
         #: ON TOP of this rather than on top of each other, so switching A -> B -> A gives
         #: A exactly what it had the first time instead of accumulating B's answers.
@@ -339,6 +346,18 @@ class Runner:
             self._on_switch_failed(self._switch_target)
             self._switch_target = None
 
+    def _safe_summary(self) -> Optional[dict]:
+        """`stats.summary()`, or None if it throws.
+
+        Called only on the way into a notification, which must not be able to
+        raise inside `_halt` - the one place that records a run stopping.
+        """
+        try:
+            return self.stats.summary()
+        except Exception:
+            log.exception("could not summarise the session")
+            return None
+
     def _halt(self, reason: str) -> None:
         """The single place a run is declared halted.
 
@@ -350,6 +369,10 @@ class Runner:
         """
         if self._halt_reason is None:
             self.stats.halts += 1
+            # Only the first reason is posted: the later ones are consequences of
+            # it, and a phone buzzing four times says nothing the first did not.
+            self.notifier.halted(reason, account=self.stats.account,
+                                 summary=self._safe_summary())
         self._halt_reason = reason
 
     def _frames_starved(self, now: float) -> bool:
@@ -501,8 +524,17 @@ class Runner:
         # Keyword, not positional: quota.state()'s first positional slot is `account`
         # (per-account quotas), so a bare timestamp here would silently bind to the wrong
         # parameter and never match any bucket.
-        self.ctx.spins_exhausted = self.quota.state(account=self.stats.account,
-                                                    now=time.time()).exhausted
+        was = self.ctx.spins_exhausted
+        st = self.quota.state(account=self.stats.account, now=time.time())
+        self.ctx.spins_exhausted = st.exhausted
+        # Edge, not level: this runs every tick, and the flag stays true for the
+        # rest of the window once it flips. Keyed by account so a rotating run is
+        # told about each one, and re-armed by the switch that clears the flag.
+        if st.exhausted and not was:
+            self.notifier.problem(
+                "Spin quota used up",
+                f"{self.stats.account or 'unknown'} has spun {st.used}/{st.limit} "
+                f"stops in the rolling 24h window. Resets in {_hms(st.resets_in)}.")
 
     def _end_encounter(self, e: Transition) -> None:
         """Track consecutive useless encounters and start restocking after enough of them.
@@ -997,6 +1029,10 @@ class Runner:
                         "login tap and the account does not change, which looks like a "
                         "login throttle - restart once it has cleared.",
                         self._switch_failures, who)
+            self.notifier.problem(
+                "Account switching gave up",
+                f"{self._switch_failures} switches in a row never confirmed "
+                f"(last target: {who}). Looks like a login throttle; the run continues on the current account.")
         else:
             # `Switching.on_timeout` has already said the switch never confirmed; this
             # line only has to say what follows from it.
@@ -1027,6 +1063,7 @@ class Runner:
         # short by every pause taken BEFORE the switch, and below RATE_MIN_UPTIME every
         # per-account rate then reports as unknown, which is the whole point of the split.
         self.stats = SessionStats(started=self.ctx.now, dry_run=old.dry_run, account=name)
+        self.notifier.switched(name)
         self.stats.paused_seconds = old.paused_seconds
         self._next_report = self.stats.started + REPORT_EVERY
         if self.dashboard is not None:
@@ -1232,6 +1269,10 @@ class Runner:
 
         log.info("running (dry_run=%s, catch=%s, targets=%s, rockets=%s)",
                  cfg.dry_run, cfg.catch_mode, cfg.target_mode, cfg.fight_rockets)
+        self.notifier.started(
+            account=self.stats.account,
+            settings=(f"dry_run={cfg.dry_run}, catch={cfg.catch_mode}, "
+                      f"targets={cfg.target_mode}, rockets={cfg.fight_rockets}"))
 
         # SIGTERM's default action kills the process without unwinding, so `kill`,
         # `timeout` and a system shutdown all skipped the finally block below - losing the
@@ -1524,5 +1565,16 @@ class Runner:
                 except Exception:
                     log.exception("could not append the session record")
             log.info("session summary:\n%s", self.stats.report())
+            # After the durable record, never before: a notification is the
+            # disposable copy of what `sessions.jsonl` already holds. A halted run
+            # has already been posted by `_halt`, and saying "finished" on top of
+            # "HALTED" would read as a recovery that did not happen.
+            try:
+                if not self._halt_reason:
+                    self.notifier.finished(account=self.stats.account,
+                                           summary=self._safe_summary())
+                self.notifier.close()
+            except Exception:
+                log.exception("could not close Discord notifications")
         if self.quota is not None:
             log.info("%s", self.quota.state(account=self.stats.account).line())

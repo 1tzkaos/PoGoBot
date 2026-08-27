@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import time
 from pathlib import Path
@@ -59,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run against a directory of frames instead of a phone")
     p.add_argument("--replay-interval", type=float, default=0.0)
     p.add_argument("--serial", default=None, help="adb device serial")
+    p.add_argument("--discord-webhook", default=None, metavar="URL",
+                   help="post run events to this Discord webhook (or set "
+                        "POGOBOT_DISCORD_WEBHOOK; see notify.py)")
     p.add_argument("--trace", type=Path, default=BASE_DIR / "logs" / "trace.jsonl")
     p.add_argument("--no-trace", action="store_true")
     p.add_argument("--stats-file", type=Path, default=BASE_DIR / "logs" / "sessions.jsonl",
@@ -494,6 +498,17 @@ def main(argv=None) -> int:
                                       lifetime=total if stats_path else None,
                                       quota=quota, pause_file=a.pause_file)
 
+    # A typed flag beats the environment, which beats config.json. The file's own
+    # rule is that a typed flag wins; the environment slots in underneath it so the
+    # credential need not live in a hand-edited file at all. `apply_run_settings`
+    # has already written the file's value onto the namespace, so without the
+    # `explicit` check below a config.json entry would silently shadow the
+    # environment - the one ordering this is meant to guarantee.
+    from . import notify as _notify
+    _typed = "discord_webhook" in explicit_options(argv)
+    _webhook = a.discord_webhook if _typed else (
+        os.environ.get(_notify.ENV_VAR) or a.discord_webhook)
+    notifier = _notify.from_settings(_webhook)
     account_profiles = userconfig.load_profiles(user_cfg, str(a.config_file))
     log.info("%s", userconfig.describe(account_profiles))
     runner = Runner(cfg, source, actuator, perceptor, ledger=ledger, keyboard=keyboard,
@@ -501,7 +516,8 @@ def main(argv=None) -> int:
                     dashboard=dashboard, encounter_dump=a.collect_encounters,
                     dialogue_dump=a.collect_dialogues,
                     quota=quota, pause_file=a.pause_file, tree_reader=tree_reader,
-                    roster=roster, account_profiles=account_profiles)
+                    roster=roster, account_profiles=account_profiles,
+                    notifier=notifier)
     if dashboard is None:
         # No dashboard means Runner kept the SessionStats it built itself; name it here
         # so the very first session's spins are booked under the identified account rather

@@ -61,8 +61,50 @@ machine, and acts through `adb`.
 | Session counters | Encounters, catch attempts, stops collected, and rockets, with per-hour rates and cumulative lifetime totals across runs. |
 | Full trace | One JSON record per tick with both perception opinions, the raw scores, and every effect. |
 | Replay mode | Runs the entire bot against saved frames with nothing plugged in. |
+| Discord notifications | Optional. Posts the few events worth interrupting someone for - a run starting, finishing, halting, an account switch, a switch that will not confirm, a spent spin quota - as embeds. Off unless configured. |
 
 *"Catch attempts" means exactly that, not catches: a successful catch and a fleeing Pokémon end the same way on screen, so the bot counts attempts, never confirmed catches (see [Session stats](#session-stats)).*
+
+### Discord notifications
+
+A run is unattended by design, so a halt at minute three of a six-hour run looks exactly
+like a run still going. Point the bot at a Discord webhook and it will say so.
+
+```bash
+export POGOBOT_DISCORD_WEBHOOK='https://discord.com/api/webhooks/.../...'
+python3 -m pogobot
+```
+
+or, if you would rather keep it in the file (`config.json` is gitignored):
+
+```json
+{ "discord_webhook": "https://discord.com/api/webhooks/.../..." }
+```
+
+or for one run only: `python3 -m pogobot --discord-webhook URL`.
+
+A typed flag beats the environment variable, which beats `config.json`. With none of the
+three set, nothing is posted and nothing is started.
+
+| Event | Colour |
+|---|---|
+| Run started | blurple |
+| Run finished, with the session summary | green |
+| **Run HALTED**, with the reason that stopped it | red |
+| Switch gave up after 3 failures; spin quota used up | amber |
+| Switched account | pale |
+
+Three properties are deliberate, and tested:
+
+- **It cannot stop the bot.** Every path swallows what it can raise. A deleted webhook,
+  a DNS failure, or a proxy that hangs is a log line, not a halt.
+- **It cannot cost frames.** The tick loop has ~125ms at the default `infer_fps` and a
+  POST can eat all of it, so delivery runs on a worker thread; posting only enqueues.
+  If Discord is unreachable the bounded queue drops and counts rather than growing.
+- **It does not leak the URL.** The webhook token grants posting rights to your channel,
+  so it never reaches a log line - `config.json: discord_webhook=<set>` - and a URL that
+  is not an `https://discord.com/api/webhooks/...` endpoint is refused before any request
+  is made, so a mistyped host never receives your account names.
 
 ### Coming soon
 
