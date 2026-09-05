@@ -215,6 +215,21 @@ class Timings:
     #: per 30.1s, paced by `Cooldowns.on_refuted`. Note `switch_every_minutes` defaults to
     #: 0.0, so rotation is opt-in and is NOT a backstop this number may lean on.
     party_fainted_hold: float = 900.0
+    #: How long a run may go without an ENCOUNTER before it is declared unproductive and
+    #: halted. ARMED ONLY once the session has had its first encounter, so a slow start,
+    #: a preflight, or a login is never punished by it.
+    #:
+    #: The bar is set from measurement, not taste. Over the 303 ENCOUNTER entries in
+    #: `logs/run.log` the gap between encounters runs median 17s and p90 50s, and there is
+    #: exactly ONE gap above 900s: 31,091s, which is the fainted-party stall itself. There
+    #: is nothing in between, so 1800 sits 36x above normal operation and an order of
+    #: magnitude below the failure - it cannot fire on a working run.
+    #:
+    #: This is the only thing that would have ended that run honestly. `Rocket.timeout_s`
+    #: fired 173 times and recovered every time; the stale-frame watchdog never fired
+    #: because frames kept arriving. Both are per-symptom. This one asks the only question
+    #: that matters to an operator: is the bot still catching anything?
+    productivity_watchdog: float = 1800.0
 
     targeting_timeout: float = 4.0
     encounter_timeout: float = 25.0

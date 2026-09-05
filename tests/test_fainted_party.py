@@ -378,3 +378,92 @@ def test_a_benign_am_start_warning_is_not_an_actuator_failure():
     assert _BENIGN_STDERR.search(warning)
     assert not _BENIGN_STDERR.search("error: device offline")
     assert not _BENIGN_STDERR.search("Error: Activity class does not exist")
+
+
+# ---------------------------------------------------------------- productivity watchdog
+
+def test_the_watchdog_is_disarmed_until_the_first_encounter():
+    """17 of 159 recorded sessions had zero encounters. Halting a run that is still logging
+    in would be a new failure mode invented to catch an old one."""
+    r = _runner()
+    assert r._last_encounter_ts is None
+    assert r._unproductive(1e9) is False
+    assert r.stats.halts == 0
+
+
+def test_the_watchdog_halts_a_run_that_has_stopped_catching():
+    r = _runner()
+    r._last_encounter_ts = 1000.0
+    assert r._unproductive(1000.0 + C.timings.productivity_watchdog + 1) is True
+    assert r.stats.halts == 1
+    assert "no encounter" in (r._halt_reason or "")
+
+
+def test_the_watchdog_does_not_fire_inside_the_budget():
+    r = _runner()
+    r._last_encounter_ts = 1000.0
+    assert r._unproductive(1000.0 + C.timings.productivity_watchdog - 1) is False
+    assert r.stats.halts == 0
+
+
+def test_the_watchdog_bar_sits_far_above_normal_operation():
+    """Measured over the 303 ENCOUNTER entries in logs/run.log: median gap 17s, p90 50s,
+    and exactly one gap above 900s - 31,091s, which is the stall. The bar must sit in that
+    empty space, not near the p90."""
+    assert C.timings.productivity_watchdog >= 900.0
+    assert C.timings.productivity_watchdog <= 31091.0
+
+
+def test_the_watchdog_can_be_turned_off():
+    r = runner_mod.Runner(replace(C, timings=replace(C.timings, productivity_watchdog=0.0)),
+                          _Src(), _Act(), perceptor=None, display=False)
+    r._last_encounter_ts = 1000.0
+    assert r._unproductive(1e9) is False
+
+
+# ---------------------------------------------------------------- PGSharp favourites
+
+FIXTURES = Path("tests/fixtures/uiautomator")
+
+
+def test_the_pgsharp_menu_offers_favorites_and_teleport():
+    """Captured from the live overlay. These are the two candidate routes to a fixed home
+    location; Favorites wins because its rows are addressable BY NAME."""
+    x = (FIXTURES / "pgsharp_shortcut_menu.xml").read_text(errors="replace")
+    for item in ("Favorites", "Teleport", "Map", "AutoWalk", "Settings"):
+        assert f'text="{item}"' in x, item
+
+
+def test_favourite_rows_are_addressable_by_name():
+    """`hl_fi_name` carries the destination's own label, so a home location can be named in
+    config rather than reached by a row index that reorders or a coordinate that moves.
+
+    The captured fixture is REDACTED: this repository is public, and the real rows named
+    the operator's saved destinations while `hl_fi_info` gave the live distance to each -
+    together enough to place the account. Place names, local times and distances are
+    replaced with fixed placeholders; every resource-id, bound and label the tests actually
+    assert on is untouched.
+    """
+    x = (FIXTURES / "pgsharp_favorites.xml").read_text(errors="replace")
+    assert "hl_fi_name" in x
+    assert "hl_favor_list" in x
+    assert "Home Location" in x
+
+
+def test_the_favourites_page_carries_its_own_cooldown_text():
+    """"Distance: 263.61 m Cooldown: 1 Mins" - the teleport cooldown is readable BEFORE
+    committing to a jump, which is what makes a safe go-home possible at all."""
+    x = (FIXTURES / "pgsharp_favorites.xml").read_text(errors="replace")
+    assert "Cooldown:" in x and "Distance:" in x
+
+
+def test_back_does_not_dismiss_the_favourites_page():
+    """THE load-bearing capture. The recovery ladder presses BACK, so if BACK dismissed
+    this page a wedge would clear itself. It does not: measured live, the page is fully
+    present after BACK, and only `hl_page_close` ("OK") closes it. Any go-home ladder must
+    close explicitly and must never leave this page up.
+    """
+    after = (FIXTURES / "pgsharp_favorites_after_back.xml").read_text(errors="replace")
+    assert "hl_favor_list" in after, "BACK did NOT dismiss the page"
+    assert "hl_page_close" in after
+    assert 'text="OK"' in after

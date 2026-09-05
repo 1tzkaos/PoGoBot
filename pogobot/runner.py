@@ -217,6 +217,7 @@ class Runner:
         self._stop = False
         self._halt_reason: Optional[str] = None
         self._party_false = 0
+        self._last_encounter_ts: Optional[float] = None
         self._encounter_left_at: Optional[float] = None
         self._ticks = 0
         self._fps = 0.0
@@ -276,6 +277,11 @@ class Runner:
             if not resumed:
                 self._encounter_left_at = None
                 st.on_encounter_start()
+                # Arms and then feeds the productivity watchdog. Stamped on ENTRY rather
+                # than on a throw or a catch because entering an encounter is the coarsest
+                # thing that is unambiguously progress and is observable today - a
+                # confirmed catch is not (see the note at the top of stats.py).
+                self._last_encounter_ts = self.ctx.now
         elif src is BotState.ENCOUNTER and dst is not BotState.ENCOUNTER:
             st.on_encounter_end()
             self.ctx.left_encounter_ts = self.ctx.now
@@ -375,6 +381,34 @@ class Runner:
             self.notifier.halted(reason, account=self.stats.account,
                                  summary=self._safe_summary())
         self._halt_reason = reason
+
+    def _unproductive(self, now: float) -> bool:
+        """True once the run has stopped producing encounters for `productivity_watchdog`.
+
+        Every other watchdog in this file asks about a SYMPTOM - a stale frame, a state
+        that overran, an actuator that stopped answering - and the fainted-party stall
+        defeated all of them: frames kept arriving, `Rocket.timeout_s` fired 173 times and
+        RECOVERING cleared it every time. 9.3 hours, `stops_collected: 0`, and nothing in
+        the machine considered that a problem. This asks the only question an operator
+        actually cares about: is it still catching anything?
+
+        Armed only after the first encounter. Before that there is no evidence the run was
+        ever productive, and halting a session that is still logging in or running its
+        preflight would be a new failure mode invented to catch an old one. 17 of 159
+        recorded sessions had zero encounters and must stay unaffected.
+
+        Bar set from measurement: median gap between encounters 17s, p90 50s, and exactly
+        one gap above 900s in the whole log - 31,091s, the stall. See
+        `Timings.productivity_watchdog`.
+        """
+        budget = self.cfg.timings.productivity_watchdog
+        if budget <= 0 or self._last_encounter_ts is None:
+            return False
+        idle = now - self._last_encounter_ts
+        if idle < budget:
+            return False
+        self._halt(f"no encounter for {_hms(idle)} - the run has stopped being productive")
+        return True
 
     def _frames_starved(self, now: float) -> bool:
         """True once a run of unusable frames has outlasted the stuck watchdog.
@@ -1414,6 +1448,9 @@ class Runner:
                         self._halt("perception failing repeatedly")
                         break
                     continue
+
+                if self._unproductive(now):
+                    break
 
                 # Two frames must agree before a party is called unfainted-or-not: the
                 # sheet slides in with animating bars, and this writes a fact that outlives
