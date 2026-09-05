@@ -117,6 +117,12 @@ class Observation:
     #: (see perception.goplus_signal); nothing here enforces that gate, so a caller that
     #: reads this off-map is reading noise, not absence.
     goplus: Tristate = Tristate.UNKNOWN
+    #: Can the Rocket battle party on screen actually fight? TRUE=yes, FALSE=a member has
+    #: fainted and Pokemon GO will refuse the battle behind a pink error the bot cannot
+    #: read, UNKNOWN=no party sheet located, which is every other screen. Defaulted for
+    #: the same reason `exit_dialog` is: every existing Observation() call site predates
+    #: this field. Polarity matters - TRUE means "fight it", so UNKNOWN is NOT TRUE.
+    party_can_battle: Tristate = Tristate.UNKNOWN
     #: Pokemon GO's own "Do you want to exit Pokemon GO?" confirm dialog - Unity-drawn,
     #: so uiautomator cannot see it (see perception.exit_dialog_signal). Defaults to a
     #: false Signal so every existing Observation() call site - which never mentions this

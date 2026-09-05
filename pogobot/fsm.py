@@ -74,6 +74,11 @@ class Context:
     last_map_ts: float = 0.0
     last_rocket_ts: float = 0.0
     left_encounter_ts: float = 0.0
+    #: When a party member was last seen unable to battle. A fainted party is an ACCOUNT
+    #: fact - nothing the bot does on screen heals it - so this is a standing stamp, not
+    #: per-visit bookkeeping, and deliberately NOT in `runner._RESET_ON_ENTRY`. Released
+    #: by a confirmed account switch, which is the only thing that really changes a party.
+    party_fainted_ts: float = 0.0
     throws_this_encounter: int = 0
     failed_encounters: int = 0
     #: Classes of the most recent target taps, oldest first, capped at
@@ -86,6 +91,10 @@ class Context:
     restock_stops_at_start: int = 0
     #: set by the runner from the rolling 24h spin quota
     spins_exhausted: bool = False
+    #: Two consecutive frames have read the party sheet as unable to fight. Written by
+    #: the runner, read by handlers, never written here - one frame currently writes a
+    #: fact that outlives it by minutes, and the sheet slides in with animating bars.
+    party_cannot_battle: bool = False
     taps_in_state: int = 0
     #: refreshed by the runner from the UI tree; None until first read
     accounts: Optional[AccountView] = None
@@ -770,6 +779,21 @@ class Rocket(Handler):
 
     def step(self, obs, ctx):
         cfg = ctx.cfg
+        if ctx.party_cannot_battle:
+            # A member has fainted, so Pokemon GO will refuse this fight behind a pink
+            # error the bot cannot read. Pressing USE THIS PARTY anyway is what produced
+            # the measured stall: 173 rocket timeouts at a median of exactly 150.0s - the
+            # full budget, every time - over 9.3 hours, with stops_collected 0.
+            #
+            # No Cooldown here. `Runner._resolve_intent` already appends
+            # `Cooldowns.on_refuted` at the intent's tap point on exactly this REFUTED
+            # POKESTOP -> ROCKET transition, and `ctx.intent` is None inside ROCKET
+            # anyway (enter_state resolves it on every non-CARRIED outcome), so a
+            # Cooldown written here would be dead code aimed at a null.
+            return [Note("rocket: a party member cannot battle; leaving", "warn"),
+                    SetFlag("party_fainted_ts", ctx.now),
+                    Transition(BotState.RECOVERING, IntentOutcome.REFUTED,
+                               "a party member cannot battle")]
         if obs.action_pill_xy is not None \
                 and obs.screen.is_("Rocket", min_conf=cfg.rocket_pill_min_conf):
             # The confidence bar is the point, not the pacing. This branch presses a pill
@@ -2127,7 +2151,19 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
         # a different Pokemon and must not be blocked. The hold exists only for the case
         # where we left and the same screen is still up.
         return None if held else BotState.ENCOUNTER
-    if cfg.fight_rockets and rocket_screen(obs, cfg):
+    # A fainted party keeps the bot OUT of ROCKET rather than letting it enter and decline
+    # every 30s (the `Cooldowns.on_refuted` period), which is the churn the stall was made
+    # of. There is deliberately no map term: releasing on "the map came back" releases on
+    # the very event that re-arms the tap.
+    #
+    # The `> 0.0` is load-bearing, not defensive. `ctx.now` is a perf_counter reading in a
+    # live run and so is large, but it is 0.0 in a freshly built Context - which is every
+    # unit test and the first tick of a run. Without this term `0.0 - 0.0 < 900` reads as
+    # "just fainted" and the bot refuses every Rocket fight it will ever see; four existing
+    # tests caught exactly that.
+    fainted = (ctx.party_fainted_ts > 0.0
+               and ctx.now - ctx.party_fainted_ts < cfg.timings.party_fainted_hold)
+    if cfg.fight_rockets and rocket_screen(obs, cfg) and not fainted:
         return BotState.ROCKET
     if obs.on_map and ctx.state in (BotState.POPUP, BotState.RECOVERING, BotState.BOOT,
                                     BotState.ENCOUNTER, BotState.ROCKET, BotState.POKESTOP):
