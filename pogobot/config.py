@@ -695,6 +695,16 @@ class Config:
     catch_mode: str = "throw"
     target_mode: str = "all"
     target_weights: TargetWeights = field(default_factory=TargetWeights)
+    #: The PGSharp saved location to jump back to after a confirmed account switch, by
+    #: NAME as it appears on the Favorites page. Empty disables it, which is the default:
+    #: teleporting is a real action on a real account and nobody should get it by upgrading.
+    #:
+    #: Matched exact-first, then as a substring, because the real rows carry a flag emoji
+    #: and a country an operator will not type - "New York" finds "<flag> New York, USA".
+    #: A name that is not on the page taps NOTHING: whether PGSharp keeps favourites per
+    #: account or per install is unmeasured, so an account that lacks the entry must do
+    #: nothing rather than tap whatever occupies those pixels.
+    home_favorite: str = ""
     #: How many recent target taps the share is measured over.
     #:
     #: This bounds the correction. Measured against LIFETIME counts instead, a

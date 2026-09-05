@@ -632,6 +632,43 @@ class Runner:
             return
         self.ctx.app_foreground = Tristate.TRUE if up else Tristate.FALSE
 
+    def _go_home(self) -> None:
+        """Put the new account back on the spot the run was started from.
+
+        Called from `_on_switch_confirmed` because that is the moment the cost is already
+        being paid - the switch has just interrupted play anyway - and because the incoming
+        account inherits wherever the outgoing one drifted to. Over a long run that drift is
+        what walks the bot off the dense area it was pointed at.
+
+        Off unless `home_favorite` names something. Best-effort and never fatal: a run that
+        could not get home is a run in the wrong place, not a run that should stop, and the
+        ladder itself refuses to tap anything it did not just locate.
+
+        `_apply_account_profile` has NOT run for the incoming account yet - it is driven
+        from the tick loop - so `self.cfg` is still the outgoing account's. The name is
+        therefore read from the incoming account's own profile where it has one, which is
+        what makes a per-account home mean anything at all.
+        """
+        if self.tree_reader is None:
+            return
+        settings = userconfig.settings_for(self.account_profiles, self.stats.account)
+        home = (settings.get("home_favorite") or self._base_cfg.home_favorite or "").strip()
+        if not home:
+            return
+        try:
+            from .accounts import teleport_home
+            went = teleport_home(self.tree_reader, self.actuator, home)
+        except Exception:
+            log.exception("could not return to %r", home)
+            return
+        if went:
+            log.info("back at %s", went)
+        else:
+            self.notifier.problem("Could not return home",
+                                  f"No PGSharp saved location matching {home!r} was "
+                                  f"tapped after switching to "
+                                  f"{self.stats.account or 'an unnamed account'}.")
+
     def _record_target(self, intent) -> None:
         """Note which class a target tap went to, for `fsm.pick_target`'s share.
 
@@ -1143,6 +1180,7 @@ class Runner:
         # fainted hold - nothing the bot does on screen heals the old one.
         self.ctx.party_fainted_ts = 0.0
         self._party_false = 0
+        self._go_home()
         # Any rotation timer restarts here, so a quota switch and a clock switch cannot
         # stack into a second switch moments later.
         if self.cfg.switch_every_minutes > 0:

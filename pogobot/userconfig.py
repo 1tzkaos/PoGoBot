@@ -45,7 +45,7 @@ log = logging.getLogger("pogobot")
 #: Settings an account may override. Anything else in the file is a typo, and typos in a
 #: hand-edited file are silent unless something says so - `fight_rocket` would otherwise
 #: read as "leave it at the default" and the operator would be told nothing.
-KNOWN_KEYS = frozenset({"fight_rockets", "target_weights"})
+KNOWN_KEYS = frozenset({"fight_rockets", "target_weights", "home_favorite"})
 
 #: Settings whose VALUE is a credential. The startup line reports what the file
 #: applied, and for these that would put a secret in the log and in any terminal
@@ -89,6 +89,12 @@ def _coerce_profile(key: str, value: Any, account: str, where: str) -> Any:
     """
     if key == "target_weights":
         return _coerce_weights(value, account, where)
+    if key == "home_favorite":
+        if not isinstance(value, str):
+            log.warning("%s: %r sets home_favorite to %r; expected the name of a PGSharp "
+                        "saved location, as a string", where, account, value)
+            return _BAD
+        return value.strip()
     if not isinstance(value, bool):
         log.warning("%s: %r sets %s to %r; expected true or false",
                     where, account, key, value)
