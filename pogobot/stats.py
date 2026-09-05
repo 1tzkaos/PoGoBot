@@ -42,6 +42,10 @@ class SessionStats:
     stops_collected: int = 0       # POI screen confirmed open, then left cleanly
     stops_out_of_range: int = 0    # "Walk closer to interact" seen
     rockets_engaged: int = 0       # entered ROCKET
+    #: Fights refused because a party member had fainted (see fsm.Rocket.step). Without
+    #: this an operator reads a declining run as a fighting one: `rockets_engaged` still
+    #: counts the entry, because _count_transition runs before the decline does.
+    rockets_declined: int = 0
     targets_tapped: int = 0        # taps issued at a detection
     taps_expired: int = 0          # tap produced no screen change within the timeout
     recoveries: int = 0
@@ -133,6 +137,7 @@ class SessionStats:
             "stops_per_hour": rate(self.stops_collected),
             "stops_out_of_range": self.stops_out_of_range,
             "rockets_engaged": self.rockets_engaged,
+            "rockets_declined": self.rockets_declined,
             "targets_tapped": self.targets_tapped,
             "taps_expired": self.taps_expired,
             "recoveries": self.recoveries,
@@ -174,6 +179,7 @@ class SessionStats:
             ("stops collected", s["stops_collected"], rate("stops_per_hour")),
             ("stops out of range", s["stops_out_of_range"], ""),
             ("rockets engaged", s["rockets_engaged"], ""),
+            ("rockets declined", s.get("rockets_declined", 0), ""),
             ("targets tapped", s["targets_tapped"], ""),
             ("taps that expired", s["taps_expired"], ""),
             ("encounters exhausted", s["encounters_exhausted"], ""),
@@ -214,7 +220,8 @@ def _hms(seconds: float) -> str:
 # ---------------------------------------------------------------- persistence
 
 COUNTER_FIELDS = ("encounters", "catch_attempts", "balls_thrown", "stops_collected",
-                  "stops_out_of_range", "rockets_engaged", "targets_tapped",
+                  "stops_out_of_range", "rockets_engaged", "rockets_declined",
+                  "targets_tapped",
                   "taps_expired", "recoveries", "halts",
                   "encounters_exhausted", "restocks")
 

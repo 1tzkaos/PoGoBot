@@ -211,6 +211,7 @@ class DiscordNotifier:
                            ("balls_thrown", "Balls thrown"),
                            ("stops_collected", "Stops"),
                            ("rockets_engaged", "Rockets"),
+                           ("rockets_declined", "Rockets declined"),
                            ("recoveries", "Recoveries"),
                            ("halts", "Halts")):
             if key in summary and summary[key] is not None:

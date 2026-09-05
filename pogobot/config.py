@@ -204,6 +204,17 @@ class Timings:
     # long. Without it, fleeing and re-entering the same screen is a livelock: observed
     # live as ENCOUNTER -> RECOVERING -> ENCOUNTER repeating until the watchdog halted.
     encounter_hold: float = 6.0
+    #: How long a fainted party keeps the bot out of ROCKET (see `fsm.desired_state` and
+    #: `Rocket.step`). A fainted member is an ACCOUNT fact the bot cannot fix - nothing it
+    #: does on screen heals it - so the refusal must not release on anything the screen
+    #: does. The real release is a confirmed account switch, which zeroes the stamp.
+    #:
+    #: Floor is `stuck_watchdog` (120.0) + `app_restart_grace` (90.0) = 210s, under which
+    #: the hold can expire mid-recovery and hand the machine straight back to ROCKET. 900
+    #: caps declined fights at 4/hour against the measured churn of ~120/hour - one cycle
+    #: per 30.1s, paced by `Cooldowns.on_refuted`. Note `switch_every_minutes` defaults to
+    #: 0.0, so rotation is opt-in and is NOT a backstop this number may lean on.
+    party_fainted_hold: float = 900.0
 
     targeting_timeout: float = 4.0
     encounter_timeout: float = 25.0
@@ -551,6 +562,81 @@ class TargetWeights:
 
 
 @dataclass(frozen=True)
+class BattleParty:
+    """Reading whether a Rocket battle party can actually fight (see
+    `perception.party_can_battle` and `fsm.Rocket.step`).
+
+    The failure this exists for, measured in `logs/run.log`: a party member had fainted,
+    so Pokemon GO refused the fight behind a pink error the bot cannot read. The bot
+    pressed USE THIS PARTY, learned nothing, timed out on `Rocket.timeout_s`, recovered,
+    saw the invaded stop again and went straight back in. 173 cycles, a median of exactly
+    150.0s each - the FULL rocket budget, every time, so not one of them made progress -
+    totalling 9.3 hours with `stops_collected: 0`. It did not crash; it looked busy.
+
+    A fainted member is legible before the press: it draws NO HP bar at all. On the live
+    stall frame the three cards read [0.0000, 0.6972, 0.6944] green in the bar band. That
+    is not a threshold to tune, it is a hole.
+
+    The awkward part is WHERE to look. The HP row sits at frame-y 0.7625 on the 864x1920
+    corpus and 0.7402 on the live 1080x2340 device - a 0.0223 spread that a fixed
+    frame-relative band does not survive. Measured panel-relative the same rows are 0.5444
+    and 0.5546, a spread of 0.0102, so the sheet is located first and everything below is
+    read relative to it.
+    """
+
+    #: Near-white mask that locates the party sheet. Swept V in {200,215,225,235,245} x
+    #: S in {25,40,60}: 8/8 party frames pass and 0/237 other screens do in every cell with
+    #: V <= 235; V > 245 admits a Shop frame. 225 sits mid-plateau.
+    panel_v_min: int = 225
+    panel_s_max: int = 40
+
+    #: Bounds on the sheet's PIXEL area (`cv2.CC_STAT_AREA`), as a fraction of the frame.
+    #: Deliberately not the bounding-box area: measured pixel area is 0.2243 (live) and
+    #: 0.2533-0.2582 (corpus), while the BBOX area is 0.2995 and 0.3021 - so an `area_max`
+    #: of 0.30 read as bbox rejects all five healthy corpus frames and clears the live one
+    #: by 0.0005. The two readings are three thousandths apart on the frame that matters,
+    #: which is why the unit is named here rather than left to the reader.
+    area_min: float = 0.18
+    area_max: float = 0.30
+
+    #: The sheet's top edge must sit below this fraction of frame height. The one
+    #: load-bearing term in the gate: leave-one-out over the corpus gives 0 false
+    #: positives when any OTHER term is dropped, and 3 when this one is.
+    top_min: float = 0.45
+
+    #: The three party cards, as fractions of FRAME width. The six dark card borders
+    #: measure identically to within 0.002 of frame width across both aspect ratios.
+    #: Panel-relative x was measured and rejected: it reduces to the same numbers, and a
+    #: single merged white blob would drag all three windows at once.
+    cards: tuple = ((0.139, 0.324), (0.406, 0.589), (0.672, 0.856))
+
+    #: Where the HP bar sits, as a fraction of the located PANEL's height. A grid sweep
+    #: gives identical separation for every band ending at or below 0.70; the first cell
+    #: that breaks is hi = 0.75. The band is a SEARCH WINDOW, not an averaging window -
+    #: `party_can_battle` takes the greenest row inside it, so widening this costs
+    #: nothing and a band that misses the row entirely is the only real failure.
+    bar_band: tuple = (0.50, 0.62)
+
+    #: Green fraction a card's bar band must reach for that member to count as able to
+    #: battle. The measured plateau is (0.0000, 0.6132]: a fainted card reads EXACTLY
+    #: zero, and the shortest real bar in the corpus is 0.6132 - a member at roughly 89%
+    #: health. 0.30 sits 2.04x below that and, at the stream's ~106px card width, still
+    #: demands ~32px of green rather than the ~2px that 0.02 would accept.
+    #:
+    #: The direction of this bar matters more than its value. TRUE - "fight it", today's
+    #: stall - is what comes back when every card CLEARS `bar_min`, so lowering this makes
+    #: the expensive mistake more likely, not less.
+    bar_min: float = 0.30
+
+    #: HONESTY. Exactly one fainted sample exists, and it is a Rhyperior, which is natively
+    #: grey - so desaturation is NOT what this measures; the absence of the bar is. Nothing
+    #: measured establishes how a bar behaves as it shortens: the only depleted sample is at
+    #: ~89%, so "tolerates a member at 3% health" is an assumption, not a finding. The
+    #: corpus holds no raid party-select, no GBL party-select and no error-popup frame;
+    #: those are the unmeasured near-neighbours.
+
+
+@dataclass(frozen=True)
 class Config:
     rois: Rois = field(default_factory=Rois)
     thresholds: Thresholds = field(default_factory=Thresholds)
@@ -559,6 +645,7 @@ class Config:
     reach: Reach = field(default_factory=Reach)
     zoom: ZoomOut = field(default_factory=ZoomOut)
     goplus: GoPlusToggle = field(default_factory=GoPlusToggle)
+    battle_party: BattleParty = field(default_factory=BattleParty)
     autowalk: AutoWalk = field(default_factory=AutoWalk)
     star_separation: StarSeparation = field(default_factory=StarSeparation)
 

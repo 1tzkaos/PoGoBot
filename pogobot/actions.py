@@ -38,6 +38,12 @@ from .observation import Tristate
 
 DEFAULT_RESOLUTION = (1080, 2340)
 
+#: stderr an `am start` prints when the activity is already in front. rc is 0 and
+#: nothing actually failed, so this must not reach the health breaker - see
+#: `Actuator._execute`.
+_BENIGN_STDERR = re.compile(r"Activity not started, intent has been delivered")
+
+
 #: Where the pinch injector lives on the device. /data/local/tmp is the one directory the
 #: shell uid can both write and execute from, and is where scrcpy puts its own server jar
 #: for the same reason.
@@ -418,6 +424,15 @@ class Actuator:
             return
 
         err = proc.stderr.decode(errors="replace").strip()
+        if err and proc.returncode == 0 and _BENIGN_STDERR.search(err):
+            # `am start` on an activity that is already top exits 0 and prints "Warning:
+            # Activity not started, intent has been delivered to currently running
+            # top-most instance." Scored as a failure, every ForegroundApp against a
+            # perfectly healthy device counts toward the breaker: measured in logs/run.log,
+            # by_budget {'foreground': 3} and all 3 of that run's failures, with last_error
+            # carrying exactly that string at rc=0. Five in a row trip `max_failures` and
+            # halt a run that had nothing wrong with it.
+            err = ""
         if proc.returncode != 0 or err:
             self._bump("failed")
             self.health.record_failure(f"rc={proc.returncode} {err or '(no stderr)'}")

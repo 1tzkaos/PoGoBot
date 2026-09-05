@@ -216,6 +216,7 @@ class Runner:
         self._trace = open(trace_path, "a", buffering=1) if trace_path else None
         self._stop = False
         self._halt_reason: Optional[str] = None
+        self._party_false = 0
         self._encounter_left_at: Optional[float] = None
         self._ticks = 0
         self._fps = 0.0
@@ -1104,6 +1105,10 @@ class Runner:
         # unreachable for the target, and the restock ends only when its 600s budget does.
         self.ctx.restocking_until = 0.0
         self.ctx.restock_stops_at_start = 0
+        # A new account brings a fresh party, which is the only honest release for the
+        # fainted hold - nothing the bot does on screen heals the old one.
+        self.ctx.party_fainted_ts = 0.0
+        self._party_false = 0
         # Any rotation timer restarts here, so a quota switch and a clock switch cannot
         # stack into a second switch moments later.
         if self.cfg.switch_every_minutes > 0:
@@ -1126,6 +1131,11 @@ class Runner:
                 self.ctx.intent = e.intent
                 self._record_target(e.intent)
             elif isinstance(e, SetFlag):
+                if e.name == "party_fainted_ts" and not self.ctx.party_fainted_ts:
+                    # Counted on the transition into the hold, not on every frame that
+                    # re-stamps it, so the number is "fights declined" and not "ticks
+                    # spent declining".
+                    self.stats.rockets_declined += 1
                 setattr(self.ctx, e.name, e.value)
             elif isinstance(e, Cooldown):
                 self.ctx.cooldowns.append((e.x, e.y, self.ctx.now + e.seconds))
@@ -1267,6 +1277,7 @@ class Runner:
             # in the unmeasured band between the two (see config.Thresholds). Read it
             # against "map": off the map this ROI is noise, not absence.
             "goplus": obs.goplus.value,
+            "party": obs.party_can_battle.value,
             "red": round(obs.map_ball.detail.get("red", 0.0), 4),
             "orange": round(obs.map_ball.detail.get("orange", 0.0), 4),
             "pill": obs.action_pill_xy is not None,
@@ -1404,6 +1415,16 @@ class Runner:
                         break
                     continue
 
+                # Two frames must agree before a party is called unfainted-or-not: the
+                # sheet slides in with animating bars, and this writes a fact that outlives
+                # the frame by minutes. UNKNOWN - every screen that is not a party sheet -
+                # neither confirms nor resets, so leaving the screen does not clear it.
+                if obs.party_can_battle is Tristate.FALSE:
+                    self._party_false += 1
+                elif obs.party_can_battle is Tristate.TRUE:
+                    self._party_false = 0
+                self.ctx.party_cannot_battle = self._party_false >= 2
+
                 if obs.on_map:
                     self.ctx.last_map_ts = now
                     # A confirmed map is the only evidence that a restart worked, so it is
@@ -1496,6 +1517,16 @@ class Runner:
                     break
         except KeyboardInterrupt:
             log.info("interrupted by user")
+        except Exception as exc:
+            # Without this the exception passes through the finally, `close()` finds no
+            # halt reason, and the run is recorded - and reported to Discord - as "Run
+            # finished" in green with halts=0. A crash announced as a clean finish is the
+            # worst thing this file can do to an operator who is not at the desk.
+            #
+            # Not a restart candidate: a Python fault is host-side, the same class as
+            # "perception failing repeatedly", and relaunching the game cannot fix it.
+            log.exception("unhandled error in the tick loop")
+            self._halt(f"unhandled error in the tick loop: {type(exc).__name__}: {exc}")
         finally:
             # close() runs BEFORE the handlers are restored, and cleanup is not instant
             # (the actuator flushes its queue, the ledger flushes its writer). Restoring

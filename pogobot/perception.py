@@ -329,6 +329,73 @@ def exit_dialog_signal(bgr: np.ndarray, cfg: Config) -> Signal:
     )
 
 
+def party_can_battle(bgr, cfg) -> Tristate:
+    """Can this Rocket battle party actually fight?
+
+    TRUE when a party sheet is located AND all three cards show an HP bar. FALSE when the
+    sheet is located and at least one card has none - the member has fainted, and pressing
+    USE THIS PARTY raises a pink error the bot cannot read. UNKNOWN when no sheet is
+    located, which is every other screen the bot sees.
+
+    Read the polarity carefully: TRUE is "go ahead and fight", so UNKNOWN must never be
+    treated as TRUE by a caller, and the expensive direction is a false TRUE - that is the
+    9.3-hour stall in `config.BattleParty`. Every threshold here and the evidence behind it
+    lives in that dataclass.
+
+    The sheet is located rather than assumed because the HP row moves 0.0223 of frame
+    height between the two aspect ratios in hand, which no fixed band survives; located
+    first, the same row is stable to 0.0102.
+
+    Uses GREEN_PILL, not MINT: mint's hue floor of 75 clips the corpus bar (measured H
+    74-75) and collapses a fully healthy party from [0.698, 0.613, 0.689] to
+    [0.009, 0.019, 0.019] - a healthy party read as three fainted members.
+    """
+    bp = cfg.battle_party
+    h, w = bgr.shape[:2]
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    white = cv2.inRange(hsv, np.array([0, 0, bp.panel_v_min]),
+                        np.array([179, bp.panel_s_max, 255]))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(white, connectivity=8)
+    frame_area = float(h * w)
+    panel = None
+    for i in range(1, n):
+        x, y, cw, ch, area = (stats[i, cv2.CC_STAT_LEFT], stats[i, cv2.CC_STAT_TOP],
+                              stats[i, cv2.CC_STAT_WIDTH], stats[i, cv2.CC_STAT_HEIGHT],
+                              stats[i, cv2.CC_STAT_AREA])
+        # AREA is the component's pixel count, not cw*ch. The two differ by 0.075 of the
+        # frame on these screens and the bbox reading rejects every healthy corpus frame.
+        if not (bp.area_min <= area / frame_area <= bp.area_max):
+            continue
+        if y / h < bp.top_min:
+            continue
+        panel = (y, y + ch)
+        break
+    if panel is None:
+        return Tristate.UNKNOWN
+
+    y0, y1 = panel
+    ph = max(y1 - y0, 1)
+    b0 = int(y0 + bp.bar_band[0] * ph)
+    b1 = int(y0 + bp.bar_band[1] * ph)
+    if b1 <= b0:
+        return Tristate.UNKNOWN
+    for (x0f, x1f) in bp.cards:
+        card = hsv[b0:b1, int(x0f * w):int(x1f * w)]
+        if card.size == 0:
+            return Tristate.UNKNOWN
+        # The PEAK ROW, not the mean over the band. The band is ~53px tall at stream
+        # size and the bar itself is ~6px, so a mean dilutes a full bar from 0.69 to
+        # 0.06 - under any threshold that a fainted card's 0.0000 is also under, which
+        # collapses the separation the whole test rests on. Measured both ways: peak-row
+        # gives fainted 0.0000 against a healthy minimum of 0.6132 across all 5 corpus
+        # frames and the live one, and is independent of how tall the band is.
+        rows = cv2.inRange(card, GREEN_PILL_LO, GREEN_PILL_HI).mean(axis=1) / 255.0
+        green = float(rows.max()) if rows.size else 0.0
+        if green < bp.bar_min:
+            return Tristate.FALSE
+    return Tristate.TRUE
+
+
 #: Minimum width, as a fraction of frame width, for a contour to be considered the close
 #: button. The button is normally found as its whole mint ring: measured across the
 #: labelled corpus those blobs run 9-12% of frame width, comfortably over the original
@@ -610,5 +677,6 @@ class Perceptor:
             promo_save_xy=promo_save_button(bgr, cfg),
             frame_age=frame.age(),
             goplus=goplus_signal(bgr, cfg),
+            party_can_battle=party_can_battle(bgr, cfg),
             exit_dialog=exit_dialog_signal(bgr, cfg),
         )
