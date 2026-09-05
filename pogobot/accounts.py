@@ -69,6 +69,15 @@ ID_STAR_ICON = "hl_floating_icon"
 #: Shortcut-menu entries the star opens ('Map', 'AutoWalk', 'Feeds', ...). Each is its
 #: own directly-clickable text node - the same shape ID_TAB_ACCOUNTS already is.
 ID_SHORTCUT_ITEM = "hl_shortcut_menu_item_txt"
+#: The Favorites page the "Favorites" shortcut opens: the list, each row's own name, and
+#: each row's distance/cooldown line. Captured live - see
+#: tests/fixtures/uiautomator/pgsharp_favorites.xml. Rows are matched by NAME rather than
+#: by index or coordinate: the list reorders (it is sorted by recency), so an index is a
+#: different destination on a different day, and a coordinate is a different one after a
+#: scroll. A name that is not on screen is simply not tapped.
+ID_FAVOR_LIST = "hl_favor_list"
+ID_FAVOR_NAME = "hl_fi_name"
+ID_FAVOR_INFO = "hl_fi_info"
 #: The two AutoWalk dialogs. `alertTitle`/`message`/`button1`/`button2`/`button3` are
 #: Android's own framework AlertDialog ids, not PGSharp's - matched by suffix like
 #: everything else here so the exact package prefix (`android:id/...`) is never assumed,
@@ -115,6 +124,20 @@ class AccountRow:
 
 
 @dataclass(frozen=True)
+class FavoriteRow:
+    """One saved location on PGSharp's Favorites page.
+
+    `cooldown_min` is read from the row's own "Distance: ... Cooldown: N Mins" text, so a
+    jump can be judged before it is taken rather than after. None means the line was
+    present but did not parse - which must be treated as "unknown", never as "zero".
+    """
+
+    name: str
+    tap_norm: tuple[float, float]
+    cooldown_min: Optional[int] = None
+
+
+@dataclass(frozen=True)
 class AccountView:
     """The current state of the PGSharp overlay: the account-list panel, and (see the
     module docstring) the star shortcut widget, the menu it opens, and whichever of the two
@@ -141,6 +164,18 @@ class AccountView:
     #: The star widget's own current position - see ID_STAR_ICON. None means "not found
     #: in this dump", never a stale or assumed location.
     star_norm: Optional[tuple[float, float]] = None
+    #: The shortcut menu's "Favorites" entry, present only once the star has been tapped.
+    #: The counterpart of `autowalk_menu_norm`, located the same way.
+    favorites_menu_norm: Optional[tuple[float, float]] = None
+    #: Saved locations, present only while the Favorites PAGE is open. Empty is not
+    #: "there are none" - it is also "the page is not up", which is why `favorites_open`
+    #: is a separate question.
+    favorites: tuple = ()
+    #: Is PGSharp's Favorites page in front of us? Distinct from `panel_open`, which only
+    #: asks whether SOME page with an `hl_page_close` is up and reads True here too - the
+    #: same conflation that let the recovery ladder mistake the settings page for the
+    #: accounts panel (see `settings_close_norm`).
+    favorites_open: bool = False
     #: The star's own clickable bounds, normalized - the SAME node `star_norm` is the
     #: centre of, and the counterpart of `launcher_rect_norm` above.
     star_rect_norm: Optional[tuple[float, float, float, float]] = None
@@ -314,6 +349,9 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
     autowalk_dialog_open = False
     autowalk_running_dialog_open = False
     autowalk_continue_last = autowalk_ok = None
+    favorites_menu = None
+    favorites = []
+    favorites_open = False
     for n in root.iter("node"):
         if _ends_with(n, ID_TAB_ACCOUNTS):
             accounts_tab = _centre_norm(n, w, h)
@@ -339,6 +377,8 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
                 star = _centre_norm(anc, w, h)
                 star_rect = _rect_norm(anc, w, h)
         elif _ends_with(n, ID_SHORTCUT_ITEM):
+            if n.get("text") == "Favorites":
+                favorites_menu = _centre_norm(n, w, h)
             if n.get("text") == "AutoWalk":
                 autowalk_menu = _centre_norm(n, w, h)
                 item_rect = _rect_norm(n, w, h)
@@ -347,6 +387,20 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
                     # left edge, y over the label's own vertical bounds - see
                     # AccountView.autowalk_icon_rect_norm and perception.autowalk_active_signal.
                     autowalk_icon_rect = (0.0, item_rect[1], item_rect[0], item_rect[3])
+        elif _ends_with(n, ID_FAVOR_LIST):
+            favorites_open = True
+        elif _ends_with(n, ID_FAVOR_NAME):
+            c = _centre_norm(n, w, h)
+            name = (n.get("text") or "").strip()
+            if c is not None and name:
+                favorites.append([name, c, None])
+        elif _ends_with(n, ID_FAVOR_INFO):
+            # Attaches to the row opened by the name above it: the dump is in document
+            # order and `hl_fi_info` is that row's own child. A stray info with no name
+            # before it is dropped rather than guessed onto the previous row.
+            m = re.search(r"Cooldown:\s*(\d+)", n.get("text") or "")
+            if favorites and m:
+                favorites[-1][2] = int(m.group(1))
         elif _ends_with(n, ID_AW_TITLE):
             # The one place this module reads TEXT to decide something rather than just
             # to display it: button1/2/3 are generic Android AlertDialog ids that some
@@ -421,6 +475,9 @@ def parse_dump(xml: bytes, screen_wh: tuple[int, int]) -> AccountView:
         star_norm=star,
         star_rect_norm=star_rect,
         autowalk_menu_norm=autowalk_menu,
+        favorites_menu_norm=favorites_menu,
+        favorites=tuple(FavoriteRow(n_, tuple(c_), cd_) for n_, c_, cd_ in favorites),
+        favorites_open=favorites_open,
         autowalk_icon_rect_norm=autowalk_icon_rect,
         autowalk_dialog_open=autowalk_dialog_open,
         autowalk_running_dialog_open=autowalk_running_dialog_open,
@@ -505,6 +562,134 @@ class FakeTreeReader:
 #: "tap", ...) so a startup identification can never share - or be starved by - a live
 #: run's own rate-limit state for those budgets.
 IDENTIFY_BUDGET = "identify"
+#: Budget the go-home ladder's taps are booked to. Its own, so a home run that goes wrong
+#: cannot spend the identify budget or the switch budget.
+HOME_BUDGET = "home"
+
+
+def teleport_home(tree_reader: "UiTreeReader", actuator, home: str,
+                  settle: float = 1.2) -> Optional[str]:
+    """Best-effort, one-shot: jump to the saved location called `home`, then close up.
+
+    Returns the name actually tapped, or None if nothing was. Never raises: a run that
+    cannot get home is a run in the wrong place, not a run that should stop.
+
+    Why this exists: over a long session the bot walks, and it drifts off the dense area it
+    was started in. An account switch is the natural moment to put it back, because the
+    switch already costs the run a pause and the new account starts wherever the last one
+    finished.
+
+    The rules are `identify_account`'s and for the same reasons - every coordinate comes
+    from a node the tree JUST reported, and a control that was not located is not tapped:
+
+      * Rows are matched by NAME, never by index or by a remembered coordinate. The list is
+        ordered by recency, so index 3 is a different continent on a different day.
+      * A `home` that is not on screen taps NOTHING. Whether PGSharp keeps favourites per
+        account or per install is unmeasured; if they are per-account, an account without
+        that entry must do nothing at all rather than tap whatever sits at those pixels.
+      * The page is closed with `close_norm` (`hl_page_close`, the "OK"), never with BACK.
+        Measured live: BACK does NOT dismiss this page - it is fully present afterwards -
+        and `Recovering`'s ladder presses BACK, so a page left up here would wedge the run
+        with nothing able to clear it. See tests/fixtures/uiautomator/
+        pgsharp_favorites_after_back.xml.
+      * The shortcut menu is closed too. `Switching._autowalk_close`'s docstring records
+        what a menu left open costs: it sits over the reach ellipse and the bot targets
+        through it for the rest of the run.
+
+    The row's own "Cooldown: N Mins" is logged before the jump. A long hop earns a Niantic
+    soft ban, and after an ordinary session's drift the hop home is short - so a large
+    number here means something other than drift moved the account, and is worth seeing in
+    the log even though nothing acts on it.
+    """
+    view = tree_reader.read()
+    if not view.available:
+        log.warning("could not read the PGSharp overlay; not going home")
+        return None
+
+    if not view.favorites_open:
+        if view.favorites_menu_norm is None:
+            if view.star_norm is None:
+                log.warning("PGSharp's star is not on screen; not going home")
+                return None
+            actuator.apply(Tap(*view.star_norm, "home: open the PGSharp shortcut menu",
+                           budget=HOME_BUDGET))
+            time.sleep(settle)
+            view = tree_reader.read()
+        if not view.available or view.favorites_menu_norm is None:
+            log.warning("the PGSharp shortcut menu did not open; not going home")
+            _close_pgsharp(view, tree_reader, actuator, settle)
+            return None
+        actuator.apply(Tap(*view.favorites_menu_norm, "home: open PGSharp Favorites",
+                           budget=HOME_BUDGET))
+        time.sleep(settle)
+        view = tree_reader.read()
+
+    if not view.available or not view.favorites_open:
+        log.warning("PGSharp's Favorites page did not open; not going home")
+        _close_pgsharp(view, tree_reader, actuator, settle)
+        return None
+
+    wanted = home.strip().casefold()
+    match = None
+    for row in view.favorites:
+        # Substring, because the real rows carry a flag emoji and a country the operator
+        # will not type ("New York" against "<flag> New York, USA"). Exact-first so a
+        # config that names a row exactly can never be beaten by a longer row.
+        if row.name.strip().casefold() == wanted:
+            match = row
+            break
+    if match is None:
+        for row in view.favorites:
+            if wanted and wanted in row.name.casefold():
+                match = row
+                break
+    if match is None:
+        log.warning("no saved location matching %r (found: %s); not going home",
+                    home, ", ".join(r.name for r in view.favorites) or "none")
+        _close_pgsharp(view, tree_reader, actuator, settle)
+        return None
+
+    if match.cooldown_min:
+        log.info("going home to %r (PGSharp reports a %d-minute cooldown for this hop)",
+                 match.name, match.cooldown_min)
+    else:
+        log.info("going home to %r", match.name)
+    actuator.apply(Tap(*match.tap_norm, f"home: teleport to {match.name}",
+                       budget=HOME_BUDGET))
+    time.sleep(settle)
+    _close_pgsharp(tree_reader.read(), tree_reader, actuator, settle)
+    return match.name
+
+
+def _close_pgsharp(view, tree_reader, actuator, settle: float) -> None:
+    """Leave no PGSharp surface in front of the game.
+
+    The page first, by its OWN close control, then the shortcut menu by the star. Never
+    BACK: measured live, BACK does not dismiss the Favorites page, and `Recovering`'s
+    ladder is BACK - so a page left up here is a wedge nothing can clear. Never a guessed
+    coordinate either: a control that was not located is left alone, which is the same
+    rule `identify_account` follows for the same reason.
+    """
+    try:
+        if view is not None and view.available and view.close_norm is not None:
+            actuator.apply(Tap(*view.close_norm, "home: close the PGSharp page",
+                               budget=HOME_BUDGET))
+            if settle:
+                time.sleep(settle)
+            view = tree_reader.read()
+    except Exception:
+        log.exception("could not close the PGSharp page")
+    try:
+        # The menu outlives the page. Left up it sits over the reach ellipse and the bot
+        # targets through it for the rest of the run - see Switching._autowalk_close.
+        if (view is not None and view.available
+                and view.favorites_menu_norm is not None and view.star_norm is not None):
+            actuator.apply(Tap(*view.star_norm, "home: close the PGSharp shortcut menu",
+                               budget=HOME_BUDGET))
+            if settle:
+                time.sleep(settle)
+    except Exception:
+        log.exception("could not close the PGSharp shortcut menu")
 
 
 def identify_account(tree_reader: "UiTreeReader", actuator,

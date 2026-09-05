@@ -60,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run against a directory of frames instead of a phone")
     p.add_argument("--replay-interval", type=float, default=0.0)
     p.add_argument("--serial", default=None, help="adb device serial")
+    p.add_argument("--home-favorite", default=None, metavar="NAME",
+                   help="PGSharp saved location to return to after an account "
+                        "switch (by name; off unless set)")
     p.add_argument("--discord-webhook", default=None, metavar="URL",
                    help="post run events to this Discord webhook (or set "
                         "POGOBOT_DISCORD_WEBHOOK; see notify.py)")
@@ -325,7 +328,7 @@ def config_from_args(a) -> Config:
     cfg = Config()
     overrides = {}
     for name in ("confidence", "imgsz", "infer_fps", "max_size", "range_scale",
-                 "catch_mode", "target_mode"):
+                 "catch_mode", "target_mode", "home_favorite"):
         v = getattr(a, name, None)
         if v is not None:
             overrides[name] = v
