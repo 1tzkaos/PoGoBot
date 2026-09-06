@@ -43,7 +43,7 @@ machine, and acts through `adb`.
 | Restocking | Gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting until it restocks. |
 | Account switching | Optionally logs into another PGSharp account once the current one is spun out, or on a clock. Off by default. |
 | Honest learning loop | Curates frames into a human review queue instead of training on its own guesses. |
-| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. The full suite (1002 tests) runs in about 30 seconds. |
+| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. The full suite (1030 tests) runs in about 30 seconds. |
 
 ### Failsafes and safety
 
@@ -92,10 +92,18 @@ three set, nothing is posted and nothing is started.
 | Event | Colour |
 |---|---|
 | Run started | blurple |
+| **Still running** - a progress summary every 15 minutes | pale |
 | Run finished, with the session summary | green |
 | **Run HALTED**, with the reason that stopped it | red |
 | Switch gave up after 3 failures; spin quota used up | amber |
 | Switched account | pale |
+
+The heartbeat is the one message whose ABSENCE is informative. Every other event fires on
+something going wrong, so silence is ambiguous between a healthy six-hour run and one that
+died in minute three. `--discord-heartbeat SECONDS` changes the cadence, or
+`"discord_heartbeat"` in `config.json`; `0` turns it off. 15 minutes is short enough to
+notice a stall inside the 30-minute productivity watchdog window and long enough that a
+six-hour run posts 24 times rather than 360.
 
 Three properties are deliberate, and tested:
 

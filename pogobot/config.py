@@ -745,6 +745,17 @@ class Config:
     #: account or per install is unmeasured, so an account that lacks the entry must do
     #: nothing rather than tap whatever occupies those pixels.
     home_favorite: str = ""
+    #: How often, in seconds, to post a progress summary to the Discord webhook. 0 turns
+    #: it off; there is no point setting it below a minute, since Discord's webhook bucket
+    #: is roughly 5 requests per 2 seconds shared with every other notification this run
+    #: sends.
+    #:
+    #: Its job is answering "is it still working?" from a phone, which the existing events
+    #: cannot: they fire on things GOING WRONG, so silence is ambiguous between a healthy
+    #: run and a dead one. 15 minutes is short enough to notice a stall inside the
+    #: 30-minute `productivity_watchdog` window and long enough that a six-hour run posts
+    #: 24 times rather than 360.
+    discord_heartbeat: float = 900.0
     #: How many recent target taps the share is measured over.
     #:
     #: This bounds the correction. Measured against LIFETIME counts instead, a
