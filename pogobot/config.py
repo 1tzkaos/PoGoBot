@@ -691,6 +691,46 @@ class Config:
     #: classifies at 1.00, while the ad reads Rocket@0.62 - so 0.6 lets it through and
     #: 0.90 does not, with the whole gap to spare.
     rocket_pill_min_conf: float = 0.900
+    #: The bar for believing a Rocket-labelled screen that CARRIES A PILL really is a
+    #: Rocket fight (`fsm.rocket_screen`). Applied only when `action_pill_xy` is located;
+    #: a pill-absent frame keeps `screen_min_conf`, for the reason below.
+    #:
+    #: Three screens have livelocked ROCKET the same way: Pokemon GO's exit dialog, its
+    #: SPONSORED interstitial, and its news card ("GO Fest 2026: ... Technical Issue").
+    #: Each clears `screen_min_conf` (0.6), each carries something pill-shaped where the
+    #: affirmative sits, and each costs the full 150s of `Rocket.timeout_s` per visit with
+    #: nothing able to act - the press itself is already refused by
+    #: `rocket_pill_min_conf`, so the machine enters, can do nothing, and times out. The
+    #: news card was measured doing this for 30 minutes: 14 ROCKET entries, 0 stops, until
+    #: the productivity watchdog ended the run.
+    #:
+    #: WHY PILL-CONDITIONAL, which is the whole design. Split by whether a pill is on
+    #: screen, live Rocket-labelled frames are two different populations:
+    #:
+    #:     pill LOCATED   n=67768   median 0.997   >=0.90: 79.1%
+    #:     pill ABSENT    n= 3726   median 0.671   >=0.90: 31.0%
+    #:
+    #: A flat 0.90 bar therefore refuses roughly two thirds of pill-ABSENT frames, and
+    #: those are grunt dialogue advances - real fights, mid-fade, with no button to find.
+    #: `ROCKET_DIALOGUE_TAP`'s own notes already recorded this and it reproduced here. The
+    #: 13 labelled corpus frames all read >=0.998 and hid it completely: they are
+    #: hand-picked stills, 11 of 13 are training data, and the two pill-absent ones are
+    #: clean frames rather than the fades the live stream is full of.
+    #:
+    #: HONEST MARGINS, because the first draft of this comment got them badly wrong:
+    #:   * The impostor side is a KNIFE EDGE, not a gap. Max observed confidence on a dead
+    #:     pill-located frame is 0.899 against a bar of 0.900 - one thousandth, measured
+    #:     over 92,714 live frames. This bar is NOT a substitute for the vetoes below it.
+    #:   * The exit dialog reads Rocket @ 0.9919-0.9929 (9 frames), ABOVE the bar. It is
+    #:     separated entirely by `obs.exit_dialog`, not by this number. Deleting that veto
+    #:     because "the bar handles it" would restore the 430s stall it was written for.
+    #:   * So this separates two of the three known impostors, not three.
+    #:
+    #: The corpus covers only ChooseParty, GruntBattleButton, GruntDialogue and
+    #: ExitTrainerBattle. There is no labelled frame for the in-battle combat screen, the
+    #: charged-attack prompt, a Rocket Leader or Giovanni, the balloon, or any post-battle
+    #: screen, so the bar is unmeasured on all of them.
+    rocket_route_min_conf: float = 0.900
 
     catch_mode: str = "throw"
     target_mode: str = "all"

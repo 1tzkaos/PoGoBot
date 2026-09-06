@@ -307,7 +307,22 @@ def rocket_screen(obs: Observation, cfg: Config) -> bool:
         # sits at (0.866, 0.884). Refused here, the screen falls to the ordinary ladder,
         # which presses the located X beside it.
         return False
-    return obs.screen.is_("Rocket", min_conf=cfg.screen_min_conf)
+    # A pill on screen raises the bar; no pill leaves it where it was. The three vetoes
+    # above each remove one impostor that had already cost a run, and all three of those
+    # impostors carry a pill - so the bar asks their shared question once, at entry.
+    #
+    # It is NOT applied to pill-absent frames, and that asymmetry is the design rather
+    # than caution. Live, pill-located Rocket frames run median 0.997 (79.1% >= 0.90)
+    # while pill-ABSENT ones run median 0.671 (31.0% >= 0.90): the pill-absent population
+    # is grunt dialogue mid-fade, a real fight with no button to find, and a flat bar
+    # refuses two thirds of it. The 13 labelled corpus frames all read >= 0.998 and hide
+    # this entirely - they are hand-picked stills, not the stream.
+    #
+    # Callers, all three of which inherit this: `desired_state`'s ROCKET branch (entry),
+    # `rocket_exit_screen` (the fight_rockets=false escape), and `runner`'s
+    # `last_rocket_ts` heartbeat, which feeds `rocket_hold`.
+    bar = cfg.rocket_route_min_conf if obs.action_pill_xy is not None else cfg.screen_min_conf
+    return obs.screen.is_("Rocket", min_conf=bar)
 
 
 #: Where `Rocket.step` taps to advance a grunt dialogue, and the only press in this file
