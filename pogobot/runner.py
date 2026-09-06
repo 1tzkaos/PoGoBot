@@ -218,6 +218,7 @@ class Runner:
         self._halt_reason: Optional[str] = None
         self._party_false = 0
         self._last_encounter_ts: Optional[float] = None
+        self._next_heartbeat: Optional[float] = None
         self._encounter_left_at: Optional[float] = None
         self._ticks = 0
         self._fps = 0.0
@@ -668,6 +669,40 @@ class Runner:
                                   f"No PGSharp saved location matching {home!r} was "
                                   f"tapped after switching to "
                                   f"{self.stats.account or 'an unnamed account'}.")
+
+    def _maybe_heartbeat(self, now: float) -> None:
+        """Post routine progress to Discord on a timer.
+
+        On its OWN clock rather than folded into the 300s log report, so the log's cadence
+        and Discord's can be tuned apart - the log is free and the webhook shares a bucket
+        of roughly 5 requests per 2 seconds with every other notification this run sends.
+
+        The deadline deliberately survives an account switch. `_on_switch_confirmed`
+        replaces `self.stats` with a fresh SessionStats, so a deadline derived from
+        `stats.started` would reset on every rotation and, at `switch_every` 45 minutes
+        against a 15-minute heartbeat, silently drop a third of the posts. It is also NOT
+        armed until the first tick, so a run that dies during startup posts nothing here -
+        `started` and `halted` already cover that window.
+
+        The counters are whichever account is live now; a switch is announced separately by
+        `switched`, so a heartbeat that suddenly reads 0 encounters is a rotation rather
+        than a stall.
+        """
+        budget = self.cfg.discord_heartbeat
+        if budget <= 0:
+            return
+        if self._next_heartbeat is None:
+            self._next_heartbeat = now + budget
+            return
+        if now < self._next_heartbeat:
+            return
+        self._next_heartbeat = now + budget
+        try:
+            self.notifier.heartbeat(account=self.stats.account,
+                                    summary=self._safe_summary(),
+                                    uptime=_hms(self.stats.uptime(now)))
+        except Exception:
+            log.exception("could not post the Discord heartbeat")
 
     def _record_target(self, intent) -> None:
         """Note which class a target tap went to, for `fsm.pick_target`'s share.
@@ -1582,6 +1617,8 @@ class Runner:
                     log.info("session: %s", self.stats.hud_line())
                     if self.quota is not None:
                         log.info("%s", self.quota.state(account=self.stats.account).line())
+
+                self._maybe_heartbeat(now)
 
                 elapsed = real - t0
                 if elapsed >= 1.0:

@@ -128,6 +128,7 @@ class NullNotifier:
     def finished(self, *a, **k) -> None: ...
     def halted(self, *a, **k) -> None: ...
     def switched(self, *a, **k) -> None: ...
+    def heartbeat(self, *a, **k) -> None: ...
     def problem(self, *a, **k) -> None: ...
     def close(self, *a, **k) -> None: ...
 
@@ -182,6 +183,18 @@ class DiscordNotifier:
         fields = [_field("Reason", reason, inline=False)]
         fields += self._summary_fields(account, summary)
         self._embed("Run HALTED", color=COLOR_HALT, fields=fields)
+
+    def heartbeat(self, *, account: Optional[str], summary: Optional[dict] = None,
+                  uptime: str = "") -> None:
+        """Routine "still working" progress, on a timer.
+
+        Every other event here fires on something going WRONG, which leaves silence
+        ambiguous: a healthy six-hour run and a run that died in minute three both say
+        nothing at all. This is the one message whose absence is informative.
+        """
+        title = f"Still running{f' - {uptime}' if uptime else ''}"
+        self._embed(title, color=COLOR_INFO,
+                    fields=self._summary_fields(account, summary))
 
     def switched(self, name: str) -> None:
         self._embed("Switched account", color=COLOR_INFO,

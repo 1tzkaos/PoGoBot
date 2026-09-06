@@ -19,6 +19,8 @@ import urllib.error
 import pytest
 
 from pogobot import notify
+from pogobot.config import DEFAULT as C
+from pogobot.stats import SessionStats
 from pogobot.notify import DiscordNotifier, NullNotifier, from_settings
 
 GOOD = "https://discord.com/api/webhooks/123456789/tok3n-abcdef"
@@ -436,6 +438,9 @@ class _Recorder(NullNotifier):
     def switched(self, name):
         self.calls.append(("switched", name))
 
+    def heartbeat(self, **k):
+        self.calls.append(("heartbeat", k))
+
     def problem(self, title, detail=""):
         self.calls.append(("problem", title))
 
@@ -474,7 +479,8 @@ class _Src:
 def _runner(**kw):
     from pogobot import runner as runner_mod
     from pogobot.config import DEFAULT
-    return runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False, **kw)
+    cfg = kw.pop("cfg", DEFAULT)
+    return runner_mod.Runner(cfg, _Src(), _Act(), perceptor=None, display=False, **kw)
 
 
 def test_a_runner_with_no_webhook_configured_still_runs():
@@ -574,3 +580,182 @@ def test_config_json_reports_the_webhook_as_set_not_as_its_value():
 def test_the_secret_key_list_matches_the_flag_that_carries_a_credential():
     from pogobot import userconfig
     assert "discord_webhook" in userconfig.SECRET_KEYS
+
+
+# ---------------------------------------------------------------- the heartbeat
+
+def test_a_heartbeat_carries_the_counters():
+    opener = _Opener()
+    n = _notifier(opener)
+    try:
+        n.heartbeat(account="NickStanki", summary={"encounters": 42, "stops_collected": 7},
+                    uptime="1h30m")
+        _wait(opener)
+    finally:
+        n.close()
+    embed = opener.payloads()[0]["embeds"][0]
+    assert "1h30m" in embed["title"]
+    vals = {f["name"]: f["value"] for f in embed["fields"]}
+    assert vals["Account"] == "NickStanki"
+    assert vals["Encounters"] == "42"
+    assert vals["Stops"] == "7"
+
+
+def test_a_heartbeat_is_routine_not_alarming():
+    """It must not look like a problem: an operator glancing at a phone reads colour
+    before text, and a run posting amber every 15 minutes trains them to ignore it."""
+    opener = _Opener()
+    n = _notifier(opener)
+    try:
+        n.heartbeat(account="A", summary={})
+        _wait(opener)
+    finally:
+        n.close()
+    color = opener.payloads()[0]["embeds"][0]["color"]
+    assert color == notify.COLOR_INFO
+    assert color not in (notify.COLOR_HALT, notify.COLOR_PROBLEM)
+
+
+# ---------------------------------------------------------------- its cadence
+
+def test_the_first_tick_arms_the_heartbeat_rather_than_posting_one():
+    """A run that dies during startup should post `started` and `halted`, not a progress
+    summary of nothing."""
+    rec = _Recorder()
+    r = _runner(notifier=rec)
+    r._maybe_heartbeat(1000.0)
+    assert "heartbeat" not in rec.names()
+    assert r._next_heartbeat == 1000.0 + C.discord_heartbeat
+
+
+def test_it_posts_once_the_interval_has_passed():
+    rec = _Recorder()
+    r = _runner(notifier=rec)
+    r._maybe_heartbeat(1000.0)
+    r._maybe_heartbeat(1000.0 + C.discord_heartbeat - 1)
+    assert "heartbeat" not in rec.names()
+    r._maybe_heartbeat(1000.0 + C.discord_heartbeat)
+    assert rec.names().count("heartbeat") == 1
+
+
+def test_it_does_not_post_twice_for_one_interval():
+    rec = _Recorder()
+    r = _runner(notifier=rec)
+    r._maybe_heartbeat(1000.0)
+    for i in range(200):
+        r._maybe_heartbeat(1000.0 + C.discord_heartbeat + i)
+    assert rec.names().count("heartbeat") == 1, "the deadline must advance, not re-fire"
+
+
+def test_the_deadline_is_measured_from_now_not_from_the_session_start():
+    """RED-GREEN, and the first version of this test was vacuous.
+
+    `_on_switch_confirmed` replaces `self.stats` with a fresh SessionStats, so a deadline
+    derived from `stats.started` restarts on every rotation - at switch_every 45min against
+    a 15min heartbeat that silently drops a third of the posts. Firing the deadline AFTER
+    the swap is what makes the difference observable: checking it before simply returns
+    early and asserts nothing.
+    """
+    rec = _Recorder()
+    r = _runner(notifier=rec)
+    r._maybe_heartbeat(1000.0)
+
+    # A switch lands: new counters, a `started` far from the current clock.
+    r.stats = SessionStats(started=90000.0, account="SomeoneElse")
+
+    fires_at = 1000.0 + C.discord_heartbeat
+    r._maybe_heartbeat(fires_at)
+    assert rec.names().count("heartbeat") == 1
+    assert r._next_heartbeat == fires_at + C.discord_heartbeat, (
+        "the next deadline must follow the clock, not the new session's start")
+
+
+def test_the_heartbeat_survives_a_switch_at_the_configured_rate():
+    """The behaviour the test above protects, stated as a count: six intervals of wall
+    clock must post six heartbeats however many times the account rotates."""
+    rec = _Recorder()
+    r = _runner(notifier=rec)
+    now = 1000.0
+    r._maybe_heartbeat(now)
+    for i in range(1, 7):
+        now = 1000.0 + i * C.discord_heartbeat
+        if i % 2 == 0:
+            r.stats = SessionStats(started=now, account=f"acct{i}")
+        r._maybe_heartbeat(now)
+    assert rec.names().count("heartbeat") == 6
+
+
+def test_zero_disables_it_entirely():
+    from dataclasses import replace as _replace
+    r = _runner(cfg=_replace(C, discord_heartbeat=0.0))
+    r._maybe_heartbeat(1000.0)
+    r._maybe_heartbeat(1e9)
+    assert r._next_heartbeat is None
+
+
+def test_a_notifier_that_throws_cannot_stop_the_tick_loop():
+    class _Broken(NullNotifier):
+        def heartbeat(self, **k):
+            raise RuntimeError("discord exploded")
+
+    r = _runner(notifier=_Broken())
+    r._maybe_heartbeat(1000.0)
+    r._maybe_heartbeat(1000.0 + C.discord_heartbeat)
+
+
+def test_the_tick_loop_actually_calls_the_heartbeat():
+    """Every other test here drives `_maybe_heartbeat` directly, so all of them stay green
+    if the call site vanishes from `run()`. This one fails if it does.
+
+    It needs a real frame and a perceptor, because the call sits AFTER perception on
+    purpose: a heartbeat means "still processing frames", so a run starved of frames must
+    fall to the stale-frame watchdog rather than keep reporting that it is fine.
+    """
+    import threading
+    import time as _time
+
+    import numpy as np
+
+    import sys as _sys
+    _sys.path.insert(0, "tests")
+    from factories import obs as _obs
+
+    from pogobot import runner as runner_mod
+    from pogobot.config import DEFAULT
+    from pogobot.frames import Frame
+
+    calls = []
+
+    class _Src:
+        sequential = False
+
+        def __init__(self):
+            self.n = 0
+
+        def read(self):
+            self.n += 1
+            return Frame(seq=self.n, ts=_time.perf_counter(),
+                         bgr=np.zeros((64, 32, 3), np.uint8))
+
+        def healthy(self):
+            return True
+
+        def release(self):
+            pass
+
+    class _Per:
+        def observe(self, frame, keyboard=None):
+            return _obs(seq=frame.seq, ts=frame.ts, on_map=True)
+
+    r = runner_mod.Runner(DEFAULT.scaled(infer_fps=40.0), _Src(), _Act(), _Per(),
+                          display=False)
+    r._maybe_heartbeat = lambda now: calls.append(now)
+    t = threading.Thread(target=r.run, daemon=True)
+    t.start()
+    deadline = _time.time() + 5
+    while not calls and _time.time() < deadline:
+        _time.sleep(0.02)
+    r._stop = True
+    t.join(5)
+    assert not t.is_alive(), "run() did not return"
+    assert calls, "run() never called _maybe_heartbeat"

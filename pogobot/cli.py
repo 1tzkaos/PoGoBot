@@ -60,6 +60,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="run against a directory of frames instead of a phone")
     p.add_argument("--replay-interval", type=float, default=0.0)
     p.add_argument("--serial", default=None, help="adb device serial")
+    p.add_argument("--discord-heartbeat", type=float, default=None, metavar="SECONDS",
+                   help="post a progress summary to Discord this often "
+                        "(default 900; 0 disables)")
     p.add_argument("--home-favorite", default=None, metavar="NAME",
                    help="PGSharp saved location to return to after an account "
                         "switch (by name; off unless set)")
@@ -328,7 +331,8 @@ def config_from_args(a) -> Config:
     cfg = Config()
     overrides = {}
     for name in ("confidence", "imgsz", "infer_fps", "max_size", "range_scale",
-                 "catch_mode", "target_mode", "home_favorite"):
+                 "catch_mode", "target_mode", "home_favorite",
+                 "discord_heartbeat"):
         v = getattr(a, name, None)
         if v is not None:
             overrides[name] = v
